@@ -104,12 +104,14 @@
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.module_cmds.
 :- import_module parse_tree.prog_data_foreign.
+:- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_util.
 
 :- import_module assoc_list.
 :- import_module bool.
 :- import_module cord.
 :- import_module int.
+:- import_module io.file.
 :- import_module library.
 :- import_module list.
 :- import_module map.
@@ -117,13 +119,12 @@
 :- import_module pair.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
 get_foreign_export_decls(ModuleInfo, ForeignExportDecls) :-
-    module_info_get_predicate_table(ModuleInfo, PredicateTable),
-    predicate_table_get_preds(PredicateTable, Preds),
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
 
     module_info_get_foreign_decl_codes_user(ModuleInfo,
         ForeignDeclCodeUserCord),
@@ -133,23 +134,23 @@ get_foreign_export_decls(ModuleInfo, ForeignExportDecls) :-
         cord.list(ForeignDeclCodeUserCord ++ ForeignDeclCodeAuxCord),
 
     module_info_get_pragma_exported_procs(ModuleInfo, ExportedProcsCord),
-    get_foreign_export_decls_loop(ModuleInfo, Preds,
+    get_foreign_export_decls_loop(ModuleInfo, PredIdTable,
         cord.list(ExportedProcsCord), ExportDecls),
 
     ForeignExportDecls = foreign_export_decls(ForeignDeclCodes, ExportDecls).
 
-:- pred get_foreign_export_decls_loop(module_info::in, pred_table::in,
+:- pred get_foreign_export_decls_loop(module_info::in, pred_id_table::in,
     list(pragma_exported_proc)::in, list(foreign_export_decl)::out) is det.
 
 get_foreign_export_decls_loop(_, _, [], []).
-get_foreign_export_decls_loop(ModuleInfo, Preds,
+get_foreign_export_decls_loop(ModuleInfo, PredIdTable,
         [HeadExportedProc | TailExportedProcs],
         [HeadExportDecl | TailExportDecls]) :-
     HeadExportedProc = pragma_exported_proc(Lang, PredId, ProcId, ExportName,
         _Context),
     (
         Lang = lang_c,
-        get_export_info_for_lang_c(ModuleInfo, Preds, PredId, ProcId,
+        get_export_info_for_lang_c(ModuleInfo, PredIdTable, PredId, ProcId,
             _HowToDeclare, RetType, _DeclareReturnVal, _FailureAction,
             _SuccessAction, HeadArgInfoTypes),
         get_argument_declarations_for_lang_c(ModuleInfo, no, HeadArgInfoTypes,
@@ -161,7 +162,7 @@ get_foreign_export_decls_loop(ModuleInfo, Preds,
         sorry($pred,  ":- pragma foreign_export for non-C backends.")
     ),
     HeadExportDecl = foreign_export_decl(Lang, RetType, ExportName, ArgDecls),
-    get_foreign_export_decls_loop(ModuleInfo, Preds,
+    get_foreign_export_decls_loop(ModuleInfo, PredIdTable,
         TailExportedProcs, TailExportDecls).
 
 %-----------------------------------------------------------------------------%
@@ -169,18 +170,18 @@ get_foreign_export_decls_loop(ModuleInfo, Preds,
 get_foreign_export_defns(ModuleInfo, ExportedProcsCode) :-
     module_info_get_pragma_exported_procs(ModuleInfo, ExportedProcsCord),
     module_info_get_predicate_table(ModuleInfo, PredicateTable),
-    predicate_table_get_preds(PredicateTable, Preds),
-    export_procs_to_c(ModuleInfo, Preds,
+    predicate_table_get_pred_id_table(PredicateTable, PredIdTable),
+    export_procs_to_c(ModuleInfo, PredIdTable,
         cord.list(ExportedProcsCord), ExportedProcsCode).
 
-:- pred export_procs_to_c(module_info::in, pred_table::in,
+:- pred export_procs_to_c(module_info::in, pred_id_table::in,
     list(pragma_exported_proc)::in, list(foreign_export_defn)::out) is det.
 
-export_procs_to_c(_ModuleInfo, _Preds, [], []).
-export_procs_to_c(ModuleInfo, Preds,
+export_procs_to_c(_ModuleInfo, _PredIdTable, [], []).
+export_procs_to_c(ModuleInfo, PredIdTable,
         [ExportedProc | ExportedProcs], [ExportDefn | ExportDefns]) :-
-    export_proc_to_c(ModuleInfo, Preds, ExportedProc, ExportDefn),
-    export_procs_to_c(ModuleInfo, Preds, ExportedProcs, ExportDefns).
+    export_proc_to_c(ModuleInfo, PredIdTable, ExportedProc, ExportDefn),
+    export_procs_to_c(ModuleInfo, PredIdTable, ExportedProcs, ExportDefns).
 
     % For each exported procedure, produce a C function.
     % The code we generate is in the form
@@ -285,14 +286,14 @@ export_procs_to_c(ModuleInfo, Preds,
     % #endif
     % }
     %
-:- pred export_proc_to_c(module_info::in, pred_table::in,
+:- pred export_proc_to_c(module_info::in, pred_id_table::in,
     pragma_exported_proc::in, foreign_export_defn::out) is det.
 
-export_proc_to_c(ModuleInfo, Preds, ExportedProc, ExportDefn) :-
+export_proc_to_c(ModuleInfo, PredIdTable, ExportedProc, ExportDefn) :-
     ExportedProc = pragma_exported_proc(Lang, PredId, ProcId, CFunction,
         _Context),
     expect(unify(Lang, lang_c), $pred, "foreign language other than C"),
-    get_export_info_for_lang_c(ModuleInfo, Preds, PredId, ProcId,
+    get_export_info_for_lang_c(ModuleInfo, PredIdTable, PredId, ProcId,
         DeclareString, CRetType, MaybeDeclareRetval, MaybeFail, MaybeSucceed,
         ArgInfoTypes),
     get_argument_declarations_for_lang_c(ModuleInfo, yes, ArgInfoTypes,
@@ -359,9 +360,9 @@ export_proc_to_c(ModuleInfo, Preds, ExportedProc, ExportDefn) :-
         Code),
     ExportDefn = foreign_export_defn(Code).
 
-    % get_export_info_for_lang_c(Preds, PredId, ProcId, Globals,
-    %   DeclareString, CRetType,
-    %   MaybeDeclareRetval, MaybeFail, MaybeSuccess, ArgInfoTypes):
+    % get_export_info_for_lang_c(ModuleInfo, PredIdTable, PredId, ProcId,
+    %   HowToDeclareLabel, CRetType, MaybeDeclareRetval,
+    %   MaybeFail, MaybeSuccess, ArgInfoTypes):
     %
     % For a given procedure, figure out the information about that procedure
     % that is needed to export it:
@@ -371,14 +372,14 @@ export_proc_to_c(ModuleInfo, Preds, ExportedProc, ExportDefn) :-
     % - the actions on success and failure; and
     % - the argument locations/modes/types.
     %
-:- pred get_export_info_for_lang_c(module_info::in, pred_table::in,
+:- pred get_export_info_for_lang_c(module_info::in, pred_id_table::in,
     pred_id::in, proc_id::in, string::out, string::out, string::out,
     string::out, string::out, assoc_list(arg_info, mer_type)::out) is det.
 
-get_export_info_for_lang_c(ModuleInfo, Preds, PredId, ProcId,
-        HowToDeclareLabel, CRetType, MaybeDeclareRetval, MaybeFail,
-        MaybeSucceed, ArgInfoTypes) :-
-    map.lookup(Preds, PredId, PredInfo),
+get_export_info_for_lang_c(ModuleInfo, PredIdTable, PredId, ProcId,
+        HowToDeclareLabel, CRetType, MaybeDeclareRetval,
+        MaybeFail, MaybeSucceed, ArgInfoTypes) :-
+    map.lookup(PredIdTable, PredId, PredInfo),
     pred_info_get_status(PredInfo, Status),
     ( if
         (
@@ -402,8 +403,8 @@ get_export_info_for_lang_c(ModuleInfo, Preds, PredId, ProcId,
         ArgInfos = ArgInfos0
     ;
         MaybeArgInfos = no,
-        generate_proc_arg_info(Markers, ArgTypes, ModuleInfo, ProcInfo,
-            NewProcInfo),
+        generate_proc_arg_info(ModuleInfo, Markers, ArgTypes,
+            ProcInfo, NewProcInfo),
         proc_info_arg_info(NewProcInfo, ArgInfos)
     ),
     CodeModel = proc_info_interface_code_model(ProcInfo),
@@ -735,7 +736,7 @@ produce_header_file(ModuleInfo, ForeignExportDecls, ModuleName, !IO) :-
                 _Succeeded, !IO)
         ;
             Errors = [_ | _],
-            io.remove_file(TmpFileName, _, !IO),
+            io.file.remove_file(TmpFileName, _, !IO),
             % report_error sets the exit status.
             get_error_output_stream(Globals, ModuleName, ErrorStream, !IO),
             list.foldl(report_error(ErrorStream), Errors, !IO)
@@ -802,8 +803,8 @@ output_foreign_literal_or_include(Stream, MaybeSetLineNumbers,
         Res, !IO) :-
     (
         LiteralOrInclude = floi_literal(Code),
-        term.context_file(Context, File),
-        term.context_line(Context, Line),
+        File = term_context.context_file(Context),
+        Line = term_context.context_line(Context),
         c_util.maybe_set_line_num(Stream, MaybeSetLineNumbers, File, Line,
             !IO),
         io.write_string(Stream, Code, !IO),
@@ -957,8 +958,8 @@ output_exported_c_enum(Stream, MaybeSetLineNumbers, MaybeThisFileName,
     list.foldl(foreign_const_name_and_tag(NameMapping),
         CtorRepns, cord.init, ForeignNamesAndTagsCord),
     ForeignNamesAndTags = cord.list(ForeignNamesAndTagsCord),
-    term.context_file(Context, File),
-    term.context_line(Context, Line),
+    File = term_context.context_file(Context),
+    Line = term_context.context_line(Context),
     c_util.maybe_set_line_num(Stream, MaybeSetLineNumbers, File, Line, !IO),
     output_exported_enum_constname_tags(Stream, ForeignNamesAndTags, !IO),
     c_util.maybe_reset_line_num(Stream, MaybeSetLineNumbers,

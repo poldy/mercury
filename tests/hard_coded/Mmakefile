@@ -59,6 +59,7 @@ ORDINARY_PROGS = \
 	change_hunk_test \
 	char_not_surrogate \
 	char_signed \
+	char_uint_conv \
 	char_unicode \
 	checked_nondet_tailcall \
 	checked_nondet_tailcall_noinline \
@@ -100,6 +101,7 @@ ORDINARY_PROGS = \
 	dense_lookup_switch_non \
 	dense_lookup_switch_non2 \
 	det_in_semidet_cntxt \
+	digraph_tc \
 	dir_fold \
 	direct_arg_partial_inst \
 	direct_arg_partial_inst2 \
@@ -137,6 +139,7 @@ ORDINARY_PROGS = \
 	field_syntax \
 	finalise_decl \
 	finalize_to_bitmap \
+	flatten_disjunctions \
 	float_conv \
 	float_field \
 	float_ground_term \
@@ -144,6 +147,7 @@ ORDINARY_PROGS = \
 	float_reg \
 	float_rounding_bug \
 	fold_days \
+	fold_tests \
 	follow_code_bug \
 	follow_code_bug_2 \
 	foreign_and_mercury \
@@ -218,6 +222,7 @@ ORDINARY_PROGS = \
 	int_fold_up_down \
 	int_impl_imports \
 	int_range_ops \
+	int_uenum \
 	integer_int16_conv \
 	integer_int32_conv \
 	integer_int64_conv \
@@ -290,6 +295,7 @@ ORDINARY_PROGS = \
 	only_failing_goal_is_tail_rec \
 	opt_dup_bug \
 	opt_format \
+	opt_format_sign_extend \
 	pack_args \
 	pack_args_copy \
 	pack_args_float \
@@ -306,6 +312,7 @@ ORDINARY_PROGS = \
 	pragma_export \
 	pragma_foreign_export \
 	pragma_inline \
+	pretty_printer_stress_test \
 	pretty_printing \
 	prince_frameopt \
 	print_bigint \
@@ -327,8 +334,7 @@ ORDINARY_PROGS = \
 	quantifier \
 	quantifier2 \
 	quoting_bug_test \
-	random_permutation \
-	random_simple \
+	ra_list_test \
 	rational_test \
 	read_binary_int16 \
 	read_binary_int32 \
@@ -386,6 +392,7 @@ ORDINARY_PROGS = \
 	string_codepoint_offset_ilseq \
 	string_compare_substrings \
 	string_contains_char \
+	string_contains_match \
 	string_count_codepoints_ilseq \
 	string_first_char \
 	string_fold_ilseq \
@@ -429,9 +436,11 @@ ORDINARY_PROGS = \
 	term_to_univ_test \
 	test234_sorted_insert \
 	test_bag \
+	test_bitsets \
 	test_char_digits \
 	test_cord \
 	test_cord2 \
+	test_cord3 \
 	test_imported_no_tag \
 	test_infinity \
 	test_int_hash \
@@ -442,7 +451,6 @@ ORDINARY_PROGS = \
 	test_pretty_printer \
 	test_pretty_printer_defaults \
 	test_semaphore \
-	test_tree_bitset \
 	test_yield \
 	thread_commit \
 	thread_sbrk \
@@ -509,6 +517,7 @@ ORDINARY_PROGS = \
 	write_binary_int8 \
 	write_binary_multibyte_int \
 	write_binary_uint8 \
+	write_binary_utf8 \
 	write_float_special \
 	write_reg1 \
 	write_reg2 \
@@ -763,12 +772,6 @@ ifeq "$(findstring profdeep,$(GRADE))" ""
 	endif
 	NON_PROFDEEP_PROGS = \
 		$(NON_PROFDEEP_PROGS_2) \
-		array_fetch_items \
-		array_fill \
-		array_resize \
-		array_shrink \
-		array_swap \
-		array2d_from_array \
 		allow_stubs \
 		arith_int16 \
 		arith_int32 \
@@ -778,10 +781,17 @@ ifeq "$(findstring profdeep,$(GRADE))" ""
 		arith_uint32 \
 		arith_uint64 \
 		arith_uint8 \
+		array2d_from_array \
+		array_fetch_items \
+		array_fill \
+		array_resize \
+		array_shrink \
+		array_swap \
 		bit_access_uint16 \
 		bit_access_uint32 \
 		bit_access_uint64 \
 		bit_access_uint8 \
+		bit_buffer_test \
 		bitmap_bytes \
 		bitmap_empty \
 		bitmap_test \
@@ -790,11 +800,11 @@ ifeq "$(findstring profdeep,$(GRADE))" ""
 		bitwise_int32 \
 		bitwise_int64 \
 		bitwise_int8 \
+		bitwise_uint \
 		bitwise_uint16 \
 		bitwise_uint32 \
 		bitwise_uint64 \
 		bitwise_uint8 \
-		bit_buffer_test \
 		char_to_string \
 		cmp_int16 \
 		cmp_int32 \
@@ -806,9 +816,10 @@ ifeq "$(findstring profdeep,$(GRADE))" ""
 		cmp_uint8 \
 		dir_test \
 		final_excp \
+		func_exp \
 		ho_array_ops \
-		int8_static_data \
 		init_excp \
+		int8_static_data \
 		intermod_try_goal \
 		io_globals_deadlock \
 		map_merge_test \
@@ -832,7 +843,6 @@ ifeq "$(findstring profdeep,$(GRADE))" ""
 		try_syntax_6 \
 		try_syntax_7 \
 		uint_arith \
-		uint_bitwise \
 		user_defined_equality \
 		version_array_test \
 		version_hash_table_delete \
@@ -885,22 +895,12 @@ else
 	C_AND_GC_ONLY_PROGS =
 endif
 
-# Static linking doesn't work on Solaris in debug grades
-# ('-ldl' doesn't work with static linking).
-#
-# Static linking (against the system libraries) doesn't
-# work on MacOS X because the static versions of the
-# libraries are not installed by default.
-#
-STATIC_LINK_PROGS =
-ifneq "$(findstring apple-darwin,$(FULLARCH))" "apple-darwin"
-  ifneq "$(findstring solaris,$(FULLARCH))" "solaris"
-	# The `parse' test also links with the debug libraries,
-	# so it only works in LLDS grades.
-	ifeq "$(filter hl% csharp% java%,$(GRADE))" ""
-		STATIC_LINK_PROGS = parse
-	endif
-  endif
+# The `parse' test links with the debug libraries,
+# so it only works in LLDS grades.
+ifeq "$(filter hl% csharp% java%,$(GRADE))$(findstring par,$(GRADE))" ""
+	DEBUG_PROGS = parse
+else
+	DEBUG_PROGS =
 endif
 
 # Concurrency tests are only supported in C grades with a "par" grade
@@ -937,7 +937,7 @@ PROGS = \
 	$(NON_PROFDEEP_PROGS) \
 	$(BACKEND_PROGS) \
 	$(C_AND_GC_ONLY_PROGS) \
-	$(STATIC_LINK_PROGS) \
+	$(DEBUG_PROGS) \
 	$(C_ONLY_PROGS) \
 	$(JAVA_PROGS) \
 	$(CSHARP_PROGS) \

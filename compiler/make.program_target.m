@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2002-2012 The University of Melbourne.
+% Copyright (C) 2013-2017, 2019-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -23,7 +24,7 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module io.
 :- import_module list.
@@ -49,6 +50,14 @@
     maybe_succeeded::out, make_info::in, make_info::out,
     list(error_spec)::in, list(error_spec)::out, io::di, io::uo) is det.
 
+    % install_library_grade(LinkSucceeded0, ModuleName, AllModules,
+    %   Globals, Grade, Succeeded, !Info, !IO)
+    %
+:- pred install_library_grade(maybe_succeeded::in,
+    module_name::in, list(module_name)::in,
+    globals::in, string::in, maybe_succeeded::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
@@ -63,6 +72,7 @@
 :- import_module libs.handle_options.
 :- import_module libs.options.
 :- import_module libs.process_util.
+:- import_module libs.shell_util.
 :- import_module libs.timestamp.
 :- import_module make.build.
 :- import_module make.dependencies.
@@ -73,10 +83,11 @@
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.module_cmds.
+:- import_module parse_tree.module_dep_info.
 :- import_module parse_tree.module_deps_graph.
-:- import_module parse_tree.module_imports.
 :- import_module parse_tree.prog_foreign.
 :- import_module parse_tree.prog_out.
+:- import_module parse_tree.write_error_spec.
 :- import_module transform_hlds.
 :- import_module transform_hlds.mmc_analysis.
 
@@ -85,6 +96,7 @@
 :- import_module dir.
 :- import_module getopt.
 :- import_module int.
+:- import_module io.file.
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
@@ -241,8 +253,8 @@ make_linked_target_2(Globals, LinkedTargetFile, Succeeded, !Info, !IO) :-
         then
             BuildDepsSucceeded = did_not_succeed
         else
-            foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing,
-                make_module_target, Globals, IntermediateTargetsNonnested,
+            foldl2_make_module_targets_maybe_parallel(KeepGoing,
+                [], Globals, IntermediateTargetsNonnested,
                 BuildDepsSucceeded0, !Info, !IO),
             (
                 BuildDepsSucceeded0 = succeeded,
@@ -255,16 +267,16 @@ make_linked_target_2(Globals, LinkedTargetFile, Succeeded, !Info, !IO) :-
                         % otherwise all the Java classes will be built again.
                         globals.set_option(rebuild, bool(no),
                             Globals, NoRebuildGlobals),
-                        foldl2_maybe_stop_at_error_maybe_parallel(
-                            KeepGoing, make_module_target, NoRebuildGlobals,
-                            ObjTargets, BuildDepsSucceeded1, !Info, !IO)
+                        foldl2_make_module_targets_maybe_parallel(KeepGoing,
+                            [], NoRebuildGlobals, ObjTargets,
+                            BuildDepsSucceeded1, !Info, !IO)
                     ;
                         BuildJavaSucceeded = did_not_succeed,
                         BuildDepsSucceeded1 = did_not_succeed
                     )
                 else
-                    foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing,
-                        make_module_target, Globals, ObjTargets,
+                    foldl2_make_module_targets_maybe_parallel(KeepGoing,
+                        [], Globals, ObjTargets,
                         BuildDepsSucceeded1, !Info, !IO)
                 )
             ;
@@ -273,7 +285,7 @@ make_linked_target_2(Globals, LinkedTargetFile, Succeeded, !Info, !IO) :-
             ),
             (
                 BuildDepsSucceeded1 = succeeded,
-                foldl2_maybe_stop_at_error(KeepGoing, make_module_target,
+                foldl2_make_module_targets(KeepGoing, [],
                     Globals, ForeignObjTargets, BuildDepsSucceeded,
                     !Info, !IO)
             ;
@@ -523,8 +535,12 @@ build_linked_target_2(Globals, MainModuleName, FileType, OutputFileName,
         (
             InitObjectResult1 = yes(InitObject),
             % We may need to update the timestamp of the `_init.o' file.
-            !Info ^ mki_file_timestamps :=
-                map.delete(!.Info ^ mki_file_timestamps, InitObject),
+            FileTimestamps0 = !.Info ^ mki_file_timestamps,
+            map.delete(InitObject, FileTimestamps0, FileTimestamps1),
+            !Info ^ mki_file_timestamps := FileTimestamps1,
+            % There is no module_target_type for the `_init.o' file,
+            % so mki_target_file_timestamps should not contain anything
+            % that needs to be invalidated.
             InitObjects = [InitObject],
             DepsResult2 = BuildDepsResult
         ;
@@ -574,7 +590,7 @@ build_linked_target_2(Globals, MainModuleName, FileType, OutputFileName,
         Succeeded = did_not_succeed
     ;
         DepsResult = deps_up_to_date,
-        MsgTarget = MainModuleName - linked_target(FileType),
+        MsgTarget = top_target_file(MainModuleName, linked_target(FileType)),
         globals.lookup_bool_option(NoLinkObjsGlobals, use_grade_subdirs,
             UseGradeSubdirs),
         (
@@ -645,14 +661,17 @@ build_linked_target_2(Globals, MainModuleName, FileType, OutputFileName,
                 Succeeded, !IO)
         ),
         CmdLineTargets0 = !.Info ^ mki_command_line_targets,
-        set.delete(MainModuleName - linked_target(FileType),
+        set.delete(top_target_file(MainModuleName, linked_target(FileType)),
             CmdLineTargets0, CmdLineTargets),
         !Info ^ mki_command_line_targets := CmdLineTargets,
         (
             Succeeded = succeeded,
-            FileTimestamps0 = !.Info ^ mki_file_timestamps,
-            map.delete(OutputFileName, FileTimestamps0, FileTimestamps),
+            FileTimestamps2 = !.Info ^ mki_file_timestamps,
+            map.delete(OutputFileName, FileTimestamps2, FileTimestamps),
             !Info ^ mki_file_timestamps := FileTimestamps
+            % There is no module_target_type for the linked target,
+            % so mki_target_file_timestamps should not contain anything
+            % that needs to be invalidated.
         ;
             Succeeded = did_not_succeed,
             file_error(!.Info, OutputFileName, !IO)
@@ -726,7 +745,9 @@ make_java_files(Globals, MainModuleName, ObjModules, Succeeded, !Info, !IO) :-
         Timestamps0 = !.Info ^ mki_file_timestamps,
         map.foldl(delete_java_class_timestamps, Timestamps0,
             map.init, Timestamps),
-        !Info ^ mki_file_timestamps := Timestamps
+        !Info ^ mki_file_timestamps := Timestamps,
+        % For simplicity, clear out all target file timestamps.
+        !Info ^ mki_target_file_timestamps := init_target_file_timestamps
     ).
 
 :- pred out_of_date_java_modules(globals::in, list(module_name)::in,
@@ -880,8 +901,8 @@ make_misc_target_builder(Globals, MainModuleName, TargetType, Succeeded,
                 Succeeded = did_not_succeed
             else
                 maybe_with_analysis_cache_dir_2(Globals,
-                    foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing,
-                        make_module_target, Globals,
+                    foldl2_make_module_targets_maybe_parallel(KeepGoing,
+                        [], Globals,
                         make_dependency_list(TargetModules, ModuleTargetType)),
                     Succeeded2, !Info, !IO),
                 Succeeded = Succeeded0 `and` Succeeded1 `and` Succeeded2
@@ -925,7 +946,7 @@ make_misc_target_builder(Globals, MainModuleName, TargetType, Succeeded,
         ( if Succeeded0 = did_not_succeed, KeepGoing = do_not_keep_going then
             Succeeded = did_not_succeed
         else
-            foldl2_maybe_stop_at_error(KeepGoing, make_module_target,
+            foldl2_make_module_targets(KeepGoing, [],
                 Globals,
                 make_dependency_list(TargetModules, module_target_xml_doc),
                 Succeeded1, !Info, !IO),
@@ -958,15 +979,28 @@ make_all_interface_files(Globals, AllModules0, Succeeded, !Info, !IO) :-
     % Private interfaces (.int0) need to be made before building long interface
     % files in parallel, otherwise two processes may try to build the same
     % private interface file.
-    foldl2_maybe_stop_at_error(KeepGoing,
-        foldl2_maybe_stop_at_error(KeepGoing, make_module_target),
-        Globals, [Int3s, Int0s], Succeeded0, !Info, !IO),
+    foldl2_make_module_targets_maybe_parallel(KeepGoing, [], Globals, Int3s,
+        Succeeded0, !Info, !IO),
     (
         Succeeded0 = succeeded,
-        foldl2_maybe_stop_at_error(KeepGoing,
-            foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing,
-                make_module_target),
-            Globals, [Int1s, Opts], Succeeded, !Info, !IO)
+        foldl2_make_module_targets(KeepGoing, [],
+            Globals, Int0s, Succeeded1, !Info, !IO),
+        (
+            Succeeded1 = succeeded,
+            foldl2_make_module_targets_maybe_parallel(KeepGoing, [],
+                Globals, Int1s, Succeeded2, !Info, !IO),
+            (
+                Succeeded2 = succeeded,
+                foldl2_make_module_targets_maybe_parallel(KeepGoing, [],
+                    Globals, Opts, Succeeded, !Info, !IO)
+            ;
+                Succeeded2 = did_not_succeed,
+                Succeeded = did_not_succeed
+            )
+        ;
+            Succeeded1 = did_not_succeed,
+            Succeeded = did_not_succeed
+        )
     ;
         Succeeded0 = did_not_succeed,
         Succeeded = did_not_succeed
@@ -1157,7 +1191,7 @@ choose_cache_dir_name(Globals, DirName, !IO) :-
 remove_cache_dir(Globals, CacheDir, !Info, !IO) :-
     verbose_make_msg_option(Globals, verbose_make,
         io.format("Removing %s\n", [s(CacheDir)]), !IO),
-    io.remove_file_recursively(CacheDir, _, !IO).
+    io.file.remove_file_recursively(CacheDir, _, !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -1221,8 +1255,7 @@ build_analysis_files_1(Globals, MainModuleName, AllModules, Succeeded,
 build_analysis_files_2(Globals, MainModuleName, TargetModules,
         LocalModulesOpts, Succeeded0, Succeeded, !Info, !IO) :-
     KeepGoing = !.Info ^ mki_keep_going,
-    foldl2_maybe_stop_at_error(KeepGoing,
-        make_module_target_extra_options(LocalModulesOpts), Globals,
+    foldl2_make_module_targets(KeepGoing, LocalModulesOpts, Globals,
         make_dependency_list(TargetModules, module_target_analysis_registry),
         Succeeded1, !Info, !IO),
     % Maybe we should have an option to reanalyse cliques before moving
@@ -1456,9 +1489,8 @@ install_library(Globals, MainModuleName, Succeeded, !Info, !IO) :-
             % XXX With Mmake, LIBGRADES is target-specific.
             globals.lookup_accumulating_option(Globals, libgrades, LibGrades0),
             LibGrades = list.delete_all(LibGrades0, Grade),
-            foldl2_maybe_stop_at_error(KeepGoing,
-                install_library_grade(LinkSucceeded,
-                    MainModuleName, AllModules),
+            foldl2_install_library_grades(KeepGoing,
+                LinkSucceeded, MainModuleName, AllModules,
                 Globals, LibGrades, Succeeded, !Info, !IO)
         else
             Succeeded = did_not_succeed
@@ -1557,11 +1589,6 @@ install_extra_header(Globals, IncDir, FileName, !Succeeded, !IO) :-
     install_file(Globals, FileName, IncDir, InstallSucceeded, !IO),
     !:Succeeded = !.Succeeded `and` InstallSucceeded.
 
-:- pred install_library_grade(maybe_succeeded::in,
-    module_name::in, list(module_name)::in,
-    globals::in, string::in, maybe_succeeded::out,
-    make_info::in, make_info::out, io::di, io::uo) is det.
-
 install_library_grade(LinkSucceeded0, ModuleName, AllModules, Globals, Grade,
         Succeeded, !Info, !IO) :-
     % Only remove grade-dependent files after installing if
@@ -1584,7 +1611,9 @@ install_library_grade(LinkSucceeded0, ModuleName, AllModules, Globals, Grade,
         MaybeMCFlags = ok1(MCFlags),
         DetectedGradeFlags = !.Info ^ mki_detected_grade_flags,
         AllFlags = DetectedGradeFlags ++ MCFlags ++ OptionArgs,
-        handle_given_options(AllFlags, _, _, OptionsSpecs, LibGlobals, !IO)
+        io.output_stream(CurStream, !IO),
+        handle_given_options(CurStream, AllFlags, _, _, OptionsSpecs,
+            LibGlobals, !IO)
     ;
         MaybeMCFlags = error1(LookupSpecs),
         write_error_specs(Globals, LookupSpecs, !IO),
@@ -2004,9 +2033,9 @@ generate_archive_index(Globals, FileName, InstallDir, Succeeded, !IO) :-
     globals.lookup_string_option(Globals, ranlib_flags, RanLibFlags),
     % XXX What is the point of using more than one space?
     Command = string.join_list("    ", [
-        quote_arg(RanLibCommand),
+        quote_shell_cmd_arg(RanLibCommand),
         RanLibFlags,
-        quote_arg(InstallDir / FileName)
+        quote_shell_cmd_arg(InstallDir / FileName)
     ]),
     invoke_system_command(Globals, ProgressStream, ErrorStream, OutputStream,
         cmd_verbose, Command, Succeeded, !IO).

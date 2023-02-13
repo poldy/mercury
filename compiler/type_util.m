@@ -31,13 +31,13 @@
 :- import_module hlds.hlds_cons.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_module.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 :- import_module set.
@@ -101,7 +101,7 @@
 :- pred type_definitely_has_no_user_defined_equality_pred(module_info::in,
     mer_type::in) is semidet.
 
-:- pred var_is_or_may_contain_solver_type(module_info::in, vartypes::in,
+:- pred var_is_or_may_contain_solver_type(module_info::in, var_table::in,
     prog_var::in) is semidet.
 
     % Succeed iff the principal type constructor for the given type is
@@ -138,10 +138,6 @@
     %
 :- pred type_is_existq_type(module_info::in, mer_type::in) is semidet.
 
-:- type is_dummy_type
-    --->    is_dummy_type
-    ;       is_not_dummy_type.
-
     % Certain types are just dummy types used to ensure logical semantics
     % or to act as a placeholder; they contain no information, and thus
     % there is no need to actually pass them around, so we don't. Also,
@@ -160,6 +156,11 @@
     % pragma, or if it has a reserved tag or user defined equality.
     %
     % A subtype is only a dummy type if its base type is a dummy type.
+    %
+    % This function returns valid data only when invoked after the pass
+    % that fills in the type representation field in every entry in the
+    % type table. Until then, the return value will be correct only
+    % by accident.
     %
     % NOTE: changes here may require changes to
     % `non_sub_du_constructor_list_represents_dummy_type'.
@@ -360,7 +361,7 @@
 
     % Succeed iff the given variable is of region_type.
     %
-:- pred is_region_var(vartypes::in, prog_var::in) is semidet.
+:- pred is_region_var(var_table::in, prog_var::in) is semidet.
 
 %-----------------------------------------------------------------------------%
 
@@ -370,15 +371,15 @@
     % order of variables within each group being the same as in the
     % original list).
     %
-:- func put_typeinfo_vars_first(list(prog_var), vartypes) = list(prog_var).
+:- func put_typeinfo_vars_first(var_table, list(prog_var)) = list(prog_var).
 
     % Given a list of variables, remove all the type_info-related
     % variables.
     %
-:- func remove_typeinfo_vars(vartypes, list(prog_var)) = list(prog_var).
-:- func remove_typeinfo_vars_from_set(vartypes, set(prog_var))
+:- func remove_typeinfo_vars(var_table, list(prog_var)) = list(prog_var).
+:- func remove_typeinfo_vars_from_set(var_table, set(prog_var))
     = set(prog_var).
-:- func remove_typeinfo_vars_from_set_of_var(vartypes, set_of_progvar)
+:- func remove_typeinfo_vars_from_set_of_var(var_table, set_of_progvar)
     = set_of_progvar.
 
 %-----------------------------------------------------------------------------%
@@ -461,7 +462,7 @@
 :- import_module maybe.
 :- import_module one_or_more.
 :- import_module require.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -670,8 +671,8 @@ ctor_definitely_has_no_user_defined_eq_pred(ModuleInfo, Ctor, !SeenTypes) :-
     list.foldl(type_definitely_has_no_user_defined_eq_pred_2(ModuleInfo),
         ArgTypes, !SeenTypes).
 
-var_is_or_may_contain_solver_type(ModuleInfo, VarTypes, Var) :-
-    lookup_var_type(VarTypes, Var, VarType),
+var_is_or_may_contain_solver_type(ModuleInfo, VarTabke, Var) :-
+    lookup_var_type(VarTabke, Var, VarType),
     type_is_or_may_contain_solver_type(ModuleInfo, VarType).
 
 type_is_or_may_contain_solver_type(ModuleInfo, Type) :-
@@ -850,6 +851,9 @@ is_type_a_dummy_loop(TypeTable, Type, CoveredTypes) = IsDummy :-
             IsBuiltinDummy = is_builtin_dummy_type_ctor,
             IsDummy = is_dummy_type
         ;
+            IsBuiltinDummy = is_builtin_non_dummy_type_ctor,
+            IsDummy = is_not_dummy_type
+        ;
             IsBuiltinDummy = is_not_builtin_dummy_type_ctor,
             % This can fail for some builtin type constructors such as func,
             % pred, and tuple, none of which are dummy types.
@@ -860,30 +864,73 @@ is_type_a_dummy_loop(TypeTable, Type, CoveredTypes) = IsDummy :-
                     TypeBodyDu = type_body_du(_, _, _, MaybeTypeRepn, _),
                     (
                         MaybeTypeRepn = no,
-                        unexpected($pred, "MaybeTypeRepn = no")
-                    ;
-                        MaybeTypeRepn = yes(TypeRepn)
-                    ),
-                    DuTypeKind = TypeRepn ^ dur_kind,
-                    (
-                        DuTypeKind = du_type_kind_direct_dummy,
+                        % Code setting up var_table entries invokes
+                        % our caller, is_type_a_dummy, to decide whether
+                        % the type is a dummy. Some of that code is invoked
+                        % *before* the pass that decides each type's
+                        % representation has been run. This is why,
+                        % when invoked at such times, we cannot just
+                        % throw an exception here.
+                        %
+                        % There are two cases: either (a) our caller calls us
+                        % to fill in the vte_is_dummy field, or (b) it calls us
+                        % for some other purpose.
+                        %
+                        % Case (a) is ok, because
+                        %
+                        % - no part of the compiler pays attention to
+                        %   the vte_is_dummy field until *after* the
+                        %   post-typecheck pass, and
+                        %
+                        % - the post-typecheck pass, which is run after
+                        %   type representations have been decided, replaces
+                        %   all the old, possibly-inaccurate values in all
+                        %   those fields in all predicates' var_tables
+                        %   with accurate values.
+                        %
+                        % Case (b) is ok because until (a) became a concern,
+                        % this arm of the switch contained code to throw
+                        % an exception, but that code has (to the best of
+                        % my knowledge) never been executed.
+                        %
+                        % The value we return here won't be looked at,
+                        % so in one sense, what we return does not matter.
+                        % We return is_dummy_type because if, due to a bug,
+                        % some compiler pass *does* pay attention to the
+                        % returned value, returning is_dummy_type is
+                        % much less likely to lead to *silent* error.
+                        %
+                        % XXX We could get extra insurance by looking up
+                        % a flag (stored either in a flag in the module_info,
+                        % or in a mutable) that says whether type
+                        % representations *should* have been filled in
+                        % by now, and throw an exception if we get here
+                        % even though the representation *should* have been
+                        % filled in.
                         IsDummy = is_dummy_type
                     ;
-                        ( DuTypeKind = du_type_kind_mercury_enum
-                        ; DuTypeKind = du_type_kind_foreign_enum(_)
-                        ; DuTypeKind = du_type_kind_general
-                        ),
-                        IsDummy = is_not_dummy_type
-                    ;
-                        DuTypeKind = du_type_kind_notag(_, SingleArgTypeInDefn,
-                            _),
-                        get_type_defn_tparams(TypeDefn, TypeParams),
-                        map.from_corresponding_lists(TypeParams, ArgTypes,
-                            Subst),
-                        apply_subst_to_type(Subst, SingleArgTypeInDefn,
-                            SingleArgType),
-                        IsDummy = is_type_a_dummy_loop(TypeTable,
-                            SingleArgType, [Type | CoveredTypes])
+                        MaybeTypeRepn = yes(TypeRepn),
+                        DuTypeKind = TypeRepn ^ dur_kind,
+                        (
+                            DuTypeKind = du_type_kind_direct_dummy,
+                            IsDummy = is_dummy_type
+                        ;
+                            ( DuTypeKind = du_type_kind_mercury_enum
+                            ; DuTypeKind = du_type_kind_foreign_enum(_)
+                            ; DuTypeKind = du_type_kind_general
+                            ),
+                            IsDummy = is_not_dummy_type
+                        ;
+                            DuTypeKind = du_type_kind_notag(_,
+                                SingleArgTypeInDefn, _),
+                            get_type_defn_tparams(TypeDefn, TypeParams),
+                            map.from_corresponding_lists(TypeParams, ArgTypes,
+                                Subst),
+                            apply_subst_to_type(Subst, SingleArgTypeInDefn,
+                                SingleArgType),
+                            IsDummy = is_type_a_dummy_loop(TypeTable,
+                                SingleArgType, [Type | CoveredTypes])
+                        )
                     )
                 ;
                     TypeBody = hlds_abstract_type(AbstractDetails),
@@ -1325,7 +1372,7 @@ type_constructors(ModuleInfo, Type, Constructors) :-
     ( if type_ctor_is_tuple(TypeCtor) then
         % Tuples are never existentially typed.
         MaybeExistConstraints = no_exist_constraints,
-        Context = term.context_init,
+        Context = dummy_context,
         CtorArgs = list.map(
             (func(ArgType) = ctor_arg(no, ArgType, Context)),
             TypeArgs),
@@ -1342,8 +1389,9 @@ type_constructors(ModuleInfo, Type, Constructors) :-
             Constructors)
     ).
 
-    % Substitute the actual values of the type parameters in list of
-    % constructors, for a particular instance of a polymorphic type.
+    % Substitute the actual values of the type parameters (for a
+    % particular instance of a polymorphic type) in the given list
+    % of constructors.
     %
 :- pred substitute_type_args(list(type_param)::in, list(mer_type)::in,
     list(constructor)::in, list(constructor)::out) is det.
@@ -1366,8 +1414,8 @@ substitute_type_args_ctors(Subst, [Ctor0 | Ctors0], [Ctor | Ctors]) :-
     % Note: the parser ensures that the existentially quantified variables,
     % if any, are distinct from the parameters, and that the (existential)
     % constraints can only contain existentially quantified variables,
-    % so there's no need to worry about applying the substitution to ExistQVars
-    % or Constraints.
+    % so there is no need to worry about applying the substitution
+    % to ExistQVars or Constraints.
     Ctor0 = ctor(Ordinal, MaybeExistConstraints, Name, Args0, Arity, Ctxt),
     substitute_type_args_ctor_args(Subst, Args0, Args),
     Ctor = ctor(Ordinal, MaybeExistConstraints, Name, Args, Arity, Ctxt),
@@ -1443,7 +1491,7 @@ get_cons_id_arg_types_2(EQVarAction, ModuleInfo, VarType, ConsId, ArgTypes) :-
     ( if type_to_ctor_and_args(VarType, TypeCtor, TypeArgs) then
         ( if
             % The argument types of a tuple cons_id are the arguments
-            % of the tuple type.
+            % of the tuple type constructor.
             type_ctor_is_tuple(TypeCtor)
         then
             ArgTypes = TypeArgs
@@ -1640,45 +1688,46 @@ type_not_stored_in_region(Type, ModuleInfo) :-
     ; type_is_var(Type)
     ).
 
-is_region_var(VarTypes, Var)  :-
-    lookup_var_type(VarTypes, Var, Type),
-    Type = region_type.
+is_region_var(VarTable, Var)  :-
+    lookup_var_entry(VarTable, Var, Entry),
+    Entry ^ vte_type = region_type.
 
 %-----------------------------------------------------------------------------%
 
-put_typeinfo_vars_first(VarsList, VarTypes) =
-        TypeInfoVarsList ++ NonTypeInfoVarsList :-
-    split_vars_typeinfo_no_typeinfo(VarsList, VarTypes,
-        TypeInfoVarsList, NonTypeInfoVarsList).
+put_typeinfo_vars_first(VarTable, Vars0) = Vars :-
+    split_vars_typeinfo_no_typeinfo(VarTable, Vars0,
+        TypeInfoVars, NonTypeInfoVars),
+    Vars = TypeInfoVars ++ NonTypeInfoVars.
 
-remove_typeinfo_vars(VarTypes, VarsList) = NonTypeInfoVarsList :-
-    list.negated_filter(var_is_introduced_type_info_type(VarTypes),
-        VarsList, NonTypeInfoVarsList).
+remove_typeinfo_vars(VarTable, Vars) = NonTypeInfoVars :-
+    list.negated_filter(var_is_introduced_type_info_type(VarTable),
+        Vars, NonTypeInfoVars).
 
-remove_typeinfo_vars_from_set(VarTypes, VarsSet0) = VarsSet :-
+remove_typeinfo_vars_from_set(VarTable, VarsSet0) = VarsSet :-
     VarsList0 = set.to_sorted_list(VarsSet0),
-    VarsList = remove_typeinfo_vars(VarTypes, VarsList0),
+    VarsList = remove_typeinfo_vars(VarTable, VarsList0),
     VarsSet = set.sorted_list_to_set(VarsList).
 
-remove_typeinfo_vars_from_set_of_var(VarTypes, VarsSet0) = VarsSet :-
+remove_typeinfo_vars_from_set_of_var(VarTable, VarsSet0) = VarsSet :-
     % XXX could be done more efficiently, operating directly on the set_of_var
     VarsList0 = set_of_var.to_sorted_list(VarsSet0),
-    VarsList = remove_typeinfo_vars(VarTypes, VarsList0),
+    VarsList = remove_typeinfo_vars(VarTable, VarsList0),
     VarsSet = set_of_var.sorted_list_to_set(VarsList).
 
-:- pred split_vars_typeinfo_no_typeinfo(list(prog_var)::in,
-    vartypes::in, list(prog_var)::out, list(prog_var)::out) is det.
+:- pred split_vars_typeinfo_no_typeinfo(var_table::in,
+    list(prog_var)::in, list(prog_var)::out, list(prog_var)::out) is det.
 
-split_vars_typeinfo_no_typeinfo(VarsList, VarTypes, TypeInfoVarsList,
-        NonTypeInfoVarsList) :-
-    list.filter(var_is_introduced_type_info_type(VarTypes),
-        VarsList, TypeInfoVarsList, NonTypeInfoVarsList).
+split_vars_typeinfo_no_typeinfo(VarTable, Vars,
+        TypeInfoVars, NonTypeInfoVars) :-
+    list.filter(var_is_introduced_type_info_type(VarTable),
+        Vars, TypeInfoVars, NonTypeInfoVars).
 
-:- pred var_is_introduced_type_info_type(vartypes::in, prog_var::in)
+:- pred var_is_introduced_type_info_type(var_table::in, prog_var::in)
     is semidet.
 
-var_is_introduced_type_info_type(VarTypes, Var) :-
-    lookup_var_type(VarTypes, Var, Type),
+var_is_introduced_type_info_type(VarTable, Var) :-
+    lookup_var_entry(VarTable, Var, Entry),
+    Type = Entry ^ vte_type,
     is_introduced_type_info_type(Type).
 
 %-----------------------------------------------------------------------------%

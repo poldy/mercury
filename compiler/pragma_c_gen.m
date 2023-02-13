@@ -41,7 +41,7 @@
 
 %---------------------------------------------------------------------------%
 
-:- pred generate_foreign_proc_code(code_model::in,
+:- pred generate_code_for_foreign_proc(code_model::in,
     pragma_foreign_proc_attributes::in, pred_id::in, proc_id::in,
     list(foreign_arg)::in, list(foreign_arg)::in,
     maybe(trace_expr(trace_runtime))::in, pragma_foreign_proc_impl::in,
@@ -72,7 +72,6 @@
 :- import_module hlds.hlds_llds.
 :- import_module hlds.hlds_module.
 :- import_module hlds.instmap.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
@@ -84,6 +83,7 @@
 :- import_module parse_tree.prog_foreign.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module cord.
@@ -91,7 +91,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 
@@ -310,7 +310,7 @@
 % The procedure prolog creates a nondet stack frame that includes space for
 % a struct that is saved across calls. Since the position of this struct in
 % the nondet stack frame is not known until the procedure prolog is created,
-% which is *after* the call to generate_foreign_proc_code, the prolog will
+% which is *after* the call to generate_code_for_foreign_proc, the prolog will
 % #define MR_ORDINARY_SLOTS as the number of ordinary slots in the nondet
 % frame. From the size of the fixed portion of the nondet stack frame, from
 % MR_ORDINARY_SLOTS and from the size of the save struct itself, one can
@@ -367,7 +367,7 @@
 
 %---------------------------------------------------------------------------%
 
-generate_foreign_proc_code(CodeModel, Attributes, PredId, ProcId,
+generate_code_for_foreign_proc(CodeModel, Attributes, PredId, ProcId,
         Args, ExtraArgs, MaybeTraceRuntimeCond, PragmaImpl, GoalInfo, Code,
         !CI, !CLD) :-
     PragmaImpl = fp_impl_ordinary(C_Code, Context),
@@ -546,14 +546,12 @@ generate_ordinary_foreign_proc_code(CodeModel, Attributes, PredId, ProcId,
         ThreadSafe = proc_not_thread_safe,
         module_info_pred_info(ModuleInfo, PredId, PredInfo),
         Name = pred_info_name(PredInfo),
-        MangledName = c_util.quote_string(Name),
-        ObtainLockStr = "\tMR_OBTAIN_GLOBAL_LOCK("""
-            ++ MangledName ++ """);\n",
+        MangledName = quote_string_c(Name),
+        ObtainLockStr = "\tMR_OBTAIN_GLOBAL_LOCK(" ++ MangledName ++ ");\n",
         ObtainLock = foreign_proc_raw_code(cannot_branch_away,
             proc_does_not_affect_liveness, live_lvals_info(set.init),
             ObtainLockStr),
-        ReleaseLockStr = "\tMR_RELEASE_GLOBAL_LOCK("""
-            ++ MangledName ++ """);\n",
+        ReleaseLockStr = "\tMR_RELEASE_GLOBAL_LOCK(" ++ MangledName ++ ");\n",
         ReleaseLock = foreign_proc_raw_code(cannot_branch_away,
             proc_does_not_affect_liveness, live_lvals_info(set.init),
             ReleaseLockStr)
@@ -759,7 +757,7 @@ make_alloc_id_hash_define(C_Code, MaybeContext,
             MaybeContext = yes(Context)
         ;
             MaybeContext = no,
-            Context = term.context_init
+            Context = dummy_context
         ),
         add_alloc_site_info(Context, "unknown", 0, AllocId, !CI),
         AllocIdHashDefine = [
@@ -995,9 +993,9 @@ make_foreign_proc_decl(CI, Code, !TIIn, !TIOut, Arg, Decls,
                     % For outputs, the value is given by Code. Before the
                     % transition to the new scheme, variable names following
                     % the new naming scheme should not appear in Code.
-                    % (Theoretically, they could, but none appear in *our* code,
-                    % and if they appear in anyone else's, they qualify as
-                    % implementors, which means they are on their own.)
+                    % (Theoretically, they could, but none appear in *our*
+                    % code, and if they appear in anyone else's, they qualify
+                    % as implementors, which means they are on their own.)
                     % So in this case, we assign the ArgName computed by Code
                     % to SeqArgName, so that a later version of the compiler
                     % could take the value of the corresponding HLDS variable
@@ -1006,9 +1004,10 @@ make_foreign_proc_decl(CI, Code, !TIIn, !TIOut, Arg, Decls,
                     % After Code has been updated to assign to SeqArgName,
                     % we assign it to ArgName, because the later version of
                     % the compiler mentioned above may not have arrived yet.
-                    % (For now, updated code will still have to mention ArgName,
-                    % probably in a comment, to avoid a singleton variable
-                    % warning from report_missing_tvar_in_foreign_code.)
+                    % (For now, updated code will still have to mention
+                    % ArgName, probably in a comment, to avoid a singleton
+                    % variable warning from
+                    % report_missing_tvar_in_foreign_code.)
                     ( if string.sub_string_search(Code, SeqArgName, _) then
                         % SeqArgName occurs in Code, so assign it to ArgName.
                         string.format("\t%s = %s;\n",
@@ -1131,9 +1130,9 @@ get_maybe_foreign_type_info(ModuleInfo, Type) = MaybeForeignTypeInfo :-
 is_comp_gen_type_info_arg(CI, Var, ArgName) :-
     % This predicate and ml_is_comp_gen_type_info_arg should be kept in sync.
     string.prefix(ArgName, "TypeInfo_for_"),
-    get_vartypes(CI, VarTypes),
-    lookup_var_type(VarTypes, Var, Type),
-    Type = defined_type(TypeCtorSymName, [], kind_star),
+    get_var_table(CI, VarTable),
+    lookup_var_entry(VarTable, Var, Entry),
+    Entry ^ vte_type = defined_type(TypeCtorSymName, [], kind_star),
     TypeCtorSymName = qualified(TypeCtorModuleName, TypeCtorName),
     TypeCtorModuleName = mercury_private_builtin_module,
     TypeCtorName = "type_info".

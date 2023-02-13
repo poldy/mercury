@@ -23,13 +23,13 @@
 %
 % There are four sorts of types:
 %
-% 1 discriminated unions:
+% 1 Discriminated union types, such as
 %   :- type tree(T) ---> nil ; t(tree(T), T, tree(T)).
 %
-% 2 equivalence types (treated identically, ie, same name. Any number of types
-%   can be equivalent; the *canonical* one is the one which is not defined
-%   using ==):
+% 2 Equivalence types, such as
 %   :- type real == float.
+%   Any number of types can be equivalent; the *canonical* one is the one
+%   which is not defined using "==".
 %
 %   Currently references to equivalence types are expanded in a separate pass
 %   by mercury_compile_front_end.m. It would be better to avoid expanding them
@@ -37,18 +37,19 @@
 %   types) because this would give better error messages. However, this is
 %   not a high priority.
 %
-% 3 higher-order predicate and function types
+% 3 Higher-order predicate and function types
 %   pred, pred(T), pred(T1, T2), pred(T1, T2, T3), ...
 %   func(T1) = T2, func(T1, T2) = T3, ...
 %
-% 4 builtin types
-%   character, int, float, string; These types have special syntax
-%   for constants. There may be other types (list(T), unit, univ, etc.)
-%   provided by the system, but they can just be part of the standard library.
+% 4 Builtin types, such as
+%   character, int, float, string.
+%   These types have special syntax for constants. There may be other types
+%   (list(T), unit, univ, etc.) provided by the system, but they can just be
+%   part of the standard library.
 %
 % Each exported predicate must have a `:- pred' declaration specifying the
 % types of the arguments for that predicate. For predicates that are
-% local to a module, we infer the types.
+% local to a module, we can infer the types.
 %
 %---------------------------------------------------------------------------%
 %
@@ -75,15 +76,16 @@
 :- import_module hlds.hlds_clauses.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
+:- import_module io.
 :- import_module list.
 
 :- type number_of_iterations
     --->    within_iteration_limit
     ;       exceeded_iteration_limit.
 
-    % typecheck_module(!ModuleInfo, Specs, FoundSyntaxError,
+    % typecheck_module(ProgressStream, !ModuleInfo, Specs, FoundSyntaxError,
     %   NumberOfIterations):
     %
     % Type checks ModuleInfo and annotates it with variable type information.
@@ -94,9 +96,9 @@
     % We set NumberOfIterations to `exceeded_iteration_limit'
     % iff the type inference iteration limit was reached.
     %
-:- pred typecheck_module(module_info::in, module_info::out,
-    list(error_spec)::out, maybe_clause_syntax_errors::out,
-    number_of_iterations::out) is det.
+:- pred typecheck_module(io.text_output_stream::in,
+    module_info::in, module_info::out, list(error_spec)::out,
+    maybe_clause_syntax_errors::out, number_of_iterations::out) is det.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -106,11 +108,15 @@
 :- import_module check_hlds.type_assign.
 :- import_module check_hlds.type_util.
 :- import_module check_hlds.typecheck_debug.
+:- import_module check_hlds.typecheck_error_overload.
+:- import_module check_hlds.typecheck_error_undef.
+:- import_module check_hlds.typecheck_error_util.
 :- import_module check_hlds.typecheck_errors.
 :- import_module check_hlds.typecheck_info.
 :- import_module check_hlds.typecheck_msgs.
 :- import_module check_hlds.typeclasses.
 :- import_module hlds.goal_util.
+:- import_module hlds.hlds_args.
 :- import_module hlds.hlds_class.
 :- import_module hlds.hlds_cons.
 :- import_module hlds.hlds_data.
@@ -121,10 +127,10 @@
 :- import_module hlds.instmap.
 :- import_module hlds.make_goal.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.special_pred.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
@@ -134,6 +140,7 @@
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.builtin_lib_types.
+:- import_module parse_tree.error_util.
 :- import_module parse_tree.file_names.         % undesirable dependency
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_event.
@@ -142,6 +149,9 @@
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_type_subst.
 :- import_module parse_tree.prog_util.
+:- import_module parse_tree.var_table.
+:- import_module parse_tree.vartypes.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -154,12 +164,13 @@
 :- import_module set.
 :- import_module set_tree234.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
+:- import_module term_subst.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
 
-typecheck_module(!ModuleInfo, Specs, FoundSyntaxError,
+typecheck_module(ProgressStream, !ModuleInfo, Specs, FoundSyntaxError,
         NumberOfIterations) :-
     module_info_get_globals(!.ModuleInfo, Globals),
     globals.lookup_int_option(Globals, type_inference_iteration_limit,
@@ -168,7 +179,7 @@ typecheck_module(!ModuleInfo, Specs, FoundSyntaxError,
     module_info_get_valid_pred_id_set(!.ModuleInfo, OrigValidPredIdSet),
     OrigValidPredIds = set_tree234.to_sorted_list(OrigValidPredIdSet),
 
-    typecheck_to_fixpoint(1, MaxIterations, !ModuleInfo,
+    typecheck_to_fixpoint(ProgressStream, 1, MaxIterations, !ModuleInfo,
         OrigValidPredIds, OrigValidPredIdSet, FinalValidPredIdSet,
         CheckSpecs, FoundSyntaxError, NumberOfIterations),
 
@@ -179,23 +190,24 @@ typecheck_module(!ModuleInfo, Specs, FoundSyntaxError,
     % Repeatedly typecheck the code for a group of predicates
     % until a fixpoint is reached, or until some errors are detected.
     %
-:- pred typecheck_to_fixpoint(int::in, int::in,
+:- pred typecheck_to_fixpoint(io.text_output_stream::in, int::in, int::in,
     module_info::in, module_info::out,
     list(pred_id)::in, set_tree234(pred_id)::in, set_tree234(pred_id)::out,
     list(error_spec)::out, maybe_clause_syntax_errors::out,
     number_of_iterations::out) is det.
 
-typecheck_to_fixpoint(Iteration, MaxIterations, !ModuleInfo,
+typecheck_to_fixpoint(ProgressStream, Iteration, MaxIterations, !ModuleInfo,
         OrigValidPredIds, OrigValidPredIdSet, FinalValidPredIdSet,
         Specs, FoundSyntaxError, NumberOfIterations) :-
-    module_info_get_preds(!.ModuleInfo, PredMap0),
-    map.to_assoc_list(PredMap0, PredIdsInfos0),
-    typecheck_module_one_iteration(!.ModuleInfo, OrigValidPredIdSet,
-        PredIdsInfos0, PredIdsInfos, [], NewlyInvalidPredIds,
-        [], CurSpecs, no_clause_syntax_errors, CurFoundSyntaxError,
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    map.to_assoc_list(PredIdTable0, PredIdsInfos0),
+    typecheck_module_one_iteration(ProgressStream, !.ModuleInfo,
+        OrigValidPredIdSet, PredIdsInfos0, [], RevPredIdsInfos,
+        [], NewlyInvalidPredIds, [], CurSpecs,
+        no_clause_syntax_errors, CurFoundSyntaxError,
         next_iteration_is_not_needed, NextIteration),
-    map.from_sorted_assoc_list(PredIdsInfos, PredMap),
-    module_info_set_preds(PredMap, !ModuleInfo),
+    map.from_rev_sorted_assoc_list(RevPredIdsInfos, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo),
 
     module_info_make_pred_ids_invalid(NewlyInvalidPredIds, !ModuleInfo),
     module_info_get_valid_pred_id_set(!.ModuleInfo, NewValidPredIdSet),
@@ -220,16 +232,16 @@ typecheck_to_fixpoint(Iteration, MaxIterations, !ModuleInfo,
                 module_info_get_name(!.ModuleInfo, ModuleName),
                 get_debug_output_stream(Globals, ModuleName, OutputStream,
                     !IO),
-                write_error_specs(OutputStream, Globals,
-                    ProgressSpecs, !IO)
+                write_error_specs(OutputStream, Globals, ProgressSpecs, !IO)
             )
         ;
             DebugTypes = no
         ),
         ( if Iteration < MaxIterations then
-            typecheck_to_fixpoint(Iteration + 1, MaxIterations, !ModuleInfo,
-                OrigValidPredIds, OrigValidPredIdSet, FinalValidPredIdSet,
-                Specs, FoundSyntaxError, NumberOfIterations)
+            typecheck_to_fixpoint(ProgressStream, Iteration + 1, MaxIterations,
+                !ModuleInfo, OrigValidPredIds,
+                OrigValidPredIdSet, FinalValidPredIdSet, Specs,
+                FoundSyntaxError, NumberOfIterations)
         else
             FinalValidPredIdSet = NewValidPredIdSet,
             Specs = [typecheck_report_max_iterations_exceeded(MaxIterations)],
@@ -246,21 +258,19 @@ typecheck_to_fixpoint(Iteration, MaxIterations, !ModuleInfo,
 
     % Iterate over the list of pred_ids in a module.
     %
-    % NOTE: Please update Mercury.options if this predicate is moved to another
-    % module. It must be compiled with --optimize-constructor-last-call.
-    %
-:- pred typecheck_module_one_iteration(module_info::in,
-    set_tree234(pred_id)::in,
+:- pred typecheck_module_one_iteration(io.text_output_stream::in,
+    module_info::in, set_tree234(pred_id)::in,
+    assoc_list(pred_id, pred_info)::in,
     assoc_list(pred_id, pred_info)::in, assoc_list(pred_id, pred_info)::out,
     list(pred_id)::in, list(pred_id)::out,
     list(error_spec)::in, list(error_spec)::out,
     maybe_clause_syntax_errors::in, maybe_clause_syntax_errors::out,
     next_iteration::in, next_iteration::out) is det.
 
-typecheck_module_one_iteration(_, _, [], [],
+typecheck_module_one_iteration(_, _, _, [], !RevPredIdsInfos,
         !NewlyInvalidPredIds, !Specs, !FoundSyntaxError, !NextIteration).
-typecheck_module_one_iteration(ModuleInfo, ValidPredIdSet,
-        [HeadPredIdInfo0 | TailPredIdsInfos0], PredIdInfos,
+typecheck_module_one_iteration(ProgressStream, ModuleInfo, ValidPredIdSet,
+        [HeadPredIdInfo0 | TailPredIdsInfos0], !RevPredIdsInfos,
         !NewlyInvalidPredIds, !Specs, !FoundSyntaxError, !NextIteration) :-
     HeadPredIdInfo0 = PredId - PredInfo0,
     ( if
@@ -270,15 +280,15 @@ typecheck_module_one_iteration(ModuleInfo, ValidPredIdSet,
             not set_tree234.contains(ValidPredIdSet, PredId)
         )
     then
-        HeadPredIdInfo = HeadPredIdInfo0,
-        typecheck_module_one_iteration(ModuleInfo, ValidPredIdSet,
-            TailPredIdsInfos0, TailPredIdsInfos, !NewlyInvalidPredIds,
-            !Specs, !FoundSyntaxError, !NextIteration),
-        PredIdInfos = [HeadPredIdInfo | TailPredIdsInfos] % lcmc
+        !:RevPredIdsInfos = [HeadPredIdInfo0 | !.RevPredIdsInfos],
+        typecheck_module_one_iteration(ProgressStream, ModuleInfo,
+            ValidPredIdSet, TailPredIdsInfos0, !RevPredIdsInfos,
+            !NewlyInvalidPredIds, !Specs, !FoundSyntaxError, !NextIteration)
     else
         % Potential parallelization site.
-        typecheck_pred_if_needed(ModuleInfo, PredId, PredInfo0, PredInfo,
-            PredSpecs, PredSyntaxError, ContainsErrors, PredNextIteration),
+        typecheck_pred_if_needed(ProgressStream, ModuleInfo, PredId,
+            PredInfo0, PredInfo, PredSpecs, PredSyntaxError, ContainsErrors,
+            PredNextIteration),
         (
             ContainsErrors = no
         ;
@@ -313,18 +323,18 @@ typecheck_module_one_iteration(ModuleInfo, ValidPredIdSet,
             PredNextIteration = next_iteration_is_needed,
             !:NextIteration = next_iteration_is_needed
         ),
-        typecheck_module_one_iteration(ModuleInfo, ValidPredIdSet,
-            TailPredIdsInfos0, TailPredIdsInfos, !NewlyInvalidPredIds,
-            !Specs, !FoundSyntaxError, !NextIteration),
-        PredIdInfos = [HeadPredIdInfo | TailPredIdsInfos] % lcmc
+        !:RevPredIdsInfos = [HeadPredIdInfo | !.RevPredIdsInfos],
+        typecheck_module_one_iteration(ProgressStream, ModuleInfo,
+            ValidPredIdSet, TailPredIdsInfos0, !RevPredIdsInfos,
+            !NewlyInvalidPredIds, !Specs, !FoundSyntaxError, !NextIteration)
     ).
 
-:- pred typecheck_pred_if_needed(module_info::in, pred_id::in,
-    pred_info::in, pred_info::out, list(error_spec)::out,
+:- pred typecheck_pred_if_needed(io.text_output_stream::in, module_info::in,
+    pred_id::in, pred_info::in, pred_info::out, list(error_spec)::out,
     maybe_clause_syntax_errors::out, bool::out, next_iteration::out) is det.
 
-typecheck_pred_if_needed(ModuleInfo, PredId, !PredInfo, !:Specs,
-        FoundSyntaxError, ContainsErrors, NextIteration) :-
+typecheck_pred_if_needed(ProgressStream, ModuleInfo, PredId, !PredInfo,
+        !:Specs, FoundSyntaxError, ContainsErrors, NextIteration) :-
     ( if is_pred_created_type_correct(ModuleInfo, !PredInfo) then
         !:Specs = [],
         FoundSyntaxError = no_clause_syntax_errors,
@@ -340,8 +350,8 @@ typecheck_pred_if_needed(ModuleInfo, PredId, !PredInfo, !:Specs,
                 NextIteration)
         ;
             MaybeNeedTypecheck = do_need_typecheck,
-            do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs,
-                NextIteration),
+            do_typecheck_pred(ProgressStream, ModuleInfo, PredId, !PredInfo,
+                !Specs, NextIteration),
             module_info_get_globals(ModuleInfo, Globals),
             ContainsErrors = contains_errors(Globals, !.Specs)
         )
@@ -355,11 +365,12 @@ is_pred_created_type_correct(ModuleInfo, !PredInfo) :-
         (
             % Most compiler-generated unify and compare predicates are created
             % already type-correct, so there is no need to typecheck them.
-            % The exceptions are predicates that call a user-defined equality
-            % or comparison predicate, and unify and compare predicates for
-            % existentially typed data types.
+            % The exceptions are unify and compare predicates that either
+            %
+            % - call a user-defined predicate, or
+            % - involve existentially quantified type variables.
             is_unify_index_or_compare_pred(!.PredInfo),
-            not special_pred_needs_typecheck(!.PredInfo, ModuleInfo)
+            not special_pred_needs_typecheck(ModuleInfo, !.PredInfo)
         ;
             % Most predicates for builtins are also created already
             % type-correct. The exceptions still need to have their stub
@@ -403,7 +414,9 @@ is_pred_created_type_correct(ModuleInfo, !PredInfo) :-
     %
     % The two tasks are done together because they are complementary:
     % the first handles only empty clause lists, the second handles
-    % only nonempty clause lists.
+    % only nonempty clause lists. Instead of two separate traversals,
+    % one to handle stubs and one to handle non-contiguous clauses,
+    % this predicate enables one traversal to do both tasks.
     %
 :- pred handle_stubs_and_non_contiguous_clauses(module_info::in, pred_id::in,
     pred_info::in, pred_info::out, maybe_clause_syntax_errors::in,
@@ -411,13 +424,13 @@ is_pred_created_type_correct(ModuleInfo, !PredInfo) :-
 
 handle_stubs_and_non_contiguous_clauses(ModuleInfo, PredId, !PredInfo,
         FoundSyntaxError, !:Specs, MaybeNeedTypecheck) :-
-    module_info_get_globals(ModuleInfo, Globals),
     pred_info_get_markers(!.PredInfo, Markers0),
     pred_info_get_clauses_info(!.PredInfo, ClausesInfo0),
     clauses_info_get_clauses_rep(ClausesInfo0, ClausesRep0, ItemNumbers0),
     clause_list_is_empty(ClausesRep0) = ClausesRep0IsEmpty,
     (
         ClausesRep0IsEmpty = yes,
+        module_info_get_globals(ModuleInfo, Globals),
         % There are no clauses, so there can be no clause non-contiguity
         % errors.
         ( if
@@ -426,12 +439,12 @@ handle_stubs_and_non_contiguous_clauses(ModuleInfo, PredId, !PredInfo,
         then
             !:Specs =
                 maybe_report_no_clauses_stub(ModuleInfo, PredId, !.PredInfo),
-            generate_stub_clause(ModuleInfo, PredId, !PredInfo)
+            generate_and_add_stub_clause(ModuleInfo, PredId, !PredInfo)
         else if
             check_marker(Markers0, marker_builtin_stub)
         then
             !:Specs = [],
-            generate_stub_clause(ModuleInfo, PredId, !PredInfo)
+            generate_and_add_stub_clause(ModuleInfo, PredId, !PredInfo)
         else
             !:Specs = []
         )
@@ -461,12 +474,17 @@ handle_stubs_and_non_contiguous_clauses(ModuleInfo, PredId, !PredInfo,
             pred_info_get_arg_types(!.PredInfo, _ArgTypeVarSet, _ExistQVars,
                 ArgTypes),
             vartypes_from_corresponding_lists(HeadVars, ArgTypes, VarTypes),
-            clauses_info_set_vartypes(VarTypes, ClausesInfo1, ClausesInfo),
+            clauses_info_get_varset(ClausesInfo1, VarSet),
+            corresponding_vars_types_to_var_table(ModuleInfo, VarSet,
+                HeadVars, ArgTypes, VarTable),
+            clauses_info_set_explicit_vartypes(VarTypes,
+                ClausesInfo1, ClausesInfo2),
+            clauses_info_set_var_table(VarTable, ClausesInfo2, ClausesInfo),
             pred_info_set_clauses_info(ClausesInfo, !PredInfo),
             % We also need to set the external_type_params field
             % to indicate that all the existentially quantified tvars
             % in the head of this pred are indeed bound by this predicate.
-            type_vars_list(ArgTypes, HeadVarsInclExistentials),
+            type_vars_in_types(ArgTypes, HeadVarsInclExistentials),
             pred_info_set_external_type_params(HeadVarsInclExistentials,
                 !PredInfo),
             ContainsErrors = no,
@@ -507,11 +525,12 @@ handle_stubs_and_non_contiguous_clauses(ModuleInfo, PredId, !PredInfo,
 
 %---------------------------------------------------------------------------%
 
-:- pred do_typecheck_pred(module_info::in, pred_id::in,
-    pred_info::in, pred_info::out,
+:- pred do_typecheck_pred(io.text_output_stream::in, module_info::in,
+    pred_id::in, pred_info::in, pred_info::out,
     list(error_spec)::in, list(error_spec)::out, next_iteration::out) is det.
 
-do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
+do_typecheck_pred(ProgressStream, ModuleInfo, PredId, !PredInfo,
+        !Specs, NextIteration) :-
     some [!Info, !TypeAssignSet, !ClausesInfo, !ExternalTypeParams] (
         pred_info_get_clauses_info(!.PredInfo, !:ClausesInfo),
         clauses_info_get_clauses_rep(!.ClausesInfo, ClausesRep0, ItemNumbers),
@@ -530,7 +549,7 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
             % declaration of `pred foo(T1, T2, ..., TN)' by make_hlds.m.
             Inferring = yes,
             trace [io(!IO)] (
-                write_pred_progress_message(ModuleInfo,
+                maybe_write_pred_progress_message(ProgressStream, ModuleInfo,
                     "Inferring type of", PredId, !IO)
             ),
             !:ExternalTypeParams = [],
@@ -538,10 +557,10 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
         else
             Inferring = no,
             trace [io(!IO)] (
-                write_pred_progress_message(ModuleInfo,
+                maybe_write_pred_progress_message(ProgressStream, ModuleInfo,
                     "Type-checking", PredId, !IO)
             ),
-            type_vars_list(ArgTypes0, !:ExternalTypeParams),
+            type_vars_in_types(ArgTypes0, !:ExternalTypeParams),
             pred_info_get_class_context(!.PredInfo, PredConstraints),
             constraint_list_get_tvars(PredConstraints ^ univ_constraints,
                 UnivTVars),
@@ -560,8 +579,9 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
         typecheck_info_init(ModuleInfo, PredId, !.PredInfo,
             ClauseVarSet, PredStatus, PredMarkers0, !.Specs, !:Info),
         get_clause_list_for_replacement(ClausesRep0, Clauses0),
-        typecheck_clause_list(HeadVars, ArgTypes0, Clauses0, Clauses,
+        typecheck_clause_list(HeadVars, ArgTypes0, Clauses0, [], RevClauses,
             !TypeAssignSet, !Info),
+        list.reverse(RevClauses, Clauses),
         typecheck_info_get_rhs_lambda(!.Info, MaybeRHSLambda),
         (
             MaybeRHSLambda = has_no_rhs_lambda
@@ -579,11 +599,14 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
         typecheck_check_for_unsatisfied_coercions(!.TypeAssignSet, !Info),
         type_assign_set_get_final_info(!.TypeAssignSet,
             !.ExternalTypeParams, ExistQVars0, ExplicitVarTypes0, TypeVarSet,
-            !:ExternalTypeParams, InferredVarTypes0, InferredTypeConstraints0,
+            !:ExternalTypeParams, InferredVarTypes, InferredTypeConstraints0,
             ConstraintProofMap, ConstraintMap,
             TVarRenaming, ExistTypeRenaming),
-        vartypes_optimize(InferredVarTypes0, InferredVarTypes),
-        clauses_info_set_vartypes(InferredVarTypes, !ClausesInfo),
+        vartypes_to_sorted_assoc_list(InferredVarTypes, VarsTypes),
+        vars_types_to_var_table(ModuleInfo, ClauseVarSet, VarsTypes,
+            VarTable0),
+        var_table_optimize(VarTable0, VarTable),
+        clauses_info_set_var_table(VarTable, !ClausesInfo),
 
         % Apply substitutions to the explicit vartypes.
         (
@@ -609,9 +632,10 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
         % only to the head variables, and those that apply to type variables
         % which occur only in the body.
         lookup_var_types(InferredVarTypes, HeadVars, ArgTypes),
-        type_vars_list(ArgTypes, ArgTypeVars),
-        restrict_to_head_vars(InferredTypeConstraints0, ArgTypeVars,
-            InferredTypeConstraints, UnprovenBodyConstraints),
+        type_vars_in_types(ArgTypes, ArgTypeVars),
+        restrict_constraints_to_head_vars(ArgTypeVars,
+            InferredTypeConstraints0, InferredTypeConstraints,
+            UnprovenBodyConstraints),
 
         % If there are any as-yet-unproven constraints on type variables
         % in the body, then save these in the pred_info. If it turns out that
@@ -687,7 +711,7 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
                     check_existq_clause(TypeVarSet0, ExistQVars0),
                     Clauses, !Info),
 
-                apply_renaming_in_vars(ExistTypeRenaming,
+                term_subst.apply_renaming_in_vars(ExistTypeRenaming,
                     ExistQVars0, ExistQVars1),
                 apply_variable_renaming_to_type_list(ExistTypeRenaming,
                     ArgTypes0, ArgTypes1),
@@ -698,7 +722,7 @@ do_typecheck_pred(ModuleInfo, PredId, !PredInfo, !Specs, NextIteration) :-
             ),
 
             % Rename them all to match the new typevarset.
-            apply_renaming_in_vars(TVarRenaming,
+            term_subst.apply_renaming_in_vars(TVarRenaming,
                 ExistQVars1, ExistQVars),
             apply_variable_renaming_to_type_list(TVarRenaming, ArgTypes1,
                 RenamedOldArgTypes),
@@ -764,51 +788,62 @@ check_mention_existq_var(Context, TypeVarSet, Impl, TVar, !ExistQVarNum,
     % depending on whether the predicate is part of
     % the Mercury standard library or not.
     %
-:- pred generate_stub_clause(module_info::in, pred_id::in,
+:- pred generate_and_add_stub_clause(module_info::in, pred_id::in,
     pred_info::in, pred_info::out) is det.
 
-generate_stub_clause(ModuleInfo, PredId, !PredInfo) :-
+generate_and_add_stub_clause(ModuleInfo, PredId, !PredInfo) :-
     some [!ClausesInfo] (
         pred_info_get_clauses_info(!.PredInfo, !:ClausesInfo),
-        clauses_info_get_varset(!.ClausesInfo, VarSet0),
+        !.ClausesInfo = clauses_info(VarSet0, _VarTypes,
+            _VarTable, RttiVarMaps, TVarNameMap, ArgVec,
+            _ClausesRep, _ItemNumbers, _ForeignClauses, _SyntaxErrors),
         PredPieces = describe_one_pred_name(ModuleInfo, should_module_qualify,
             PredId),
         PredName = error_pieces_to_string(PredPieces),
-        generate_stub_clause_2(PredName, !PredInfo, ModuleInfo, StubClause,
-            VarSet0, VarSet),
+        HeadVars = proc_arg_vector_to_list(ArgVec),
+        pred_info_get_arg_types(!.PredInfo, ArgTypes),
+        vartypes_from_corresponding_lists(HeadVars, ArgTypes, VarTypes1),
+        generate_stub_clause(ModuleInfo, !.PredInfo, PredName, StubClause,
+            VarSet0, VarSet, VarTypes1, VarTypes),
+        make_var_table(ModuleInfo, VarSet, VarTypes, VarTable),
         set_clause_list([StubClause], ClausesRep),
         ItemNumbers = init_clause_item_numbers_comp_gen,
-        clauses_info_set_clauses_rep(ClausesRep, ItemNumbers, !ClausesInfo),
-        clauses_info_set_varset(VarSet, !ClausesInfo),
-        pred_info_set_clauses_info(!.ClausesInfo, !PredInfo)
+        !:ClausesInfo = clauses_info(VarSet, VarTypes, VarTable, RttiVarMaps,
+            TVarNameMap, ArgVec, ClausesRep, ItemNumbers,
+            no_foreign_lang_clauses, no_clause_syntax_errors),
+        pred_info_set_clauses_info(!.ClausesInfo, !PredInfo),
+
+        % Mark the predicate as a stub, i.e. record that it originally
+        % had no clauses.
+        pred_info_get_markers(!.PredInfo, Markers0),
+        add_marker(marker_stub, Markers0, Markers),
+        pred_info_set_markers(Markers, !PredInfo)
     ).
 
-:- pred generate_stub_clause_2(string::in, pred_info::in, pred_info::out,
-    module_info::in, clause::out, prog_varset::in, prog_varset::out) is det.
+:- pred generate_stub_clause(module_info::in, pred_info::in,
+    string::in, clause::out,
+    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
 
-generate_stub_clause_2(PredName, !PredInfo, ModuleInfo, StubClause, !VarSet) :-
-    % Mark the predicate as a stub, i.e. record that it originally
-    % had no clauses.
-    pred_info_get_markers(!.PredInfo, Markers0),
-    add_marker(marker_stub, Markers0, Markers),
-    pred_info_set_markers(Markers, !PredInfo),
-
+generate_stub_clause(ModuleInfo, PredInfo, PredName, StubClause,
+        !VarSet, !VarTypes) :-
     % Generate `PredName = "<PredName>"'.
-    pred_info_get_context(!.PredInfo, Context),
     varset.new_named_var("PredName", PredNameVar, !VarSet),
+    add_var_type(PredNameVar, string_type, !VarTypes),
+    pred_info_get_context(PredInfo, Context),
     make_string_const_construction(Context, PredNameVar, PredName, UnifyGoal),
 
     % Generate `private_builtin.no_clauses(PredName)'
     % or `private_builtin.sorry(PredName)'
-    ModuleName = pred_info_module(!.PredInfo),
-    ( if mercury_std_library_module_name(ModuleName) then
+    PredModuleName = pred_info_module(PredInfo),
+    ( if mercury_std_library_module_name(PredModuleName) then
         CalleeName = "sorry"
     else
         CalleeName = "no_clauses"
     ),
-    generate_simple_call(ModuleInfo, mercury_private_builtin_module,
-        CalleeName, pf_predicate, only_mode, detism_det, purity_pure,
-        [PredNameVar], [], instmap_delta_bind_no_var, Context, CallGoal),
+    generate_plain_call(ModuleInfo, pf_predicate,
+        mercury_private_builtin_module, CalleeName,
+        [], [PredNameVar], instmap_delta_bind_no_var, only_mode,
+        detism_det, purity_pure, [], Context, CallGoal),
 
     % Combine the unification and call into a conjunction.
     goal_info_init(Context, GoalInfo),
@@ -819,7 +854,10 @@ generate_stub_clause_2(PredName, !PredInfo, ModuleInfo, StubClause, !VarSet) :-
     pred_origin::in, pred_origin::out) is det.
 
 rename_instance_method_constraints(Renaming, Origin0, Origin) :-
-    ( if Origin0 = origin_instance_method(MethodName, Constraints0) then
+    ( if
+        Origin0 = origin_user(OriginUser0),
+        OriginUser0 = user_made_instance_method(PFSymNameArity, Constraints0)
+    then
         Constraints0 = instance_method_constraints(ClassId, InstanceTypes0,
             InstanceConstraints0, ClassMethodClassContext0),
         apply_variable_renaming_to_type_list(Renaming, InstanceTypes0,
@@ -830,7 +868,8 @@ rename_instance_method_constraints(Renaming, Origin0, Origin) :-
             ClassMethodClassContext0, ClassMethodClassContext),
         Constraints = instance_method_constraints(ClassId,
             InstanceTypes, InstanceConstraints, ClassMethodClassContext),
-        Origin = origin_instance_method(MethodName, Constraints)
+        OriginUser = user_made_instance_method(PFSymNameArity, Constraints),
+        Origin = origin_user(OriginUser)
     else
         Origin = Origin0
     ).
@@ -864,27 +903,30 @@ infer_existential_types(ArgTypeVars, ExistQVars,
     % uses it to check for unbound type variables.
     ExternalTypeParams = UnivQVars ++ ExternalTypeParams0.
 
-    % restrict_to_head_vars(Constraints0, HeadVarTypes, Constraints,
-    %       UnprovenConstraints):
+    % restrict_constraints_to_head_vars(HeadVarTypes, Constraints0,
+    %   Constraints, UnprovenConstraints):
     %
     % Constraints is the subset of Constraints0 which contain no type variables
     % other than those in HeadVarTypes. UnprovenConstraints is any unproven
     % (universally quantified) type constraints on variables not in
     % HeadVarTypes.
     %
-:- pred restrict_to_head_vars(prog_constraints::in, list(tvar)::in,
-    prog_constraints::out, list(prog_constraint)::out) is det.
+:- pred restrict_constraints_to_head_vars(list(tvar)::in,
+    prog_constraints::in, prog_constraints::out,
+    list(prog_constraint)::out) is det.
 
-restrict_to_head_vars(constraints(UnivCs0, ExistCs0), ArgVarTypes,
+restrict_constraints_to_head_vars(ArgVarTypes, constraints(UnivCs0, ExistCs0),
         constraints(UnivCs, ExistCs), UnprovenCs) :-
-    restrict_to_head_vars_2(UnivCs0, ArgVarTypes, UnivCs, UnprovenCs),
-    restrict_to_head_vars_2(ExistCs0, ArgVarTypes, ExistCs, _).
+    restrict_constraints_to_head_vars_2(ArgVarTypes, UnivCs0, UnivCs,
+        UnprovenCs),
+    restrict_constraints_to_head_vars_2(ArgVarTypes, ExistCs0, ExistCs, _).
 
-:- pred restrict_to_head_vars_2(list(prog_constraint)::in, list(tvar)::in,
+:- pred restrict_constraints_to_head_vars_2(list(tvar)::in,
+    list(prog_constraint)::in,
     list(prog_constraint)::out, list(prog_constraint)::out) is det.
 
-restrict_to_head_vars_2(ClassConstraints, HeadTypeVars, HeadClassConstraints,
-        OtherClassConstraints) :-
+restrict_constraints_to_head_vars_2(HeadTypeVars, ClassConstraints,
+        HeadClassConstraints, OtherClassConstraints) :-
     list.filter(is_head_class_constraint(HeadTypeVars),
         ClassConstraints, HeadClassConstraints, OtherClassConstraints).
 
@@ -914,7 +956,7 @@ is_head_class_constraint(HeadTypeVars, Constraint) :-
 
 argtypes_identical_up_to_renaming(KindMap, ExistQVarsA, ArgTypesA,
         TypeConstraintsA, ExistQVarsB, ArgTypesB, TypeConstraintsB) :-
-    same_structure(TypeConstraintsA, TypeConstraintsB,
+    constraints_have_same_structure(TypeConstraintsA, TypeConstraintsB,
         ConstrainedTypesA, ConstrainedTypesB),
     prog_type.var_list_to_type_list(KindMap, ExistQVarsA, ExistQVarTypesA),
     prog_type.var_list_to_type_list(KindMap, ExistQVarsB, ExistQVarTypesB),
@@ -927,31 +969,37 @@ argtypes_identical_up_to_renaming(KindMap, ExistQVarsA, ArgTypesA,
     % and if so, concatenate the argument types for all the type classes
     % in each set of type class constraints and return them.
     %
-:- pred same_structure(prog_constraints::in, prog_constraints::in,
+:- pred constraints_have_same_structure(
+    prog_constraints::in, prog_constraints::in,
     list(mer_type)::out, list(mer_type)::out) is semidet.
 
-same_structure(ConstraintsA, ConstraintsB, TypesA, TypesB) :-
+constraints_have_same_structure(ConstraintsA, ConstraintsB, TypesA, TypesB) :-
     ConstraintsA = constraints(UnivCsA, ExistCsA),
     ConstraintsB = constraints(UnivCsB, ExistCsB),
     % these calls to same_length are just an optimization,
     % to catch the simple cases quicker
     list.same_length(UnivCsA, UnivCsB),
     list.same_length(ExistCsA, ExistCsB),
-    same_structure_2(UnivCsA, UnivCsB, UnivTypesA, UnivTypesB),
-    same_structure_2(ExistCsA, ExistCsB, ExistTypesA, ExistTypesB),
+    constraints_have_same_structure_loop(UnivCsA, UnivCsB,
+        UnivTypesA, UnivTypesB),
+    constraints_have_same_structure_loop(ExistCsA, ExistCsB,
+        ExistTypesA, ExistTypesB),
     TypesA = ExistTypesA ++ UnivTypesA,
     TypesB = ExistTypesB ++ UnivTypesB.
 
-:- pred same_structure_2(list(prog_constraint)::in, list(prog_constraint)::in,
+:- pred constraints_have_same_structure_loop(
+    list(prog_constraint)::in, list(prog_constraint)::in,
     list(mer_type)::out, list(mer_type)::out) is semidet.
 
-same_structure_2([], [], [], []).
-same_structure_2([ConstraintA | ConstraintsA], [ConstraintB | ConstraintsB],
+constraints_have_same_structure_loop([], [], [], []).
+constraints_have_same_structure_loop(
+        [ConstraintA | ConstraintsA], [ConstraintB | ConstraintsB],
         TypesA, TypesB) :-
     ConstraintA = constraint(ClassName, ArgTypesA),
     ConstraintB = constraint(ClassName, ArgTypesB),
     list.same_length(ArgTypesA, ArgTypesB),
-    same_structure_2(ConstraintsA, ConstraintsB, TypesA0, TypesB0),
+    constraints_have_same_structure_loop(ConstraintsA, ConstraintsB,
+        TypesA0, TypesB0),
     TypesA = ArgTypesA ++ TypesA0,
     TypesB = ArgTypesB ++ TypesB0.
 
@@ -961,7 +1009,7 @@ same_structure_2([ConstraintA | ConstraintsA], [ConstraintB | ConstraintsB],
     is semidet.
 
 identical_up_to_renaming(TypesList1, TypesList2) :-
-    % They are identical up to renaming if they each subsume each other.
+    % They are identical up to renaming if they subsume each other.
     type_list_subsumes(TypesList1, TypesList2, _),
     type_list_subsumes(TypesList2, TypesList1, _).
 
@@ -973,14 +1021,14 @@ identical_up_to_renaming(TypesList1, TypesList2) :-
     % In case (b), we need to typecheck it to fill in the external_type_params
     % field in the pred_info.
     %
-:- pred special_pred_needs_typecheck(pred_info::in, module_info::in)
+:- pred special_pred_needs_typecheck(module_info::in, pred_info::in)
     is semidet.
 
-special_pred_needs_typecheck(PredInfo, ModuleInfo) :-
+special_pred_needs_typecheck(ModuleInfo, PredInfo) :-
     % Check if the predicate is a compiler-generated special
     % predicate, and if so, for which type.
     pred_info_get_origin(PredInfo, Origin),
-    Origin = origin_special_pred(SpecialPredId, TypeCtor),
+    Origin = origin_compiler(made_for_uci(SpecialPredId, TypeCtor)),
 
     % Check that the special pred isn't one of the builtin types which don't
     % have a hlds_type_defn.
@@ -998,16 +1046,17 @@ special_pred_needs_typecheck(PredInfo, ModuleInfo) :-
     % Iterate over the list of clauses for a predicate.
     %
 :- pred typecheck_clause_list(list(prog_var)::in, list(mer_type)::in,
-    list(clause)::in, list(clause)::out,
+    list(clause)::in, list(clause)::in, list(clause)::out,
     type_assign_set::in, type_assign_set::out,
     typecheck_info::in, typecheck_info::out) is det.
 
-typecheck_clause_list(_, _, [], [], !TypeAssignSet, !Info).
-typecheck_clause_list(HeadVars, ArgTypes, [Clause0 | Clauses0],
-        [Clause | Clauses], !TypeAssignSet, !Info) :-
+typecheck_clause_list(_, _, [], !RevClauses, !TypeAssignSet, !Info).
+typecheck_clause_list(HeadVars, ArgTypes, [Clause0 | Clauses0], !RevClauses,
+        !TypeAssignSet, !Info) :-
     typecheck_clause(HeadVars, ArgTypes, Clause0, Clause,
         !TypeAssignSet, !Info),
-    typecheck_clause_list(HeadVars, ArgTypes, Clauses0, Clauses,
+    !:RevClauses = [Clause | !.RevClauses],
+    typecheck_clause_list(HeadVars, ArgTypes, Clauses0, !RevClauses,
         !TypeAssignSet, !Info).
 
 %---------------------------------------------------------------------------%
@@ -1042,8 +1091,7 @@ typecheck_clause_list(HeadVars, ArgTypes, [Clause0 | Clauses0],
     typecheck_info::in, typecheck_info::out) is det.
 
 typecheck_clause(HeadVars, ArgTypes, !Clause, !TypeAssignSet, !Info) :-
-    Body0 = !.Clause ^ clause_body,
-    Context = !.Clause ^ clause_context,
+    !.Clause = clause(_, Body0, _, Context, _),
 
     % Typecheck the clause - first the head unification, and then the body.
     ArgVectorKind = arg_vector_clause_head,
@@ -1312,6 +1360,14 @@ typecheck_goal_expr(GoalExpr0, GoalExpr, GoalInfo, !TypeAssignSet, !Info) :-
                     VarVectorKind = var_vector_promise_solutions
                 )
             ;
+                Reason = require_complete_switch(Var),
+                Vars = [Var],
+                VarVectorKind = var_vector_switch_complete
+            ;
+                Reason = require_switch_arms_detism(Var, _),
+                Vars = [Var],
+                VarVectorKind = var_vector_switch_arm_detism
+            ;
                 % These variables are introduced by the compiler and may
                 % only have a single, specific type.
                 Reason = loop_control(LCVar, LCSVar, _),
@@ -1324,26 +1380,22 @@ typecheck_goal_expr(GoalExpr0, GoalExpr, GoalInfo, !TypeAssignSet, !Info) :-
             ( Reason = disable_warnings(_, _)
             ; Reason = promise_purity(_)
             ; Reason = require_detism(_)
-            ; Reason = require_complete_switch(_)
-            ; Reason = require_switch_arms_detism(_, _)
+            ; Reason = from_ground_term(_, _)
             ; Reason = commit(_)
             ; Reason = barrier(_)
-            ; Reason = from_ground_term(_, _)
             ; Reason = trace_goal(_, _, _, _, _)
             )
         ),
         GoalExpr = scope(Reason, SubGoal)
     ;
-        GoalExpr0 = plain_call(_, ProcId, ArgVars, BI, UC, Name),
+        GoalExpr0 = plain_call(_, ProcId, ArgVars, BI, UC, SymName),
         trace [compiletime(flag("type_checkpoint")), io(!IO)] (
             type_checkpoint("call", !.Info, VarSet, !.TypeAssignSet, !IO)
         ),
-        list.length(ArgVars, Arity),
-        SymNameArity = sym_name_arity(Name, Arity),
         GoalId = goal_info_get_goal_id(GoalInfo),
-        typecheck_call_pred_name(SymNameArity, Context, GoalId, ArgVars,
+        typecheck_call_pred_name(SymName, Context, GoalId, ArgVars,
             PredId, !TypeAssignSet, !Info),
-        GoalExpr = plain_call(PredId, ProcId, ArgVars, BI, UC, Name)
+        GoalExpr = plain_call(PredId, ProcId, ArgVars, BI, UC, SymName)
     ;
         GoalExpr0 = generic_call(GenericCall, ArgVars, _Modes, _MaybeArgRegs,
             _Detism),
@@ -1532,9 +1584,9 @@ ensure_vars_have_a_type(VarVectorKind, Context, Vars, !TypeAssignSet, !Info) :-
         varset.new_vars(NumVars, TypeVars, TypeVarSet0, TypeVarSet),
         prog_type.var_list_to_type_list(map.init, TypeVars, Types),
         empty_hlds_constraints(EmptyConstraints),
-        typecheck_var_has_polymorphic_type_list(VarVectorKind, Context,
-            Vars, TypeVarSet, [], Types, EmptyConstraints,
-            !TypeAssignSet, !Info)
+        typecheck_var_has_polymorphic_type_list(atas_ensure_have_a_type,
+            VarVectorKind, Context, Vars, TypeVarSet, [], Types,
+            EmptyConstraints, !TypeAssignSet, !Info)
     ).
 
     % Ensure that each variable in Vars has been assigned a single type.
@@ -1558,9 +1610,9 @@ ensure_vars_have_a_single_type(VarVectorKind, Context, Vars,
         list.length(Vars, NumVars),
         list.duplicate(NumVars, Type, Types),
         empty_hlds_constraints(EmptyConstraints),
-        typecheck_var_has_polymorphic_type_list(VarVectorKind, Context,
-            Vars, TypeVarSet, [], Types, EmptyConstraints,
-            !TypeAssignSet, !Info)
+        typecheck_var_has_polymorphic_type_list(atas_ensure_have_a_type,
+            VarVectorKind, Context, Vars, TypeVarSet, [], Types,
+            EmptyConstraints, !TypeAssignSet, !Info)
     ).
 
 %---------------------------------------------------------------------------%
@@ -1580,9 +1632,9 @@ typecheck_higher_order_call(GenericCallId, Context, PredVar, Purity, ArgVars,
     % are always monomorphic. Similarly for ExistQVars.
     empty_hlds_constraints(EmptyConstraints),
     ExistQVars = [],
-    typecheck_var_has_polymorphic_type_list(VarVectorKind, Context,
-        [PredVar | ArgVars], TypeVarSet, ExistQVars, [PredVarType | ArgTypes],
-        EmptyConstraints, !TypeAssignSet, !Info).
+    typecheck_var_has_polymorphic_type_list(atas_higher_order_call(PredVar),
+        VarVectorKind, Context, [PredVar | ArgVars], TypeVarSet, ExistQVars,
+        [PredVarType | ArgTypes], EmptyConstraints, !TypeAssignSet, !Info).
 
     % higher_order_pred_type(Purity, N, EvalMethod,
     %   TypeVarSet, PredType, ArgTypes):
@@ -1643,59 +1695,65 @@ typecheck_event_call(Context, EventName, ArgVars, !TypeAssignSet, !Info) :-
             typecheck_vars_have_types(ArgVectorKind, Context,
                 ArgVars, EventArgTypes, !TypeAssignSet, !Info)
         else
-            Spec = report_event_args_mismatch(Context,
+            Spec = report_error_undef_event_arity(Context,
                 EventName, EventArgTypes, ArgVars),
             typecheck_info_add_error(Spec, !Info)
         )
     else
-        Spec = report_unknown_event_call_error(Context, EventName),
+        Spec = report_error_undef_event(Context, EventName),
         typecheck_info_add_error(Spec, !Info)
     ).
 
 %---------------------------------------------------------------------------%
 
-:- pred typecheck_call_pred_name(sym_name_arity::in, prog_context::in,
+:- pred typecheck_call_pred_name(sym_name::in, prog_context::in,
     goal_id::in, list(prog_var)::in, pred_id::out,
     type_assign_set::in, type_assign_set::out,
     typecheck_info::in, typecheck_info::out) is det.
 
-typecheck_call_pred_name(SymNameArity, Context, GoalId, ArgVars, PredId,
+typecheck_call_pred_name(SymName, Context, GoalId, ArgVars, PredId,
         !TypeAssignSet, !Info) :-
     % Look up the called predicate's arg types.
     typecheck_info_get_module_info(!.Info, ModuleInfo),
     module_info_get_predicate_table(ModuleInfo, PredicateTable),
-    SymNameArity = sym_name_arity(SymName, Arity),
+    PredFormArity = arg_list_arity(ArgVars),
+    SymNamePredFormArity = sym_name_pred_form_arity(SymName, PredFormArity),
     typecheck_info_get_calls_are_fully_qualified(!.Info, IsFullyQualified),
     predicate_table_lookup_pf_sym_arity(PredicateTable, IsFullyQualified,
-        pf_predicate, SymName, Arity, PredIds),
+        pf_predicate, SymName, PredFormArity, PredIds),
     (
         PredIds = [],
         PredId = invalid_pred_id,
         typecheck_info_get_error_clause_context(!.Info, ClauseContext),
-        Spec = report_pred_call_error(ClauseContext, Context, SymNameArity),
+        Spec = report_error_undef_pred(ClauseContext, Context,
+            SymNamePredFormArity),
         typecheck_info_add_error(Spec, !Info)
     ;
         PredIds = [HeadPredId | TailPredIds],
         (
             TailPredIds = [],
-            % Handle the case of a non-overloaded predicate specially
-            % (so that we can optimize the case of a non-overloaded,
-            % non-polymorphic predicate).
+            % Handle the case of non-overloaded predicate calls separately
+            % from overloaded ones, because
+            %
+            % - this is the usual case, and
+            % - it can be handled more simply and quickly
+            %   than overloaded calls.
             PredId = HeadPredId,
             ArgVectorKind = arg_vector_plain_call_pred_id(PredId),
             typecheck_call_pred_id(ArgVectorKind, Context, GoalId,
                 PredId, ArgVars, !TypeAssignSet, !Info)
         ;
             TailPredIds = [_ | _],
-            typecheck_call_overloaded_pred(SymNameArity, Context, GoalId,
+            typecheck_call_overloaded_pred(SymName, Context, GoalId,
                 PredIds, ArgVars, !TypeAssignSet, !Info),
-
-            % In general, we can't figure out which predicate it is until
-            % after we have resolved any overloading, which may require
-            % type-checking the entire clause. Hence, for the moment, we just
-            % record an invalid pred_id in the HLDS. This will be rectified
-            % by modes.m during mode-checking; at that point, enough
-            % information is available to determine which predicate it is.
+            % In general, figuring out which predicate is being called
+            % requires resolving any overloading, which may not be possible
+            % until we have typechecked the entire clause, which, in the
+            % presence of type inference, means it cannot be done until
+            % after the typechecking pass is done. Hence, here we just
+            % record an invalid pred_id in the HLDS, and let the invocation of
+            % finally_resolve_pred_overloading by purity.m replace that
+            % with the actual pred_id.
             PredId = invalid_pred_id
         ),
 
@@ -1735,19 +1793,22 @@ typecheck_call_pred_id(ArgVectorKind, Context, GoalId, PredId, ArgVars,
         module_info_get_class_table(ModuleInfo, ClassTable),
         make_body_hlds_constraints(ClassTable, PredTypeVarSet,
             GoalId, PredClassContext, PredConstraints),
-        typecheck_var_has_polymorphic_type_list(var_vector_args(ArgVectorKind),
-            Context, ArgVars, PredTypeVarSet, PredExistQVars,
-            PredArgTypes, PredConstraints, !TypeAssignSet, !Info)
+        typecheck_var_has_polymorphic_type_list(atas_pred(PredId),
+            var_vector_args(ArgVectorKind), Context, ArgVars,
+            PredTypeVarSet, PredExistQVars, PredArgTypes, PredConstraints,
+            !TypeAssignSet, !Info)
     ).
 
-:- pred typecheck_call_overloaded_pred(sym_name_arity::in, prog_context::in,
+:- pred typecheck_call_overloaded_pred(sym_name::in, prog_context::in,
     goal_id::in, list(pred_id)::in, list(prog_var)::in,
     type_assign_set::in, type_assign_set::out,
     typecheck_info::in, typecheck_info::out) is det.
 
-typecheck_call_overloaded_pred(SymNameArity, Context, GoalId, PredIdList,
+typecheck_call_overloaded_pred(SymName, Context, GoalId, PredIds,
         ArgVars, TypeAssignSet0, TypeAssignSet, !Info) :-
-    Symbol = overloaded_pred(SymNameArity, PredIdList),
+    PredFormArity = arg_list_arity(ArgVars),
+    SymNamePredFormArity = sym_name_pred_form_arity(SymName, PredFormArity),
+    Symbol = overloaded_pred(SymNamePredFormArity, PredIds),
     typecheck_info_add_overloaded_symbol(Symbol, Context, !Info),
 
     % Let the new arg_type_assign_set be the cross-product of the current
@@ -1756,35 +1817,38 @@ typecheck_call_overloaded_pred(SymNameArity, Context, GoalId, PredIdList,
     typecheck_info_get_module_info(!.Info, ModuleInfo),
     module_info_get_class_table(ModuleInfo, ClassTable),
     module_info_get_predicate_table(ModuleInfo, PredicateTable),
-    predicate_table_get_preds(PredicateTable, Preds),
-    get_overloaded_pred_arg_types(PredIdList, Preds, ClassTable, GoalId,
-        TypeAssignSet0, [], ArgsTypeAssignSet),
+    predicate_table_get_pred_id_table(PredicateTable, PredIdTable),
+    get_overloaded_pred_arg_types(PredIdTable, ClassTable, GoalId, PredIds,
+        TypeAssignSet0, [], ArgsTypeAssignSet0),
 
     % Then unify the types of the call arguments with the
     % called predicates' arg types.
-    VarVectorKind = var_vector_args(arg_vector_plain_pred_call(SymNameArity)),
-    typecheck_var_has_arg_type_list(VarVectorKind, 1, Context, ArgVars,
-        ArgsTypeAssignSet, TypeAssignSet, !Info).
+    VarVectorKind =
+        var_vector_args(arg_vector_plain_pred_call(SymNamePredFormArity)),
+    typecheck_vars_have_arg_types(VarVectorKind, Context, 1, ArgVars,
+        ArgsTypeAssignSet0, ArgsTypeAssignSet, !Info),
+    TypeAssignSet = convert_args_type_assign_set(ArgsTypeAssignSet).
 
-:- pred get_overloaded_pred_arg_types(list(pred_id)::in, pred_table::in,
-    class_table::in, goal_id::in, type_assign_set::in,
+:- pred get_overloaded_pred_arg_types(pred_id_table::in, class_table::in,
+    goal_id::in, list(pred_id)::in, type_assign_set::in,
     args_type_assign_set::in, args_type_assign_set::out) is det.
 
-get_overloaded_pred_arg_types([], _Preds, _ClassTable, _GoalId,
-        _TypeAssignSet0, !ArgsTypeAssignSet).
-get_overloaded_pred_arg_types([PredId | PredIds], Preds, ClassTable, GoalId,
-        TypeAssignSet0, !ArgsTypeAssignSet) :-
-    map.lookup(Preds, PredId, PredInfo),
+get_overloaded_pred_arg_types(_PredTable, _ClassTable, _GoalId,
+        [], _TypeAssignSet0, !ArgsTypeAssignSet).
+get_overloaded_pred_arg_types(PredTable, ClassTable, GoalId,
+        [PredId | PredIds], TypeAssignSet0, !ArgsTypeAssignSet) :-
+    map.lookup(PredTable, PredId, PredInfo),
     pred_info_get_arg_types(PredInfo, PredTypeVarSet, PredExistQVars,
         PredArgTypes),
     pred_info_get_class_context(PredInfo, PredClassContext),
     pred_info_get_typevarset(PredInfo, TVarSet),
     make_body_hlds_constraints(ClassTable, TVarSet, GoalId,
         PredClassContext, PredConstraints),
-    rename_apart(TypeAssignSet0, PredTypeVarSet, PredExistQVars,
-        PredArgTypes, PredConstraints, !ArgsTypeAssignSet),
-    get_overloaded_pred_arg_types(PredIds, Preds, ClassTable, GoalId,
-        TypeAssignSet0, !ArgsTypeAssignSet).
+    add_renamed_apart_arg_type_assigns(atas_pred(PredId), PredTypeVarSet,
+        PredExistQVars, PredArgTypes, PredConstraints,
+        TypeAssignSet0, !ArgsTypeAssignSet),
+    get_overloaded_pred_arg_types(PredTable, ClassTable, GoalId,
+        PredIds, TypeAssignSet0, !ArgsTypeAssignSet).
 
 %---------------------------------------------------------------------------%
 
@@ -1796,27 +1860,30 @@ get_overloaded_pred_arg_types([PredId | PredIds], Preds, ClassTable, GoalId,
     % A set of class constraints are also passed in, which must have the
     % types contained within renamed apart.
     %
-:- pred typecheck_var_has_polymorphic_type_list(var_vector_kind::in,
-    prog_context::in, list(prog_var)::in, tvarset::in,
+:- pred typecheck_var_has_polymorphic_type_list(args_type_assign_source::in,
+    var_vector_kind::in, prog_context::in, list(prog_var)::in, tvarset::in,
     existq_tvars::in, list(mer_type)::in, hlds_constraints::in,
     type_assign_set::in, type_assign_set::out,
     typecheck_info::in, typecheck_info::out) is det.
 
-typecheck_var_has_polymorphic_type_list(VarVectorKind, Context, ArgVars,
-        PredTypeVarSet, PredExistQVars, PredArgTypes, PredConstraints,
+typecheck_var_has_polymorphic_type_list(Source, VarVectorKind, Context,
+        ArgVars, PredTypeVarSet, PredExistQVars, PredArgTypes, PredConstraints,
         TypeAssignSet0, TypeAssignSet, !Info) :-
-    rename_apart(TypeAssignSet0, PredTypeVarSet, PredExistQVars,
-        PredArgTypes, PredConstraints, [], ArgsTypeAssignSet),
-    typecheck_var_has_arg_type_list(VarVectorKind, 1, Context, ArgVars,
-        ArgsTypeAssignSet, TypeAssignSet, !Info).
+    add_renamed_apart_arg_type_assigns(Source, PredTypeVarSet, PredExistQVars,
+        PredArgTypes, PredConstraints, TypeAssignSet0, [], ArgsTypeAssignSet0),
+    typecheck_vars_have_arg_types(VarVectorKind, Context, 1, ArgVars,
+        ArgsTypeAssignSet0, ArgsTypeAssignSet, !Info),
+    TypeAssignSet = convert_args_type_assign_set(ArgsTypeAssignSet).
 
-:- pred rename_apart(type_assign_set::in, tvarset::in, existq_tvars::in,
-    list(mer_type)::in, hlds_constraints::in,
+:- pred add_renamed_apart_arg_type_assigns(args_type_assign_source::in,
+    tvarset::in, existq_tvars::in, list(mer_type)::in, hlds_constraints::in,
+    type_assign_set::in,
     args_type_assign_set::in, args_type_assign_set::out) is det.
 
-rename_apart([], _, _, _, _, !ArgTypeAssigns).
-rename_apart([TypeAssign0 | TypeAssigns0], PredTypeVarSet, PredExistQVars,
-        PredArgTypes, PredConstraints, !ArgTypeAssigns) :-
+add_renamed_apart_arg_type_assigns(_, _, _, _, _, [], !ArgsTypeAssigns).
+add_renamed_apart_arg_type_assigns(Source, PredTypeVarSet, PredExistQVars,
+        PredArgTypes, PredConstraints, [TypeAssign0 | TypeAssigns0],
+        !ArgsTypeAssigns) :-
     % Rename everything apart.
     type_assign_rename_apart(TypeAssign0, PredTypeVarSet, PredArgTypes,
         TypeAssign1, ParentArgTypes, Renaming),
@@ -1828,17 +1895,17 @@ rename_apart([TypeAssign0 | TypeAssigns0], PredTypeVarSet, PredExistQVars,
     % Insert the existentially quantified type variables for the called
     % predicate into HeadTypeParams (which holds the set of type
     % variables which the caller is not allowed to bind).
-    type_assign_get_external_type_params(TypeAssign1, HeadTypeParams0),
-    list.append(ParentExistQVars, HeadTypeParams0, HeadTypeParams),
-    type_assign_set_external_type_params(HeadTypeParams,
-        TypeAssign1, TypeAssign),
+    type_assign_get_existq_tvars(TypeAssign1, ExistQTVars0),
+    ExistQTVars = ParentExistQVars ++ ExistQTVars0,
+    type_assign_set_existq_tvars(ExistQTVars, TypeAssign1, TypeAssign),
 
     % Save the results and recurse.
-    NewArgTypeAssign =
-        args_type_assign(TypeAssign, ParentArgTypes, ParentConstraints),
-    !:ArgTypeAssigns = [NewArgTypeAssign | !.ArgTypeAssigns],
-    rename_apart(TypeAssigns0, PredTypeVarSet, PredExistQVars,
-        PredArgTypes, PredConstraints, !ArgTypeAssigns).
+    NewArgsTypeAssign = args_type_assign(TypeAssign, ParentArgTypes,
+        ParentConstraints, Source),
+    !:ArgsTypeAssigns = [NewArgsTypeAssign | !.ArgsTypeAssigns],
+    add_renamed_apart_arg_type_assigns(Source, PredTypeVarSet,
+        PredExistQVars, PredArgTypes, PredConstraints, TypeAssigns0,
+        !ArgsTypeAssigns).
 
 :- pred type_assign_rename_apart(type_assign::in, tvarset::in,
     list(mer_type)::in, type_assign::out, list(mer_type)::out,
@@ -1854,108 +1921,82 @@ type_assign_rename_apart(TypeAssign0, PredTypeVarSet, PredArgTypes,
 
 %---------------------------------------------------------------------------%
 
-:- pred typecheck_var_has_arg_type_list(var_vector_kind::in, int::in,
-    prog_context::in, list(prog_var)::in,
-    args_type_assign_set::in, type_assign_set::out,
-    typecheck_info::in, typecheck_info::out) is det.
-
-typecheck_var_has_arg_type_list(_, _, _, [],
-        ArgTypeAssignSet, TypeAssignSet, !Info) :-
-    TypeAssignSet =
-        convert_args_type_assign_set_check_empty_args(ArgTypeAssignSet).
-typecheck_var_has_arg_type_list(VarVectorKind, ArgNum, Context, [Var | Vars],
-        ArgTypeAssignSet0, TypeAssignSet, !Info) :-
-    GoalContext = type_error_in_var_vector(VarVectorKind, ArgNum),
-    typecheck_var_has_arg_type(GoalContext, Context, Var,
-        ArgTypeAssignSet0, ArgTypeAssignSet1, !Info),
-    typecheck_var_has_arg_type_list(VarVectorKind, ArgNum + 1, Context,
-        Vars, ArgTypeAssignSet1, TypeAssignSet, !Info).
-
-:- pred typecheck_var_has_arg_type(type_error_goal_context::in,
-    prog_context::in, prog_var::in,
+:- pred typecheck_vars_have_arg_types(var_vector_kind::in, prog_context::in,
+    int::in, list(prog_var)::in,
     args_type_assign_set::in, args_type_assign_set::out,
     typecheck_info::in, typecheck_info::out) is det.
 
-typecheck_var_has_arg_type(GoalContext, Context, Var,
-        ArgTypeAssignSet0, ArgTypeAssignSet, !Info) :-
-    typecheck_var_has_arg_type_2(ArgTypeAssignSet0,
-        Var, [], ArgTypeAssignSet1),
+typecheck_vars_have_arg_types(_, _, _, [], !ArgsTypeAssignSet, !Info).
+typecheck_vars_have_arg_types(VarVectorKind, Context, CurArgNum, [Var | Vars],
+        !ArgsTypeAssignSet, !Info) :-
+    GoalContext = type_error_in_var_vector(VarVectorKind, CurArgNum),
+    typecheck_var_has_arg_type(GoalContext, Context, CurArgNum, Var,
+        !ArgsTypeAssignSet, !Info),
+    typecheck_vars_have_arg_types(VarVectorKind, Context, CurArgNum + 1, Vars,
+        !ArgsTypeAssignSet, !Info).
+
+:- pred typecheck_var_has_arg_type(type_error_goal_context::in,
+    prog_context::in, int::in, prog_var::in,
+    args_type_assign_set::in, args_type_assign_set::out,
+    typecheck_info::in, typecheck_info::out) is det.
+
+typecheck_var_has_arg_type(GoalContext, Context, ArgNum, Var,
+        ArgsTypeAssignSet0, ArgsTypeAssignSet, !Info) :-
+    typecheck_var_has_arg_type_in_args_type_assigns(ArgNum, Var,
+        ArgsTypeAssignSet0, [], ArgsTypeAssignSet1),
     ( if
-        ArgTypeAssignSet1 = [],
-        ArgTypeAssignSet0 = [_ | _]
+        ArgsTypeAssignSet1 = [],
+        ArgsTypeAssignSet0 = [_ | _]
     then
-        delete_first_arg_in_each_arg_type_assign(ArgTypeAssignSet0,
-            ArgTypeAssignSet),
-        typecheck_info_get_error_clause_context(!.Info, ClauseContext),
-        Spec = report_error_arg_var(!.Info, ClauseContext, GoalContext,
-            Context, Var, ArgTypeAssignSet0),
+        Spec = report_error_var_has_wrong_type_arg(!.Info,
+            GoalContext, Context, ArgNum, Var, ArgsTypeAssignSet0),
+        ArgsTypeAssignSet = ArgsTypeAssignSet0,
         typecheck_info_add_error(Spec, !Info)
     else
-        ArgTypeAssignSet = ArgTypeAssignSet1
+        ArgsTypeAssignSet = ArgsTypeAssignSet1
     ).
 
-:- pred delete_first_arg_in_each_arg_type_assign(args_type_assign_set::in,
-    args_type_assign_set::out) is det.
-
-delete_first_arg_in_each_arg_type_assign([], []).
-delete_first_arg_in_each_arg_type_assign([ArgTypeAssign0 | ArgTypeAssigns0],
-        [ArgTypeAssign | ArgTypeAssigns]) :-
-    ArgTypeAssign0 = args_type_assign(TypeAssign, ArgTypes0, Constraints),
-    (
-        ArgTypes0 = [_ | ArgTypes]
-    ;
-        ArgTypes0 = [],
-        % this should never happen
-        unexpected($pred, "skip_arg")
-    ),
-    ArgTypeAssign = args_type_assign(TypeAssign, ArgTypes, Constraints),
-    delete_first_arg_in_each_arg_type_assign(ArgTypeAssigns0, ArgTypeAssigns).
-
-:- pred typecheck_var_has_arg_type_2(args_type_assign_set::in, prog_var::in,
+:- pred typecheck_var_has_arg_type_in_args_type_assigns(int::in, prog_var::in,
+    args_type_assign_set::in,
     args_type_assign_set::in, args_type_assign_set::out) is det.
 
-typecheck_var_has_arg_type_2([], _, !ArgTypeAssignSet).
-typecheck_var_has_arg_type_2([ArgsTypeAssign | ArgsTypeAssignSets], Var,
+typecheck_var_has_arg_type_in_args_type_assigns(_, _, [], !ArgsTypeAssignSet).
+typecheck_var_has_arg_type_in_args_type_assigns(ArgNum, Var,
+        [ArgsTypeAssign | ArgsTypeAssigns], !ArgsTypeAssignSet) :-
+    typecheck_var_has_arg_type_in_args_type_assign(ArgNum, Var,
+        ArgsTypeAssign, !ArgsTypeAssignSet),
+    typecheck_var_has_arg_type_in_args_type_assigns(ArgNum, Var,
+        ArgsTypeAssigns, !ArgsTypeAssignSet).
+
+:- pred typecheck_var_has_arg_type_in_args_type_assign(int::in, prog_var::in,
+    args_type_assign::in,
+    args_type_assign_set::in, args_type_assign_set::out) is det.
+
+typecheck_var_has_arg_type_in_args_type_assign(ArgNum, Var, ArgsTypeAssign0,
         !ArgsTypeAssignSet) :-
-    ArgsTypeAssign = args_type_assign(TypeAssign0, ArgTypes0, ClassContext),
-    arg_type_assign_var_has_type(TypeAssign0, ArgTypes0,
-        Var, ClassContext, !ArgsTypeAssignSet),
-    typecheck_var_has_arg_type_2(ArgsTypeAssignSets, Var,
-        !ArgsTypeAssignSet).
-
-:- pred arg_type_assign_var_has_type(type_assign::in, list(mer_type)::in,
-    prog_var::in, hlds_constraints::in,
-    args_type_assign_set::in, args_type_assign_set::out) is det.
-
-arg_type_assign_var_has_type(TypeAssign0, ArgTypes0, Var, ClassContext,
-        !ArgTypeAssignSet) :-
+    ArgsTypeAssign0 = args_type_assign(TypeAssign0, ArgTypes,
+        ClassContext, Source),
     type_assign_get_var_types(TypeAssign0, VarTypes0),
+    list.det_index1(ArgTypes, ArgNum, ArgType),
+    search_insert_var_type(Var, ArgType, MaybeOldVarType, VarTypes0, VarTypes),
     (
-        ArgTypes0 = [Type | ArgTypes],
-        search_insert_var_type(Var, Type, MaybeOldVarType,
-            VarTypes0, VarTypes),
-        (
-            MaybeOldVarType = yes(OldVarType),
-            ( if
-                type_assign_unify_type(OldVarType, Type,
-                    TypeAssign0, TypeAssign1)
-            then
-                NewTypeAssign =
-                    args_type_assign(TypeAssign1, ArgTypes, ClassContext),
-                !:ArgTypeAssignSet = [NewTypeAssign | !.ArgTypeAssignSet]
-            else
-                true
-            )
-        ;
-            MaybeOldVarType = no,
-            type_assign_set_var_types(VarTypes, TypeAssign0, TypeAssign),
-            NewTypeAssign =
-                args_type_assign(TypeAssign, ArgTypes, ClassContext),
-            !:ArgTypeAssignSet = [NewTypeAssign | !.ArgTypeAssignSet]
+        MaybeOldVarType = yes(OldVarType),
+        ( if
+            type_assign_unify_type(OldVarType, ArgType,
+                TypeAssign0, TypeAssign)
+        then
+            ArgsTypeAssign = args_type_assign(TypeAssign, ArgTypes,
+                ClassContext, Source),
+            !:ArgsTypeAssignSet = [ArgsTypeAssign | !.ArgsTypeAssignSet]
+        else
+            true
         )
     ;
-        ArgTypes0 = [],
-        unexpected($pred, "ArgTypes0 = []")
+        MaybeOldVarType = no,
+        type_assign_set_var_types(VarTypes, TypeAssign0, TypeAssign),
+        ArgsTypeAssign = args_type_assign(TypeAssign, ArgTypes,
+            ClassContext, Source),
+        !:ArgsTypeAssignSet = [ArgsTypeAssign | !.ArgsTypeAssignSet]
     ).
 
 %---------------------------------------------------------------------------%
@@ -1971,15 +2012,14 @@ arg_type_assign_var_has_type(TypeAssign0, ArgTypes0, Var, ClassContext,
 typecheck_vars_have_types(ArgVectorKind, Context, Vars, Types,
         !TypeAssignSet, !Info) :-
     typecheck_vars_have_types_in_arg_vector(!.Info, Context, ArgVectorKind, 1,
-        Vars, Types, !TypeAssignSet, [], Specs, yes([]),
-        MaybeArgVectorTypeErrors),
+        Vars, Types, !TypeAssignSet,
+        [], Specs, yes([]), MaybeArgVectorTypeErrors),
     ( if
         MaybeArgVectorTypeErrors = yes(ArgVectorTypeErrors),
         ArgVectorTypeErrors = [_, _ | _]
     then
-        typecheck_info_get_error_clause_context(!.Info, ClauseContext),
-        AllArgsSpec = report_arg_vector_type_errors(!.Info, ClauseContext,
-            Context, ArgVectorKind, !.TypeAssignSet, ArgVectorTypeErrors),
+        AllArgsSpec = report_error_wrong_types_in_arg_vector(!.Info, Context,
+            ArgVectorKind, !.TypeAssignSet, ArgVectorTypeErrors),
         typecheck_info_add_error(AllArgsSpec, !Info)
     else
         list.foldl(typecheck_info_add_error, Specs, !Info)
@@ -2028,7 +2068,7 @@ typecheck_var_has_type_in_arg_vector(Info, Context, ArgVectorKind, ArgNum,
         TypeAssignSet = TypeAssignSet0,
         GoalContext =
             type_error_in_var_vector(var_vector_args(ArgVectorKind), ArgNum),
-        SpecAndMaybeActualExpected = report_error_var(Info,
+        SpecAndMaybeActualExpected = report_error_var_has_wrong_type(Info,
             GoalContext, Context, Var, Type, TypeAssignSet0),
         SpecAndMaybeActualExpected =
             spec_and_maybe_actual_expected(Spec, MaybeActualExpected),
@@ -2074,7 +2114,7 @@ typecheck_var_has_type(GoalContext, Context, Var, Type,
         TypeAssignSet0 = [_ | _]
     then
         TypeAssignSet = TypeAssignSet0,
-        SpecAndMaybeActualExpected = report_error_var(!.Info,
+        SpecAndMaybeActualExpected = report_error_var_has_wrong_type(!.Info,
             GoalContext, Context, Var, Type, TypeAssignSet0),
         SpecAndMaybeActualExpected = spec_and_maybe_actual_expected(Spec, _),
         typecheck_info_add_error(Spec, !Info)
@@ -2161,9 +2201,8 @@ typecheck_unify_var_var(UnifyContext, Context, X, Y,
         TypeAssignSet0 = [_ | _]
     then
         TypeAssignSet = TypeAssignSet0,
-        typecheck_info_get_error_clause_context(!.Info, ClauseContext),
-        Spec = report_error_unify_var_var(!.Info, ClauseContext, UnifyContext,
-            Context, X, Y, TypeAssignSet0),
+        Spec = report_error_unify_var_var(!.Info, UnifyContext, Context,
+            X, Y, TypeAssignSet0),
         typecheck_info_add_error(Spec, !Info)
     else
         TypeAssignSet = TypeAssignSet1
@@ -2195,7 +2234,6 @@ cons_id_must_be_builtin_type(ConsId, ConsType, BuiltinTypeName) :-
 
 typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
         GoalId, TypeAssignSet0, TypeAssignSet, !Info) :-
-    typecheck_info_get_error_clause_context(!.Info, ClauseContext),
     ( if cons_id_must_be_builtin_type(ConsId, ConsType, BuiltinTypeName) then
         ( if ConsType = builtin_type(builtin_type_int(int_type_int)) then
             typecheck_info_add_nosuffix_integer_var(Var, !Info)
@@ -2221,10 +2259,10 @@ typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
                 TypeAssignSet0 = [_ | _],
                 varset.init(ConsTypeVarSet),
                 empty_hlds_constraints(EmptyConstraints),
-                ConsDefn = cons_type_info(ConsTypeVarSet, [], ConsType, [],
+                ConsTypeInfo = cons_type_info(ConsTypeVarSet, [], ConsType, [],
                     EmptyConstraints, source_builtin_type(BuiltinTypeName)),
-                ConsIdSpec = report_error_functor_type(!.Info,
-                    UnifyContext, Context, Var, [ConsDefn],
+                ConsIdSpec = report_error_unify_var_functor_result(!.Info,
+                    UnifyContext, Context, Var, [ConsTypeInfo],
                     ConsId, 0, TypeAssignSet0),
                 typecheck_info_add_error(ConsIdSpec, !Info)
             )
@@ -2234,9 +2272,10 @@ typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
         % If there aren't any, report an undefined constructor error.
         list.length(ArgVars, Arity),
         typecheck_info_get_ctor_list(!.Info, ConsId, Arity, GoalId,
-            ConsDefns, ConsErrors),
+            ConsTypeInfos, ConsErrors),
         (
-            ConsDefns = [],
+            ConsTypeInfos = [],
+            typecheck_info_get_error_clause_context(!.Info, ClauseContext),
             TypeAssignSet = TypeAssignSet0,
             GoalContext = type_error_in_unify(UnifyContext),
             Spec = report_error_undef_cons(ClauseContext, GoalContext,
@@ -2244,17 +2283,18 @@ typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
             typecheck_info_add_error(Spec, !Info)
         ;
             (
-                ConsDefns = [_]
+                ConsTypeInfos = [_]
             ;
-                ConsDefns = [_, _ | _],
-                Sources = list.map(project_cons_type_info_source, ConsDefns),
+                ConsTypeInfos = [_, _ | _],
+                Sources =
+                    list.map(project_cons_type_info_source, ConsTypeInfos),
                 Symbol = overloaded_func(ConsId, Sources),
                 typecheck_info_add_overloaded_symbol(Symbol, Context, !Info)
             ),
 
             % Produce the ConsTypeAssignSet, which is essentially the
-            % cross-product of the ConsDefns and the TypeAssignSet0.
-            get_cons_type_assigns_for_cons_defns(ConsDefns, TypeAssignSet0,
+            % cross-product of the ConsTypeInfos and the TypeAssignSet0.
+            get_cons_type_assigns_for_cons_defns(ConsTypeInfos, TypeAssignSet0,
                 [], ConsTypeAssignSet),
             ( if
                 ConsTypeAssignSet = [],
@@ -2275,8 +2315,8 @@ typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
                 ArgsTypeAssignSet = [],
                 ConsTypeAssignSet = [_ | _]
             then
-                ConsIdSpec = report_error_functor_type(!.Info,
-                    UnifyContext, Context, Var, ConsDefns, ConsId, Arity,
+                ConsIdSpec = report_error_unify_var_functor_result(!.Info,
+                    UnifyContext, Context, Var, ConsTypeInfos, ConsId, Arity,
                     TypeAssignSet0),
                 typecheck_info_add_error(ConsIdSpec, !Info)
             else
@@ -2301,9 +2341,9 @@ typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
                     % message here would be misleading.
                 ;
                     ArgsTypeAssignSet = [_ | _],
-                    ArgSpec = report_error_functor_arg_types(!.Info,
-                        ClauseContext, UnifyContext, Context, Var,
-                        ConsDefns, ConsId, ArgVars, ArgsTypeAssignSet),
+                    ArgSpec = report_error_unify_var_functor_args(!.Info,
+                        UnifyContext, Context, Var, ConsTypeInfos,
+                        ConsId, ArgVars, ArgsTypeAssignSet),
                     typecheck_info_add_error(ArgSpec, !Info)
                 )
             )
@@ -2313,37 +2353,42 @@ typecheck_unify_var_functor(UnifyContext, Context, Var, ConsId, ArgVars,
 %---------------------%
 
 :- type cons_type_assign
-    --->    cons_type_assign(type_assign, mer_type, list(mer_type)).
+    --->    cons_type_assign(
+                type_assign,
+                mer_type,
+                list(mer_type),
+                cons_type_info_source
+            ).
 
 :- type cons_type_assign_set == list(cons_type_assign).
 
-    % typecheck_unify_var_functor_get_ctors_for_type_assigns(TypeAssignSet,
-    %   ConsDefns, !ConsTypeAssignSet):
+    % typecheck_unify_var_functor_get_ctors_for_type_assigns(ConsTypeInfos,
+    %   TypeAssignSet, !ConsTypeAssignSet):
     %
-    % Iterate over all the different possible type assignments and
-    % constructor definitions.
-    % For each type assignment in `TypeAssignSet', and constructor
-    % definition in `ConsDefns', produce a pair
+    % Iterate over all the different possible pairings of all the
+    % constructor definitions and all the type assignments.
+    % For each constructor definition in `ConsTypeInfos' and type assignment
+    % in `TypeAssignSet', produce a pair
     %
     %   TypeAssign - cons_type(Type, ArgTypes)
     %
-    % where `cons_type(Type, ArgTypes)' records one of the possible types
-    % for the constructor in `ConsDefns', and where `TypeAssign' is the type
+    % where `cons_type(Type, ArgTypes)' records one of the possible types for
+    % the constructor in `ConsTypeInfos', and where `TypeAssign' is the type
     % assignment renamed apart from the types of the constructors.
     %
-    % This predicate iterates over the type assign sets;
-    % typecheck_unify_var_functor_get_ctors iterates over the cons defns.
+    % This predicate iterates over the cons_type_infos;
+    % get_cons_type_assigns_for_cons_defn iterates over the type_assigns.
     %
 :- pred get_cons_type_assigns_for_cons_defns(list(cons_type_info)::in,
     type_assign_set::in,
     cons_type_assign_set::in, cons_type_assign_set::out) is det.
 
 get_cons_type_assigns_for_cons_defns([], _, !ConsTypeAssignSet).
-get_cons_type_assigns_for_cons_defns([ConsDefn | ConsDefns], TypeAssigns,
-        !ConsTypeAssignSet) :-
-    get_cons_type_assigns_for_cons_defn(ConsDefn, TypeAssigns,
+get_cons_type_assigns_for_cons_defns([ConsTypeInfo | ConsTypeInfos],
+        TypeAssigns, !ConsTypeAssignSet) :-
+    get_cons_type_assigns_for_cons_defn(ConsTypeInfo, TypeAssigns,
         !ConsTypeAssignSet),
-    get_cons_type_assigns_for_cons_defns(ConsDefns, TypeAssigns,
+    get_cons_type_assigns_for_cons_defns(ConsTypeInfos, TypeAssigns,
         !ConsTypeAssignSet).
 
 :- pred get_cons_type_assigns_for_cons_defn(cons_type_info::in,
@@ -2351,11 +2396,11 @@ get_cons_type_assigns_for_cons_defns([ConsDefn | ConsDefns], TypeAssigns,
     cons_type_assign_set::in, cons_type_assign_set::out) is det.
 
 get_cons_type_assigns_for_cons_defn(_, [], !ConsTypeAssignSet).
-get_cons_type_assigns_for_cons_defn(ConsDefn, [TypeAssign | TypeAssigns],
+get_cons_type_assigns_for_cons_defn(ConsTypeInfo, [TypeAssign | TypeAssigns],
         !ConsTypeAssignSet) :-
-    get_cons_type_assign(ConsDefn, TypeAssign, ConsTypeAssign),
+    get_cons_type_assign(ConsTypeInfo, TypeAssign, ConsTypeAssign),
     !:ConsTypeAssignSet = [ConsTypeAssign | !.ConsTypeAssignSet],
-    get_cons_type_assigns_for_cons_defn(ConsDefn, TypeAssigns,
+    get_cons_type_assigns_for_cons_defn(ConsTypeInfo, TypeAssigns,
         !ConsTypeAssignSet).
 
     % Given an cons_type_info, construct a type for the constructor
@@ -2366,9 +2411,9 @@ get_cons_type_assigns_for_cons_defn(ConsDefn, [TypeAssign | TypeAssigns],
 :- pred get_cons_type_assign(cons_type_info::in, type_assign::in,
     cons_type_assign::out) is det.
 
-get_cons_type_assign(ConsDefn, TypeAssign0, ConsTypeAssign) :-
-    ConsDefn = cons_type_info(ConsTypeVarSet, ConsExistQVars0,
-        ConsType0, ArgTypes0, ClassConstraints0, _Source),
+get_cons_type_assign(ConsTypeInfo, TypeAssign0, ConsTypeAssign) :-
+    ConsTypeInfo = cons_type_info(ConsTypeVarSet, ConsExistQVars0,
+        ConsType0, ArgTypes0, ClassConstraints0, Source),
 
     % Rename apart the type vars in the type of the constructor
     % and the types of its arguments.
@@ -2389,10 +2434,9 @@ get_cons_type_assign(ConsDefn, TypeAssign0, ConsTypeAssign) :-
             ConsExistQVars0, ConsExistQVars),
         apply_variable_renaming_to_constraints(Renaming,
             ClassConstraints0, ConstraintsToAdd),
-        type_assign_get_external_type_params(TypeAssign1, HeadTypeParams0),
-        HeadTypeParams = ConsExistQVars ++ HeadTypeParams0,
-        type_assign_set_external_type_params(HeadTypeParams,
-            TypeAssign1, TypeAssign2),
+        type_assign_get_existq_tvars(TypeAssign1, ExistQTVars0),
+        ExistQTVars = ConsExistQVars ++ ExistQTVars0,
+        type_assign_set_existq_tvars(ExistQTVars, TypeAssign1, TypeAssign2),
 
         ConsType = ConsType1,
         ArgTypes = ArgTypes1
@@ -2412,27 +2456,27 @@ get_cons_type_assign(ConsDefn, TypeAssign0, ConsTypeAssign) :-
     merge_hlds_constraints(ConstraintsToAdd, OldConstraints, ClassConstraints),
     type_assign_set_typeclass_constraints(ClassConstraints,
         TypeAssign2, TypeAssign),
-    ConsTypeAssign = cons_type_assign(TypeAssign, ConsType, ArgTypes).
+    ConsTypeAssign = cons_type_assign(TypeAssign, ConsType, ArgTypes, Source).
 
 %---------------------%
 
-    % typecheck_functor_arg_types(ConsTypeAssignSet, Var, Args, ...):
+    % typecheck_functor_arg_types(Info, ArgVars, ArgsTypeAssigns, ...):
     %
     % For each possible cons type assignment in `ConsTypeAssignSet',
     % for each possible constructor argument types,
-    % check that the types of `Args' matches these types.
+    % check that the types of `ArgVars' match these types.
     %
 :- pred typecheck_functor_arg_types(typecheck_info::in, list(prog_var)::in,
     args_type_assign_set::in,
     type_assign_set::in, type_assign_set::out) is det.
 
 typecheck_functor_arg_types(_, _, [], !TypeAssignSet).
-typecheck_functor_arg_types(Info, ArgVars, [ConsTypeAssign | ConsTypeAssigns],
+typecheck_functor_arg_types(Info, ArgVars, [ArgsTypeAssign | ArgsTypeAssigns],
         !TypeAssignSet) :-
-    ConsTypeAssign = args_type_assign(TypeAssign, ArgTypes, _),
+    ArgsTypeAssign = args_type_assign(TypeAssign, ArgTypes, _, _),
     type_assign_vars_have_types(Info, TypeAssign, ArgVars, ArgTypes,
         !TypeAssignSet),
-    typecheck_functor_arg_types(Info, ArgVars, ConsTypeAssigns,
+    typecheck_functor_arg_types(Info, ArgVars, ArgsTypeAssigns,
         !TypeAssignSet).
 
     % type_assign_vars_have_types(Info, TypeAssign, ArgVars, Types,
@@ -2563,35 +2607,38 @@ typecheck_var_functor_types(Var, [ConsTypeAssign | ConsTypeAssigns],
     args_type_assign_set::in, args_type_assign_set::out) is det.
 
 typecheck_var_functor_type(Var, ConsTypeAssign0, !ArgsTypeAssignSet) :-
-    ConsTypeAssign0 = cons_type_assign(TypeAssign0, ConsType, ConsArgTypes),
+    ConsTypeAssign0 = cons_type_assign(TypeAssign0, ConsType, ConsArgTypes,
+        Source0),
 
     % Unify the type of Var with the type of the constructor.
     type_assign_get_var_types(TypeAssign0, VarTypes0),
-    search_insert_var_type(Var, ConsType, MaybeTypeVar, VarTypes0, VarTypes),
+    search_insert_var_type(Var, ConsType, MaybeOldVarType,
+        VarTypes0, VarTypes),
     (
-        MaybeTypeVar = yes(TypeVar),
+        MaybeOldVarType = yes(OldVarType),
         % VarTypes wasn't updated, so don't need to update its containing
         % type assign either.
         ( if
-            type_assign_unify_type(ConsType, TypeVar, TypeAssign0, TypeAssign)
+            type_assign_unify_type(ConsType, OldVarType,
+                TypeAssign0, TypeAssign)
         then
             % The constraints are empty here because none are added by
             % unification with a functor.
             empty_hlds_constraints(EmptyConstraints),
-            ArgsTypeAssign =
-                args_type_assign(TypeAssign, ConsArgTypes, EmptyConstraints),
+            ArgsTypeAssign = args_type_assign(TypeAssign,
+                ConsArgTypes, EmptyConstraints, atas_cons(Source0)),
             !:ArgsTypeAssignSet = [ArgsTypeAssign | !.ArgsTypeAssignSet]
         else
             true
         )
     ;
-        MaybeTypeVar = no,
+        MaybeOldVarType = no,
         type_assign_set_var_types(VarTypes, TypeAssign0, TypeAssign),
         % The constraints are empty here because none are added by
         % unification with a functor.
         empty_hlds_constraints(EmptyConstraints),
-        ArgsTypeAssign =
-            args_type_assign(TypeAssign, ConsArgTypes, EmptyConstraints),
+        ArgsTypeAssign = args_type_assign(TypeAssign,
+            ConsArgTypes, EmptyConstraints, atas_cons(Source0)),
         !:ArgsTypeAssignSet = [ArgsTypeAssign | !.ArgsTypeAssignSet]
     ).
 
@@ -2645,9 +2692,8 @@ typecheck_lambda_var_has_type(UnifyContext, Context, Purity, PredOrFunc,
         TypeAssignSet0 = [_ | _]
     then
         TypeAssignSet = TypeAssignSet0,
-        typecheck_info_get_error_clause_context(!.Info, ClauseContext),
-        Spec = report_error_lambda_var(!.Info, ClauseContext, UnifyContext,
-            Context, PredOrFunc, EvalMethod, Var, ArgVars, TypeAssignSet0),
+        Spec = report_error_unify_var_lambda(!.Info, UnifyContext, Context,
+            PredOrFunc, EvalMethod, Var, ArgVars, TypeAssignSet0),
         typecheck_info_add_error(Spec, !Info)
     else
         TypeAssignSet = TypeAssignSet1
@@ -2707,9 +2753,9 @@ type_assign_fresh_type_var(Var, Type, !TypeAssign) :-
     type_assign::in, type_assign::out) is semidet.
 
 type_assign_unify_type(X, Y, TypeAssign0, TypeAssign) :-
-    type_assign_get_external_type_params(TypeAssign0, HeadTypeParams),
+    type_assign_get_existq_tvars(TypeAssign0, ExistQTVars),
     type_assign_get_type_bindings(TypeAssign0, TypeBindings0),
-    type_unify(X, Y, HeadTypeParams, TypeBindings0, TypeBindings),
+    type_unify(X, Y, ExistQTVars, TypeBindings0, TypeBindings),
     type_assign_set_type_bindings(TypeBindings, TypeAssign0, TypeAssign).
 
 %---------------------------------------------------------------------------%
@@ -2744,7 +2790,7 @@ typecheck_coerce_2(Context, FromVar, ToVar, TypeAssign0,
         !TypeAssignSet, !Info) :-
     type_assign_get_var_types(TypeAssign0, VarTypes),
     type_assign_get_typevarset(TypeAssign0, TVarSet),
-    type_assign_get_external_type_params(TypeAssign0, ExternalTypeParams),
+    type_assign_get_existq_tvars(TypeAssign0, ExistQTVars),
     type_assign_get_type_bindings(TypeAssign0, TypeBindings),
 
     ( if search_var_type(VarTypes, FromVar, FromType0) then
@@ -2763,8 +2809,8 @@ typecheck_coerce_2(Context, FromVar, ToVar, TypeAssign0,
     ( if
         MaybeFromType = yes(FromType),
         MaybeToType = yes(ToType),
-        type_is_ground_except_vars(FromType, ExternalTypeParams),
-        type_is_ground_except_vars(ToType, ExternalTypeParams)
+        type_is_ground_except_vars(FromType, ExistQTVars),
+        type_is_ground_except_vars(ToType, ExistQTVars)
     then
         % We can compare the types on both sides immediately.
         typecheck_info_get_type_table(!.Info, TypeTable),
@@ -2811,477 +2857,6 @@ typecheck_coerce_2(Context, FromVar, ToVar, TypeAssign0,
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-    % builtin_atomic_type(Const, TypeName):
-    %
-    % If Const is *or can be* a constant of a builtin atomic type,
-    % set TypeName to the name of that type, otherwise fail.
-    %
-:- pred builtin_atomic_type(cons_id::in, string::out) is semidet.
-
-builtin_atomic_type(some_int_const(IntConst), TypeName) :-
-    TypeName = type_name_of_int_const(IntConst).
-builtin_atomic_type(float_const(_), "float").
-builtin_atomic_type(char_const(_), "character").
-builtin_atomic_type(string_const(_), "string").
-builtin_atomic_type(cons(unqualified(String), 0, _), "character") :-
-    % We are before post-typecheck, so character constants have not yet been
-    % converted to char_consts.
-    %
-    % XXX The parser should have a separate term.functor representation
-    % for character constants, which should be converted to char_consts
-    % during the term to item translation.
-    string.char_to_string(_, String).
-builtin_atomic_type(impl_defined_const(IDCKind), Type) :-
-    (
-        ( IDCKind = idc_file
-        ; IDCKind = idc_module
-        ; IDCKind = idc_pred
-        ; IDCKind = idc_grade
-        ),
-        Type = "string"
-    ;
-        IDCKind = idc_line,
-        Type = "int"
-    ).
-
-    % builtin_pred_type(Info, ConsId, Arity, GoalId, PredConsInfoList):
-    %
-    % If ConsId/Arity is a constant of a pred type, instantiates
-    % the output parameters, otherwise fails.
-    %
-    % Instantiates PredConsInfoList to the set of cons_type_info structures
-    % for each predicate with name `ConsId' and arity greater than or equal to
-    % Arity. GoalId is used to identify any constraints introduced.
-    %
-    % For example, functor `map.search/1' has type `pred(K, V)'
-    % (hence PredTypeParams = [K, V]) and argument types [map(K, V)].
-    %
-:- pred builtin_pred_type(typecheck_info::in, cons_id::in, int::in,
-    goal_id::in, list(cons_type_info)::out) is semidet.
-
-builtin_pred_type(Info, ConsId, Arity, GoalId, ConsTypeInfos) :-
-    ConsId = cons(SymName, _, _),
-    typecheck_info_get_pred_table(Info, PredicateTable),
-    typecheck_info_get_calls_are_fully_qualified(Info, IsFullyQualified),
-    predicate_table_lookup_sym(PredicateTable, IsFullyQualified, SymName,
-        PredIds),
-    (
-        PredIds = [_ | _],
-        predicate_table_get_preds(PredicateTable, Preds),
-        accumulate_cons_type_infos_for_pred_ids(Info, Preds, GoalId,
-            PredIds, Arity, [], ConsTypeInfos)
-    ;
-        PredIds = [],
-        ConsTypeInfos = []
-    ).
-
-:- pred accumulate_cons_type_infos_for_pred_ids(typecheck_info::in,
-    pred_table::in, goal_id::in, list(pred_id)::in, int::in,
-    list(cons_type_info)::in, list(cons_type_info)::out) is det.
-
-accumulate_cons_type_infos_for_pred_ids(_, _, _, [], _, !ConsTypeInfos).
-accumulate_cons_type_infos_for_pred_ids(Info, PredTable, GoalId,
-        [PredId | PredIds], Arity, !ConsTypeInfos) :-
-    accumulate_cons_type_infos_for_pred_id(Info, PredTable, GoalId,
-        PredId, Arity, !ConsTypeInfos),
-    accumulate_cons_type_infos_for_pred_ids(Info, PredTable, GoalId,
-        PredIds, Arity, !ConsTypeInfos).
-
-:- pred accumulate_cons_type_infos_for_pred_id(typecheck_info::in,
-    pred_table::in, goal_id::in, pred_id::in, int::in,
-    list(cons_type_info)::in, list(cons_type_info)::out) is det.
-
-accumulate_cons_type_infos_for_pred_id(Info, PredTable, GoalId,
-        PredId, FuncArity, !ConsTypeInfos) :-
-    typecheck_info_get_module_info(Info, ModuleInfo),
-    module_info_get_class_table(ModuleInfo, ClassTable),
-    map.lookup(PredTable, PredId, PredInfo),
-    PredArity = pred_info_orig_arity(PredInfo),
-    IsPredOrFunc = pred_info_is_pred_or_func(PredInfo),
-    pred_info_get_class_context(PredInfo, PredClassContext),
-    pred_info_get_arg_types(PredInfo, PredTypeVarSet, PredExistQVars,
-        CompleteArgTypes),
-    pred_info_get_purity(PredInfo, Purity),
-    ( if
-        IsPredOrFunc = pf_predicate,
-        PredArity >= FuncArity,
-        % We don't support first-class polymorphism, so you can't take the
-        % address of an existentially quantified predicate.
-        PredExistQVars = []
-    then
-        list.det_split_list(FuncArity, CompleteArgTypes,
-            ArgTypes, PredTypeParams),
-        construct_higher_order_pred_type(Purity, lambda_normal,
-            PredTypeParams, PredType),
-        make_body_hlds_constraints(ClassTable, PredTypeVarSet,
-            GoalId, PredClassContext, PredConstraints),
-        ConsTypeInfo = cons_type_info(PredTypeVarSet, PredExistQVars,
-            PredType, ArgTypes, PredConstraints, source_pred(PredId)),
-        !:ConsTypeInfos = [ConsTypeInfo | !.ConsTypeInfos]
-    else if
-        IsPredOrFunc = pf_function,
-        PredAsFuncArity = PredArity - 1,
-        PredAsFuncArity >= FuncArity,
-        % We don't support first-class polymorphism, so you can't take
-        % the address of an existentially quantified function. You can however
-        % call such a function, so long as you pass *all* the parameters.
-        ( PredExistQVars = []
-        ; PredAsFuncArity = FuncArity
-        )
-    then
-        list.det_split_list(FuncArity, CompleteArgTypes,
-            FuncArgTypes, FuncTypeParams),
-        pred_args_to_func_args(FuncTypeParams,
-            FuncArgTypeParams, FuncReturnTypeParam),
-        (
-            FuncArgTypeParams = [],
-            FuncType = FuncReturnTypeParam
-        ;
-            FuncArgTypeParams = [_ | _],
-            construct_higher_order_func_type(Purity, lambda_normal,
-                FuncArgTypeParams, FuncReturnTypeParam, FuncType)
-        ),
-        make_body_hlds_constraints(ClassTable, PredTypeVarSet,
-            GoalId, PredClassContext, PredConstraints),
-        ConsTypeInfo = cons_type_info(PredTypeVarSet,
-            PredExistQVars, FuncType, FuncArgTypes, PredConstraints,
-            source_pred(PredId)),
-        !:ConsTypeInfos = [ConsTypeInfo | !.ConsTypeInfos]
-    else
-        true
-    ).
-
-    % builtin_apply_type(Info, ConsId, Arity, ConsTypeInfos):
-    %
-    % Succeed if ConsId is the builtin apply/N or ''/N (N>=2),
-    % which is used to invoke higher-order functions.
-    % If so, bind ConsTypeInfos to a singleton list containing
-    % the appropriate type for apply/N of the specified Arity.
-    %
-:- pred builtin_apply_type(typecheck_info::in, cons_id::in, int::in,
-    list(cons_type_info)::out) is semidet.
-
-builtin_apply_type(_Info, ConsId, Arity, ConsTypeInfos) :-
-    ConsId = cons(unqualified(ApplyName), _, _),
-    % XXX FIXME handle impure apply/N more elegantly (e.g. nicer syntax)
-    (
-        ApplyName = "apply",
-        ApplyNameToUse = ApplyName,
-        Purity = purity_pure
-    ;
-        ApplyName = "",
-        ApplyNameToUse = "apply",
-        Purity = purity_pure
-    ;
-        ApplyName = "impure_apply",
-        ApplyNameToUse = ApplyName,
-        Purity = purity_impure
-    ;
-        ApplyName = "semipure_apply",
-        ApplyNameToUse = ApplyName,
-        Purity = purity_semipure
-    ),
-    Arity >= 1,
-    Arity1 = Arity - 1,
-    higher_order_func_type(Purity, Arity1, lambda_normal, TypeVarSet, FuncType,
-        ArgTypes, RetType),
-    ExistQVars = [],
-    empty_hlds_constraints(EmptyConstraints),
-    ConsTypeInfos = [cons_type_info(TypeVarSet, ExistQVars, RetType,
-        [FuncType | ArgTypes], EmptyConstraints,
-        source_apply(ApplyNameToUse))].
-
-    % builtin_field_access_function_type(Info, GoalId, ConsId,
-    %   Arity, ConsTypeInfos):
-    %
-    % Succeed if ConsId is the name of one the automatically
-    % generated field access functions (fieldname, '<fieldname> :=').
-    %
-:- pred builtin_field_access_function_type(typecheck_info::in, goal_id::in,
-    cons_id::in, arity::in, list(maybe_cons_type_info)::out) is semidet.
-
-builtin_field_access_function_type(Info, GoalId, ConsId, Arity,
-        MaybeConsTypeInfos) :-
-    % Taking the address of automatically generated field access functions
-    % is not allowed, so currying does have to be considered here.
-    ConsId = cons(Name, Arity, _),
-    typecheck_info_get_module_info(Info, ModuleInfo),
-    is_field_access_function_name(ModuleInfo, Name, Arity, AccessType,
-        FieldName),
-
-    module_info_get_ctor_field_table(ModuleInfo, CtorFieldTable),
-    map.search(CtorFieldTable, FieldName, FieldDefns),
-
-    list.filter_map(
-        make_field_access_function_cons_type_info(Info, GoalId, Name,
-            Arity, AccessType, FieldName),
-        FieldDefns, MaybeConsTypeInfos).
-
-:- pred make_field_access_function_cons_type_info(typecheck_info::in,
-    goal_id::in, sym_name::in, arity::in, field_access_type::in,
-    sym_name::in, hlds_ctor_field_defn::in,
-    maybe_cons_type_info::out) is semidet.
-
-make_field_access_function_cons_type_info(Info, GoalId, FuncName, Arity,
-        AccessType, FieldName, FieldDefn, ConsTypeInfo) :-
-    get_field_access_constructor(Info, GoalId, FuncName, Arity,
-        AccessType, FieldDefn, OrigExistTVars,
-        MaybeFunctorConsTypeInfo),
-    (
-        MaybeFunctorConsTypeInfo = ok(FunctorConsTypeInfo),
-        typecheck_info_get_module_info(Info, ModuleInfo),
-        module_info_get_class_table(ModuleInfo, ClassTable),
-        convert_field_access_cons_type_info(ClassTable, AccessType,
-            FieldName, FieldDefn, FunctorConsTypeInfo,
-            OrigExistTVars, ConsTypeInfo)
-    ;
-        MaybeFunctorConsTypeInfo = error(_),
-        ConsTypeInfo = MaybeFunctorConsTypeInfo
-    ).
-
-:- pred get_field_access_constructor(typecheck_info::in, goal_id::in,
-    sym_name::in, arity::in, field_access_type::in, hlds_ctor_field_defn::in,
-    existq_tvars::out, maybe_cons_type_info::out) is semidet.
-
-get_field_access_constructor(Info, GoalId, FuncName, Arity, AccessType,
-        FieldDefn, OrigExistTVars, FunctorConsTypeInfo) :-
-    FieldDefn = hlds_ctor_field_defn(_, _, TypeCtor, ConsId, _),
-    TypeCtor = type_ctor(qualified(TypeModule, _), _),
-
-    % If the user has supplied a declaration for a field access function
-    % of the same name and arity, operating on the same type constructor,
-    % we use that instead of the automatically generated version,
-    % unless we are typechecking the clause introduced for the
-    % user-supplied declaration itself.
-    % The user-declared version will be picked up by builtin_pred_type.
-    typecheck_info_get_module_info(Info, ModuleInfo),
-    module_info_get_predicate_table(ModuleInfo, PredTable),
-    UnqualFuncName = unqualify_name(FuncName),
-    typecheck_info_get_is_field_access_function(Info, IsFieldAccessFunc),
-    (
-        IsFieldAccessFunc = no,
-        predicate_table_lookup_func_m_n_a(PredTable, is_fully_qualified,
-            TypeModule, UnqualFuncName, Arity, PredIds),
-        list.all_false(
-            is_field_access_function_for_type_ctor(ModuleInfo, AccessType,
-                TypeCtor),
-            PredIds)
-    ;
-        IsFieldAccessFunc = yes(_)
-    ),
-    module_info_get_cons_table(ModuleInfo, ConsTable),
-    lookup_cons_table_of_type_ctor(ConsTable, TypeCtor, ConsId, ConsDefn),
-    MaybeExistConstraints = ConsDefn ^ cons_maybe_exist,
-    (
-        MaybeExistConstraints = no_exist_constraints,
-        OrigExistTVars = []
-    ;
-        MaybeExistConstraints = exist_constraints(ExistConstraints),
-        ExistConstraints = cons_exist_constraints(OrigExistTVars, _, _, _)
-    ),
-    (
-        AccessType = get,
-        ConsAction = do_not_flip_constraints,
-        convert_cons_defn(Info, GoalId, ConsAction, ConsDefn,
-            FunctorConsTypeInfo)
-    ;
-        AccessType = set,
-        ConsAction = flip_constraints_for_field_set,
-        convert_cons_defn(Info, GoalId, ConsAction, ConsDefn,
-            FunctorConsTypeInfo)
-    ).
-
-:- pred is_field_access_function_for_type_ctor(module_info::in,
-    field_access_type::in, type_ctor::in, pred_id::in) is semidet.
-
-is_field_access_function_for_type_ctor(ModuleInfo, AccessType, TypeCtor,
-        PredId) :-
-    module_info_pred_info(ModuleInfo, PredId, PredInfo),
-    pred_info_get_arg_types(PredInfo, ArgTypes),
-    require_complete_switch [AccessType]
-    (
-        AccessType = get,
-        ArgTypes = [ArgType, _ResultType],
-        type_to_ctor(ArgType, TypeCtor)
-    ;
-        AccessType = set,
-        ArgTypes = [ArgType, _FieldType, ResultType],
-        type_to_ctor(ArgType, TypeCtor),
-        type_to_ctor(ResultType, TypeCtor)
-    ).
-
-:- type maybe_cons_type_info
-    --->    ok(cons_type_info)
-    ;       error(cons_error).
-
-:- pred convert_field_access_cons_type_info(class_table::in,
-    field_access_type::in, sym_name::in, hlds_ctor_field_defn::in,
-    cons_type_info::in, existq_tvars::in, maybe_cons_type_info::out) is det.
-
-convert_field_access_cons_type_info(ClassTable, AccessType, FieldName,
-        FieldDefn, FunctorConsTypeInfo, OrigExistTVars, ConsTypeInfo) :-
-    FunctorConsTypeInfo = cons_type_info(TVarSet0, ExistQVars,
-        FunctorType, ConsArgTypes, Constraints0, Source0),
-    (
-        Source0 = source_type(SourceType)
-    ;
-        ( Source0 = source_builtin_type(_)
-        ; Source0 = source_get_field_access(_)
-        ; Source0 = source_set_field_access(_)
-        ; Source0 = source_apply(_)
-        ; Source0 = source_pred(_)
-        ),
-        unexpected($pred, "not type")
-    ),
-    FieldDefn = hlds_ctor_field_defn(_, _, _, _, FieldNumber),
-    list.det_index1(ConsArgTypes, FieldNumber, FieldType),
-    (
-        AccessType = get,
-        Source = source_get_field_access(SourceType),
-        RetType = FieldType,
-        ArgTypes = [FunctorType],
-        ConsTypeInfo = ok(cons_type_info(TVarSet0, ExistQVars,
-            RetType, ArgTypes, Constraints0, Source))
-    ;
-        AccessType = set,
-        Source = source_set_field_access(SourceType),
-
-        % When setting a polymorphic field, the type of the field in the result
-        % is not necessarily the same as in the input. If a type variable
-        % occurs only in the field being set, create a new type variable for it
-        % in the result type.
-        %
-        % This allows code such as
-        % :- type pair(T, U)
-        %   ---> '-'(fst::T, snd::U).
-        %
-        %   Pair0 = 1 - 'a',
-        %   Pair = Pair0 ^ snd := 2.
-
-        type_vars(FieldType, TVarsInField),
-        % Most of the time, TVarsInField is [], so provide a fast path
-        % for this case.
-        (
-            TVarsInField = [],
-            RetType = FunctorType,
-            ArgTypes = [FunctorType, FieldType],
-            % None of the constraints are affected by the updated field,
-            % so the constraints are unchanged.
-            ConsTypeInfo = ok(cons_type_info(TVarSet0, ExistQVars,
-                RetType, ArgTypes, Constraints0, Source))
-        ;
-            TVarsInField = [_ | _],
-
-            % XXX This demonstrates a problem - if a type variable occurs
-            % in the types of multiple fields, any predicates changing values
-            % of one of these fields cannot change their types. This is
-            % especially a problem for existentially typed fields, because
-            % setting the field always changes the type.
-            %
-            % Haskell gets around this problem by allowing multiple fields
-            % to be set by the same expression. Haskell doesn't handle all
-            % cases -- it is not possible to get multiple existentially typed
-            % fields using record syntax and pass them to a function whose type
-            % requires that the fields are of the same type. It probably won't
-            % come up too often.
-            %
-            list.det_replace_nth(ConsArgTypes, FieldNumber, int_type,
-                ArgTypesWithoutField),
-            type_vars_list(ArgTypesWithoutField, TVarsInOtherArgs),
-            set.intersect(
-                set.list_to_set(TVarsInField),
-                set.intersect(
-                    set.list_to_set(TVarsInOtherArgs),
-                    set.list_to_set(OrigExistTVars)
-                ),
-                ExistQVarsInFieldAndOthers),
-            ( if set.is_empty(ExistQVarsInFieldAndOthers) then
-                % Rename apart type variables occurring only in the field
-                % to be replaced - the values of those type variables will be
-                % supplied by the replacement field value.
-                list.delete_elems(TVarsInField,
-                    TVarsInOtherArgs, TVarsOnlyInField0),
-                list.sort_and_remove_dups(TVarsOnlyInField0, TVarsOnlyInField),
-                list.length(TVarsOnlyInField, NumNewTVars),
-                varset.new_vars(NumNewTVars, NewTVars, TVarSet0, TVarSet),
-                map.from_corresponding_lists(TVarsOnlyInField,
-                    NewTVars, TVarRenaming),
-                apply_variable_renaming_to_type(TVarRenaming, FieldType,
-                    RenamedFieldType),
-                apply_variable_renaming_to_type(TVarRenaming, FunctorType,
-                    OutputFunctorType),
-                % Rename the class constraints, projecting the constraints
-                % onto the set of type variables occurring in the types of the
-                % arguments of the call to `'field :='/2'. Note that we have
-                % already flipped the constraints.
-                type_vars_list([FunctorType, FieldType], CallTVars0),
-                set.list_to_set(CallTVars0, CallTVars),
-                project_and_rename_constraints(ClassTable, TVarSet, CallTVars,
-                    TVarRenaming, Constraints0, Constraints),
-                RetType = OutputFunctorType,
-                ArgTypes = [FunctorType, RenamedFieldType],
-                ConsTypeInfo = ok(cons_type_info(TVarSet, ExistQVars,
-                    RetType, ArgTypes, Constraints, Source))
-            else
-                % This field cannot be set. Pass out some information so that
-                % we can give a better error message. Errors involving changing
-                % the types of universally quantified type variables will be
-                % caught by typecheck_functor_arg_types.
-                set.to_sorted_list(ExistQVarsInFieldAndOthers,
-                    ExistQVarsInFieldAndOthers1),
-                ConsTypeInfo = error(invalid_field_update(FieldName,
-                    FieldDefn, TVarSet0, ExistQVarsInFieldAndOthers1))
-            )
-        )
-    ).
-
-    % Add new universal constraints for constraints containing variables that
-    % have been renamed. These new constraints are the ones that will need
-    % to be supplied by the caller. The other constraints will be supplied
-    % from non-updated fields.
-    %
-:- pred project_and_rename_constraints(class_table::in, tvarset::in,
-    set(tvar)::in, tvar_renaming::in,
-    hlds_constraints::in, hlds_constraints::out) is det.
-
-project_and_rename_constraints(ClassTable, TVarSet, CallTVars, TVarRenaming,
-        !Constraints) :-
-    !.Constraints = hlds_constraints(Unproven0, Assumed,
-        Redundant0, Ancestors),
-
-    % Project the constraints down onto the list of tvars in the call.
-    list.filter(project_constraint(CallTVars), Unproven0, NewUnproven0),
-    list.filter_map(rename_constraint(TVarRenaming), NewUnproven0,
-        NewUnproven),
-    update_redundant_constraints(ClassTable, TVarSet, NewUnproven,
-        Redundant0, Redundant),
-    list.append(NewUnproven, Unproven0, Unproven),
-    !:Constraints = hlds_constraints(Unproven, Assumed, Redundant, Ancestors).
-
-:- pred project_constraint(set(tvar)::in, hlds_constraint::in) is semidet.
-
-project_constraint(CallTVars, Constraint) :-
-    Constraint = hlds_constraint(_Ids, _ClassName, TypesToCheck),
-    type_vars_list(TypesToCheck, TVarsToCheck0),
-    set.list_to_set(TVarsToCheck0, TVarsToCheck),
-    set.intersect(TVarsToCheck, CallTVars, RelevantTVars),
-    set.is_non_empty(RelevantTVars).
-
-:- pred rename_constraint(tvar_renaming::in, hlds_constraint::in,
-    hlds_constraint::out) is semidet.
-
-rename_constraint(TVarRenaming, Constraint0, Constraint) :-
-    Constraint0 = hlds_constraint(Ids, ClassName, ArgTypes0),
-    some [Var] (
-        type_list_contains_var(ArgTypes0, Var),
-        map.contains(TVarRenaming, Var)
-    ),
-    apply_variable_renaming_to_type_list(TVarRenaming, ArgTypes0, ArgTypes),
-    Constraint = hlds_constraint(Ids, ClassName, ArgTypes).
-
-%---------------------------------------------------------------------------%
-%---------------------------------------------------------------------------%
-
     % Note: changes here may require changes to
     % post_typecheck.resolve_unify_functor,
     % intermod.module_qualify_unify_rhs,
@@ -3291,7 +2866,7 @@ rename_constraint(TVarRenaming, Constraint0, Constraint) :-
 :- pred typecheck_info_get_ctor_list(typecheck_info::in, cons_id::in, int::in,
     goal_id::in, list(cons_type_info)::out, list(cons_error)::out) is det.
 
-typecheck_info_get_ctor_list(Info, Functor, Arity, GoalId, ConsInfos,
+typecheck_info_get_ctor_list(Info, ConsId, Arity, GoalId, ConsInfos,
         ConsErrors) :-
     typecheck_info_get_is_field_access_function(Info, IsFieldAccessFunc),
     ( if
@@ -3305,7 +2880,7 @@ typecheck_info_get_ctor_list(Info, Functor, Arity, GoalId, ConsInfos,
     then
         ( if
             builtin_field_access_function_type(Info, GoalId,
-                Functor, Arity, FieldAccessConsInfos)
+                ConsId, Arity, FieldAccessConsInfos)
         then
             split_cons_errors(FieldAccessConsInfos, ConsInfos, ConsErrors)
         else
@@ -3313,7 +2888,7 @@ typecheck_info_get_ctor_list(Info, Functor, Arity, GoalId, ConsInfos,
             ConsErrors = []
         )
     else
-        typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId,
+        typecheck_info_get_ctor_list_2(Info, ConsId, Arity, GoalId,
             ConsInfos, ConsErrors)
     ).
 
@@ -3321,20 +2896,20 @@ typecheck_info_get_ctor_list(Info, Functor, Arity, GoalId, ConsInfos,
     int::in, goal_id::in, list(cons_type_info)::out, list(cons_error)::out)
     is det.
 
-typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
+typecheck_info_get_ctor_list_2(Info, ConsId, Arity, GoalId, ConsInfos,
         DataConsErrors) :-
     empty_hlds_constraints(EmptyConstraints),
 
-    % Check if `Functor/Arity' has been defined as a constructor in some
+    % Check if `ConsId/Arity' has been defined as a constructor in some
     % discriminated union type(s). This gives us a list of possible
     % cons_type_infos.
     typecheck_info_get_cons_table(Info, ConsTable),
     ( if
-        Functor = cons(_, _, _),
-        search_cons_table(ConsTable, Functor, HLDS_ConsDefns)
+        ConsId = cons(_, _, _),
+        search_cons_table(ConsTable, ConsId, ConsDefns)
     then
         convert_cons_defn_list(Info, GoalId, do_not_flip_constraints,
-            HLDS_ConsDefns, PlainMaybeConsInfos)
+            ConsId, ConsDefns, PlainMaybeConsInfos)
     else
         PlainMaybeConsInfos = []
     ),
@@ -3356,21 +2931,21 @@ typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
     % the type definition (i.e. convert the existential quantifiers and
     % constraints into universal ones).
     ( if
-        Functor = cons(Name, Arity, FunctorTypeCtor),
+        ConsId = cons(Name, Arity, ConsIdTypeCtor),
         remove_new_prefix(Name, OrigName),
-        OrigFunctor = cons(OrigName, Arity, FunctorTypeCtor),
-        search_cons_table(ConsTable, OrigFunctor, HLDS_ExistQConsDefns)
+        OrigConsId = cons(OrigName, Arity, ConsIdTypeCtor),
+        search_cons_table(ConsTable, OrigConsId, ExistQConsDefns)
     then
         convert_cons_defn_list(Info, GoalId, flip_constraints_for_new,
-            HLDS_ExistQConsDefns, UnivQuantifiedMaybeConsInfos)
+            OrigConsId, ExistQConsDefns, UnivQuantifiedMaybeConsInfos)
     else
         UnivQuantifiedMaybeConsInfos = []
     ),
 
-    % Check if Functor is a field access function for which the user
+    % Check if ConsId is a field access function for which the user
     % has not supplied a declaration.
     ( if
-        builtin_field_access_function_type(Info, GoalId, Functor,
+        builtin_field_access_function_type(Info, GoalId, ConsId,
             Arity, FieldAccessMaybeConsInfosPrime)
     then
         FieldAccessMaybeConsInfos = FieldAccessMaybeConsInfosPrime
@@ -3382,12 +2957,12 @@ typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
         ++ FieldAccessMaybeConsInfos,
     split_cons_errors(DataMaybeConsInfos, DataConsInfos, DataConsErrors),
 
-    % Check if Functor is a constant of one of the builtin atomic types
+    % Check if ConsId is a constant of one of the builtin atomic types
     % (string, float, int, character). If so, insert the resulting
     % cons_type_info at the start of the list.
     ( if
         Arity = 0,
-        builtin_atomic_type(Functor, BuiltInTypeName)
+        builtin_atomic_type(ConsId, BuiltInTypeName)
     then
         TypeCtor = type_ctor(unqualified(BuiltInTypeName), 0),
         construct_type(TypeCtor, [], ConsType),
@@ -3399,10 +2974,10 @@ typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
         BuiltinConsInfos = []
     ),
 
-    % Check if Functor is a tuple constructor.
+    % Check if ConsId is a tuple constructor.
     ( if
-        ( Functor = cons(unqualified("{}"), TupleArity, _)
-        ; Functor = tuple_cons(TupleArity)
+        ( ConsId = cons(unqualified("{}"), TupleArity, _)
+        ; ConsId = tuple_cons(TupleArity)
         )
     then
         % Make some fresh type variables for the argument types. These have
@@ -3412,8 +2987,7 @@ typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
         varset.init(TupleConsTypeVarSet0),
         varset.new_vars(TupleArity, TupleArgTVars,
             TupleConsTypeVarSet0, TupleConsTypeVarSet),
-        prog_type.var_list_to_type_list(map.init, TupleArgTVars,
-            TupleArgTypes),
+        var_list_to_type_list(map.init, TupleArgTVars, TupleArgTypes),
 
         TupleTypeCtor = type_ctor(unqualified("{}"), TupleArity),
         construct_type(TupleTypeCtor, TupleArgTypes, TupleConsType),
@@ -3428,11 +3002,11 @@ typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
         TupleConsInfos = []
     ),
 
-    % Check if Functor is the name of a predicate which takes at least
+    % Check if ConsId is the name of a predicate which takes at least
     % Arity arguments. If so, insert the resulting cons_type_info
     % at the start of the list.
     ( if
-        builtin_pred_type(Info, Functor, Arity, GoalId, PredConsInfosPrime)
+        builtin_pred_type(Info, ConsId, Arity, GoalId, PredConsInfosPrime)
     then
         PredConsInfos = PredConsInfosPrime
     else
@@ -3440,9 +3014,7 @@ typecheck_info_get_ctor_list_2(Info, Functor, Arity, GoalId, ConsInfos,
     ),
 
     % Check for higher-order function calls.
-    ( if
-        builtin_apply_type(Info, Functor, Arity, ApplyConsInfosPrime)
-    then
+    ( if builtin_apply_type(Info, ConsId, Arity, ApplyConsInfosPrime) then
         ApplyConsInfos = ApplyConsInfosPrime
     else
         ApplyConsInfos = []
@@ -3479,29 +3051,31 @@ split_cons_errors([MaybeConsInfo | MaybeConsInfos], Infos, Errors) :-
     ;       do_not_flip_constraints.
 
 :- pred convert_cons_defn_list(typecheck_info::in, goal_id::in,
-    cons_constraints_action::in, list(hlds_cons_defn)::in,
+    cons_constraints_action::in, cons_id::in, list(hlds_cons_defn)::in,
     list(maybe_cons_type_info)::out) is det.
 
-convert_cons_defn_list(_Info, _GoalId, _Action, [], []).
-convert_cons_defn_list(Info, GoalId, Action, [X | Xs], [Y | Ys]) :-
-    convert_cons_defn(Info, GoalId, Action, X, Y),
-    convert_cons_defn_list(Info, GoalId, Action, Xs, Ys).
+convert_cons_defn_list(_Info, _GoalId, _Action, _ConsId, [], []).
+convert_cons_defn_list(Info, GoalId, Action, ConsId,
+        [ConsDefn | ConsDefns], [ConsTypeInfo | ConsTypeInfos]) :-
+    convert_cons_defn(Info, GoalId, Action, ConsId, ConsDefn, ConsTypeInfo),
+    convert_cons_defn_list(Info, GoalId, Action, ConsId,
+        ConsDefns, ConsTypeInfos).
 
 :- pred convert_cons_defn(typecheck_info, goal_id,
-    cons_constraints_action, hlds_cons_defn, maybe_cons_type_info).
-:- mode convert_cons_defn(in, in, in(bound(do_not_flip_constraints)), in, out)
-    is det.
-:- mode convert_cons_defn(in, in, in, in, out) is det.
+    cons_constraints_action, cons_id, hlds_cons_defn, maybe_cons_type_info).
+:- mode convert_cons_defn(in, in, in(bound(do_not_flip_constraints)),
+    in, in, out) is det.
+:- mode convert_cons_defn(in, in, in, in, in, out) is det.
 
-convert_cons_defn(Info, GoalId, Action, HLDS_ConsDefn, ConsTypeInfo) :-
+convert_cons_defn(Info, GoalId, Action, ConsId, ConsDefn, ConsTypeInfo) :-
     % XXX We should investigate whether the job done by this predicate
     % on demand and therefore possibly lots of times for the same type,
     % would be better done just once, either by invoking it (at least with
     % Action = do_not_flip_constraints) before type checking even starts and
-    % recording the result, or by putting the result into the HLDS_ConsDefn
+    % recording the result, or by putting the result into the ConsDefn
     % or some related data structure.
 
-    HLDS_ConsDefn = hlds_cons_defn(TypeCtor, ConsTypeVarSet, ConsTypeParams,
+    ConsDefn = hlds_cons_defn(TypeCtor, ConsTypeVarSet, ConsTypeParams,
         ConsTypeKinds, MaybeExistConstraints, Args, _),
     ArgTypes = list.map(func(C) = C ^ arg_type, Args),
     typecheck_info_get_type_table(Info, TypeTable),
@@ -3598,7 +3172,7 @@ convert_cons_defn(Info, GoalId, Action, HLDS_ConsDefn, ConsTypeInfo) :-
         make_body_hlds_constraints(ClassTable, ConsTypeVarSet,
             GoalId, ProgConstraints, Constraints),
         ConsTypeInfo = ok(cons_type_info(ConsTypeVarSet, ExistQVars,
-            ConsType, ArgTypes, Constraints, source_type(TypeCtor)))
+            ConsType, ArgTypes, Constraints, source_type(TypeCtor, ConsId)))
     ).
 
 %---------------------------------------------------------------------------%
@@ -3721,7 +3295,7 @@ build_type_param_variance_restrictions_in_ctor_arg_type(TypeTable, CurTypeCtor,
                     % parameters.
                     true
                 else
-                    type_vars_list(ArgTypes, TypeVars),
+                    type_vars_in_types(ArgTypes, TypeVars),
                     set.insert_list(TypeVars, !InvariantSet)
                 )
             ;
@@ -3729,7 +3303,7 @@ build_type_param_variance_restrictions_in_ctor_arg_type(TypeTable, CurTypeCtor,
                 ; TypeBody = hlds_abstract_type(_)
                 ; TypeBody = hlds_solver_type(_)
                 ),
-                type_vars_list(ArgTypes, TypeVars),
+                type_vars_in_types(ArgTypes, TypeVars),
                 set.insert_list(TypeVars, !InvariantSet)
             ;
                 TypeBody = hlds_eqv_type(_),
@@ -3747,7 +3321,7 @@ build_type_param_variance_restrictions_in_ctor_arg_type(TypeTable, CurTypeCtor,
     ;
         CtorArgType = higher_order_type(_PredOrFunc, ArgTypes, _HOInstInfo,
             _Purity, _EvalMethod),
-        type_vars_list(ArgTypes, TypeVars),
+        type_vars_in_types(ArgTypes, TypeVars),
         set.insert_list(TypeVars, !InvariantSet)
     ;
         CtorArgType = apply_n_type(_, _, _),
@@ -3977,6 +3551,479 @@ check_coerce_constraint(TypeTable, Coercion, TypeAssign0, Satisfied) :-
 
 type_assign_has_no_coerce_constraints(TypeAssign) :-
     type_assign_get_coerce_constraints(TypeAssign, []).
+
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+
+    % builtin_atomic_type(Const, TypeName):
+    %
+    % If Const is *or can be* a constant of a builtin atomic type,
+    % set TypeName to the name of that type, otherwise fail.
+    %
+:- pred builtin_atomic_type(cons_id::in, string::out) is semidet.
+
+builtin_atomic_type(some_int_const(IntConst), TypeName) :-
+    TypeName = type_name_of_int_const(IntConst).
+builtin_atomic_type(float_const(_), "float").
+builtin_atomic_type(char_const(_), "character").
+builtin_atomic_type(string_const(_), "string").
+builtin_atomic_type(cons(unqualified(String), 0, _), "character") :-
+    % We are before post-typecheck, so character constants have not yet been
+    % converted to char_consts.
+    %
+    % XXX The parser should have a separate term.functor representation
+    % for character constants, which should be converted to char_consts
+    % during the term to item translation.
+    string.char_to_string(_, String).
+builtin_atomic_type(impl_defined_const(IDCKind), Type) :-
+    (
+        ( IDCKind = idc_file
+        ; IDCKind = idc_module
+        ; IDCKind = idc_pred
+        ; IDCKind = idc_grade
+        ),
+        Type = "string"
+    ;
+        IDCKind = idc_line,
+        Type = "int"
+    ).
+
+    % builtin_pred_type(Info, ConsId, Arity, GoalId, PredConsInfoList):
+    %
+    % If ConsId/Arity is a constant of a pred type, instantiates
+    % the output parameters, otherwise fails.
+    %
+    % Instantiates PredConsInfoList to the set of cons_type_info structures
+    % for each predicate with name `ConsId' and arity greater than or equal to
+    % Arity. GoalId is used to identify any constraints introduced.
+    %
+    % For example, functor `map.search/1' has type `pred(K, V)'
+    % (hence PredTypeParams = [K, V]) and argument types [map(K, V)].
+    %
+:- pred builtin_pred_type(typecheck_info::in, cons_id::in, int::in,
+    goal_id::in, list(cons_type_info)::out) is semidet.
+
+builtin_pred_type(Info, ConsId, Arity, GoalId, ConsTypeInfos) :-
+    ConsId = cons(SymName, _, _),
+    typecheck_info_get_predicate_table(Info, PredicateTable),
+    typecheck_info_get_calls_are_fully_qualified(Info, IsFullyQualified),
+    predicate_table_lookup_sym(PredicateTable, IsFullyQualified, SymName,
+        PredIds),
+    (
+        PredIds = [_ | _],
+        predicate_table_get_pred_id_table(PredicateTable, PredIdTable),
+        accumulate_cons_type_infos_for_pred_ids(Info, PredIdTable, GoalId,
+            PredIds, Arity, [], ConsTypeInfos)
+    ;
+        PredIds = [],
+        ConsTypeInfos = []
+    ).
+
+:- pred accumulate_cons_type_infos_for_pred_ids(typecheck_info::in,
+    pred_id_table::in, goal_id::in, list(pred_id)::in, int::in,
+    list(cons_type_info)::in, list(cons_type_info)::out) is det.
+
+accumulate_cons_type_infos_for_pred_ids(_, _, _, [], _, !ConsTypeInfos).
+accumulate_cons_type_infos_for_pred_ids(Info, PredTable, GoalId,
+        [PredId | PredIds], Arity, !ConsTypeInfos) :-
+    accumulate_cons_type_infos_for_pred_id(Info, PredTable, GoalId,
+        PredId, Arity, !ConsTypeInfos),
+    accumulate_cons_type_infos_for_pred_ids(Info, PredTable, GoalId,
+        PredIds, Arity, !ConsTypeInfos).
+
+:- pred accumulate_cons_type_infos_for_pred_id(typecheck_info::in,
+    pred_id_table::in, goal_id::in, pred_id::in, int::in,
+    list(cons_type_info)::in, list(cons_type_info)::out) is det.
+
+accumulate_cons_type_infos_for_pred_id(Info, PredTable, GoalId,
+        PredId, FuncArity, !ConsTypeInfos) :-
+    typecheck_info_get_module_info(Info, ModuleInfo),
+    module_info_get_class_table(ModuleInfo, ClassTable),
+    map.lookup(PredTable, PredId, PredInfo),
+    PredArity = pred_info_orig_arity(PredInfo),
+    IsPredOrFunc = pred_info_is_pred_or_func(PredInfo),
+    pred_info_get_class_context(PredInfo, PredClassContext),
+    pred_info_get_arg_types(PredInfo, PredTypeVarSet, PredExistQVars,
+        CompleteArgTypes),
+    pred_info_get_purity(PredInfo, Purity),
+    ( if
+        IsPredOrFunc = pf_predicate,
+        PredArity >= FuncArity,
+        % We don't support first-class polymorphism, so you can't take the
+        % address of an existentially quantified predicate.
+        PredExistQVars = []
+    then
+        list.det_split_list(FuncArity, CompleteArgTypes,
+            ArgTypes, PredTypeParams),
+        construct_higher_order_pred_type(Purity, lambda_normal,
+            PredTypeParams, PredType),
+        make_body_hlds_constraints(ClassTable, PredTypeVarSet,
+            GoalId, PredClassContext, PredConstraints),
+        ConsTypeInfo = cons_type_info(PredTypeVarSet, PredExistQVars,
+            PredType, ArgTypes, PredConstraints, source_pred(PredId)),
+        !:ConsTypeInfos = [ConsTypeInfo | !.ConsTypeInfos]
+    else if
+        IsPredOrFunc = pf_function,
+        PredAsFuncArity = PredArity - 1,
+        PredAsFuncArity >= FuncArity,
+        % We don't support first-class polymorphism, so you can't take
+        % the address of an existentially quantified function. You can however
+        % call such a function, so long as you pass *all* the parameters.
+        ( PredExistQVars = []
+        ; PredAsFuncArity = FuncArity
+        )
+    then
+        list.det_split_list(FuncArity, CompleteArgTypes,
+            FuncArgTypes, FuncTypeParams),
+        pred_args_to_func_args(FuncTypeParams,
+            FuncArgTypeParams, FuncReturnTypeParam),
+        (
+            FuncArgTypeParams = [],
+            FuncType = FuncReturnTypeParam
+        ;
+            FuncArgTypeParams = [_ | _],
+            construct_higher_order_func_type(Purity, lambda_normal,
+                FuncArgTypeParams, FuncReturnTypeParam, FuncType)
+        ),
+        make_body_hlds_constraints(ClassTable, PredTypeVarSet,
+            GoalId, PredClassContext, PredConstraints),
+        ConsTypeInfo = cons_type_info(PredTypeVarSet,
+            PredExistQVars, FuncType, FuncArgTypes, PredConstraints,
+            source_pred(PredId)),
+        !:ConsTypeInfos = [ConsTypeInfo | !.ConsTypeInfos]
+    else
+        true
+    ).
+
+    % builtin_apply_type(Info, ConsId, Arity, ConsTypeInfos):
+    %
+    % Succeed if ConsId is the builtin apply/N or ''/N (N>=2),
+    % which is used to invoke higher-order functions.
+    % If so, bind ConsTypeInfos to a singleton list containing
+    % the appropriate type for apply/N of the specified Arity.
+    %
+:- pred builtin_apply_type(typecheck_info::in, cons_id::in, int::in,
+    list(cons_type_info)::out) is semidet.
+
+builtin_apply_type(_Info, ConsId, Arity, ConsTypeInfos) :-
+    ConsId = cons(unqualified(ApplyName), _, _),
+    % XXX FIXME handle impure apply/N more elegantly (e.g. nicer syntax)
+    (
+        ApplyName = "apply",
+        ApplyNameToUse = ApplyName,
+        Purity = purity_pure
+    ;
+        ApplyName = "",
+        ApplyNameToUse = "apply",
+        Purity = purity_pure
+    ;
+        ApplyName = "impure_apply",
+        ApplyNameToUse = ApplyName,
+        Purity = purity_impure
+    ;
+        ApplyName = "semipure_apply",
+        ApplyNameToUse = ApplyName,
+        Purity = purity_semipure
+    ),
+    Arity >= 1,
+    Arity1 = Arity - 1,
+    higher_order_func_type(Purity, Arity1, lambda_normal, TypeVarSet, FuncType,
+        ArgTypes, RetType),
+    ExistQVars = [],
+    empty_hlds_constraints(EmptyConstraints),
+    ConsTypeInfos = [cons_type_info(TypeVarSet, ExistQVars, RetType,
+        [FuncType | ArgTypes], EmptyConstraints,
+        source_apply(ApplyNameToUse))].
+
+    % builtin_field_access_function_type(Info, GoalId, ConsId,
+    %   Arity, ConsTypeInfos):
+    %
+    % Succeed if ConsId is the name of one the automatically
+    % generated field access functions (fieldname, '<fieldname> :=').
+    %
+:- pred builtin_field_access_function_type(typecheck_info::in, goal_id::in,
+    cons_id::in, arity::in, list(maybe_cons_type_info)::out) is semidet.
+
+builtin_field_access_function_type(Info, GoalId, ConsId, Arity,
+        MaybeConsTypeInfos) :-
+    % Taking the address of automatically generated field access functions
+    % is not allowed, so currying does have to be considered here.
+    ConsId = cons(Name, Arity, _),
+    typecheck_info_get_module_info(Info, ModuleInfo),
+    is_field_access_function_name(ModuleInfo, Name, Arity, AccessType,
+        FieldName),
+
+    module_info_get_ctor_field_table(ModuleInfo, CtorFieldTable),
+    map.search(CtorFieldTable, FieldName, FieldDefns),
+
+    UserArity = user_arity(Arity),
+    list.filter_map(
+        make_field_access_function_cons_type_info(Info, GoalId, Name,
+            UserArity, AccessType, FieldName),
+        FieldDefns, MaybeConsTypeInfos).
+
+:- pred make_field_access_function_cons_type_info(typecheck_info::in,
+    goal_id::in, sym_name::in, user_arity::in, field_access_type::in,
+    sym_name::in, hlds_ctor_field_defn::in,
+    maybe_cons_type_info::out) is semidet.
+
+make_field_access_function_cons_type_info(Info, GoalId, FuncName, UserArity,
+        AccessType, FieldName, FieldDefn, ConsTypeInfo) :-
+    get_field_access_constructor(Info, GoalId, FuncName, UserArity,
+        AccessType, FieldDefn, OrigExistTVars,
+        MaybeFunctorConsTypeInfo),
+    (
+        MaybeFunctorConsTypeInfo = ok(FunctorConsTypeInfo),
+        typecheck_info_get_module_info(Info, ModuleInfo),
+        module_info_get_class_table(ModuleInfo, ClassTable),
+        convert_field_access_cons_type_info(ClassTable, AccessType,
+            FieldName, FieldDefn, FunctorConsTypeInfo,
+            OrigExistTVars, ConsTypeInfo)
+    ;
+        MaybeFunctorConsTypeInfo = error(_),
+        ConsTypeInfo = MaybeFunctorConsTypeInfo
+    ).
+
+:- pred get_field_access_constructor(typecheck_info::in, goal_id::in,
+    sym_name::in, user_arity::in, field_access_type::in,
+    hlds_ctor_field_defn::in,
+    existq_tvars::out, maybe_cons_type_info::out) is semidet.
+
+get_field_access_constructor(Info, GoalId, FuncName, UserArity, AccessType,
+        FieldDefn, OrigExistTVars, FunctorConsTypeInfo) :-
+    FieldDefn = hlds_ctor_field_defn(_, _, TypeCtor, ConsId, _),
+    TypeCtor = type_ctor(qualified(TypeModule, _), _),
+
+    % If the user has supplied a declaration for a field access function
+    % of the same name and arity, operating on the same type constructor,
+    % we use that instead of the automatically generated version,
+    % unless we are typechecking the clause introduced for the
+    % user-supplied declaration itself.
+    % The user-declared version will be picked up by builtin_pred_type.
+    typecheck_info_get_module_info(Info, ModuleInfo),
+    module_info_get_predicate_table(ModuleInfo, PredTable),
+    UnqualFuncName = unqualify_name(FuncName),
+    typecheck_info_get_is_field_access_function(Info, IsFieldAccessFunc),
+    (
+        IsFieldAccessFunc = no,
+        predicate_table_lookup_func_m_n_a(PredTable, is_fully_qualified,
+            TypeModule, UnqualFuncName, UserArity, PredIds),
+        list.all_false(
+            is_field_access_function_for_type_ctor(ModuleInfo, AccessType,
+                TypeCtor),
+            PredIds)
+    ;
+        IsFieldAccessFunc = yes(_)
+    ),
+    module_info_get_cons_table(ModuleInfo, ConsTable),
+    lookup_cons_table_of_type_ctor(ConsTable, TypeCtor, ConsId, ConsDefn),
+    MaybeExistConstraints = ConsDefn ^ cons_maybe_exist,
+    (
+        MaybeExistConstraints = no_exist_constraints,
+        OrigExistTVars = []
+    ;
+        MaybeExistConstraints = exist_constraints(ExistConstraints),
+        ExistConstraints = cons_exist_constraints(OrigExistTVars, _, _, _)
+    ),
+    (
+        AccessType = get,
+        ConsAction = do_not_flip_constraints,
+        convert_cons_defn(Info, GoalId, ConsAction, ConsId, ConsDefn,
+            FunctorConsTypeInfo)
+    ;
+        AccessType = set,
+        ConsAction = flip_constraints_for_field_set,
+        convert_cons_defn(Info, GoalId, ConsAction, ConsId, ConsDefn,
+            FunctorConsTypeInfo)
+    ).
+
+:- pred is_field_access_function_for_type_ctor(module_info::in,
+    field_access_type::in, type_ctor::in, pred_id::in) is semidet.
+
+is_field_access_function_for_type_ctor(ModuleInfo, AccessType, TypeCtor,
+        PredId) :-
+    module_info_pred_info(ModuleInfo, PredId, PredInfo),
+    pred_info_get_arg_types(PredInfo, ArgTypes),
+    require_complete_switch [AccessType]
+    (
+        AccessType = get,
+        ArgTypes = [ArgType, _ResultType],
+        type_to_ctor(ArgType, TypeCtor)
+    ;
+        AccessType = set,
+        ArgTypes = [ArgType, _FieldType, ResultType],
+        type_to_ctor(ArgType, TypeCtor),
+        type_to_ctor(ResultType, TypeCtor)
+    ).
+
+:- type maybe_cons_type_info
+    --->    ok(cons_type_info)
+    ;       error(cons_error).
+
+:- pred convert_field_access_cons_type_info(class_table::in,
+    field_access_type::in, sym_name::in, hlds_ctor_field_defn::in,
+    cons_type_info::in, existq_tvars::in, maybe_cons_type_info::out) is det.
+
+convert_field_access_cons_type_info(ClassTable, AccessType, FieldSymName,
+        FieldDefn, FunctorConsTypeInfo, OrigExistTVars, ConsTypeInfo) :-
+    FunctorConsTypeInfo = cons_type_info(TVarSet0, ExistQVars,
+        FunctorType, ConsArgTypes, Constraints0, Source0),
+    (
+        Source0 = source_type(SourceType, ConsId)
+    ;
+        ( Source0 = source_builtin_type(_)
+        ; Source0 = source_field_access(_, _, _, _)
+        ; Source0 = source_apply(_)
+        ; Source0 = source_pred(_)
+        ),
+        unexpected($pred, "not type")
+    ),
+    FieldDefn = hlds_ctor_field_defn(_, _, _, _, FieldNumber),
+    list.det_index1(ConsArgTypes, FieldNumber, FieldType),
+    FieldName = unqualify_name(FieldSymName),
+    (
+        AccessType = get,
+        Source = source_field_access(get, SourceType, ConsId, FieldName),
+        RetType = FieldType,
+        ArgTypes = [FunctorType],
+        ConsTypeInfo = ok(cons_type_info(TVarSet0, ExistQVars,
+            RetType, ArgTypes, Constraints0, Source))
+    ;
+        AccessType = set,
+        Source = source_field_access(set, SourceType, ConsId, FieldName),
+
+        % When setting a polymorphic field, the type of the field in the result
+        % is not necessarily the same as in the input. If a type variable
+        % occurs only in the field being set, create a new type variable for it
+        % in the result type.
+        %
+        % This allows code such as
+        % :- type pair(T, U)
+        %   ---> '-'(fst::T, snd::U).
+        %
+        %   Pair0 = 1 - 'a',
+        %   Pair = Pair0 ^ snd := 2.
+
+        type_vars_in_type(FieldType, TVarsInField),
+        % Most of the time, TVarsInField is [], so provide a fast path
+        % for this case.
+        (
+            TVarsInField = [],
+            RetType = FunctorType,
+            ArgTypes = [FunctorType, FieldType],
+            % None of the constraints are affected by the updated field,
+            % so the constraints are unchanged.
+            ConsTypeInfo = ok(cons_type_info(TVarSet0, ExistQVars,
+                RetType, ArgTypes, Constraints0, Source))
+        ;
+            TVarsInField = [_ | _],
+
+            % XXX This demonstrates a problem - if a type variable occurs
+            % in the types of multiple fields, any predicates changing values
+            % of one of these fields cannot change their types. This is
+            % especially a problem for existentially typed fields, because
+            % setting the field always changes the type.
+            %
+            % Haskell gets around this problem by allowing multiple fields
+            % to be set by the same expression. Haskell doesn't handle all
+            % cases -- it is not possible to get multiple existentially typed
+            % fields using record syntax and pass them to a function whose type
+            % requires that the fields are of the same type. It probably won't
+            % come up too often.
+            %
+            list.det_replace_nth(ConsArgTypes, FieldNumber, int_type,
+                ArgTypesWithoutField),
+            type_vars_in_types(ArgTypesWithoutField, TVarsInOtherArgs),
+            set.intersect(
+                set.list_to_set(TVarsInField),
+                set.intersect(
+                    set.list_to_set(TVarsInOtherArgs),
+                    set.list_to_set(OrigExistTVars)
+                ),
+                ExistQVarsInFieldAndOthers),
+            ( if set.is_empty(ExistQVarsInFieldAndOthers) then
+                % Rename apart type variables occurring only in the field
+                % to be replaced - the values of those type variables will be
+                % supplied by the replacement field value.
+                list.delete_elems(TVarsInField,
+                    TVarsInOtherArgs, TVarsOnlyInField0),
+                list.sort_and_remove_dups(TVarsOnlyInField0, TVarsOnlyInField),
+                list.length(TVarsOnlyInField, NumNewTVars),
+                varset.new_vars(NumNewTVars, NewTVars, TVarSet0, TVarSet),
+                map.from_corresponding_lists(TVarsOnlyInField,
+                    NewTVars, TVarRenaming),
+                apply_variable_renaming_to_type(TVarRenaming, FieldType,
+                    RenamedFieldType),
+                apply_variable_renaming_to_type(TVarRenaming, FunctorType,
+                    OutputFunctorType),
+                % Rename the class constraints, projecting the constraints
+                % onto the set of type variables occurring in the types of the
+                % arguments of the call to `'field :='/2'. Note that we have
+                % already flipped the constraints.
+                type_vars_in_types([FunctorType, FieldType], CallTVars0),
+                set.list_to_set(CallTVars0, CallTVars),
+                project_and_rename_constraints(ClassTable, TVarSet, CallTVars,
+                    TVarRenaming, Constraints0, Constraints),
+                RetType = OutputFunctorType,
+                ArgTypes = [FunctorType, RenamedFieldType],
+                ConsTypeInfo = ok(cons_type_info(TVarSet, ExistQVars,
+                    RetType, ArgTypes, Constraints, Source))
+            else
+                % This field cannot be set. Pass out some information so that
+                % we can give a better error message. Errors involving changing
+                % the types of universally quantified type variables will be
+                % caught by typecheck_functor_arg_types.
+                set.to_sorted_list(ExistQVarsInFieldAndOthers,
+                    ExistQVarsInFieldAndOthers1),
+                ConsTypeInfo = error(invalid_field_update(FieldSymName,
+                    FieldDefn, TVarSet0, ExistQVarsInFieldAndOthers1))
+            )
+        )
+    ).
+
+    % Add new universal constraints for constraints containing variables that
+    % have been renamed. These new constraints are the ones that will need
+    % to be supplied by the caller. The other constraints will be supplied
+    % from non-updated fields.
+    %
+:- pred project_and_rename_constraints(class_table::in, tvarset::in,
+    set(tvar)::in, tvar_renaming::in,
+    hlds_constraints::in, hlds_constraints::out) is det.
+
+project_and_rename_constraints(ClassTable, TVarSet, CallTVars, TVarRenaming,
+        !Constraints) :-
+    !.Constraints = hlds_constraints(Unproven0, Assumed,
+        Redundant0, Ancestors),
+
+    % Project the constraints down onto the list of tvars in the call.
+    list.filter(project_constraint(CallTVars), Unproven0, NewUnproven0),
+    list.filter_map(rename_constraint(TVarRenaming), NewUnproven0,
+        NewUnproven),
+    update_redundant_constraints(ClassTable, TVarSet, NewUnproven,
+        Redundant0, Redundant),
+    list.append(NewUnproven, Unproven0, Unproven),
+    !:Constraints = hlds_constraints(Unproven, Assumed, Redundant, Ancestors).
+
+:- pred project_constraint(set(tvar)::in, hlds_constraint::in) is semidet.
+
+project_constraint(CallTVars, Constraint) :-
+    Constraint = hlds_constraint(_Ids, _ClassName, TypesToCheck),
+    type_vars_in_types(TypesToCheck, TVarsToCheck0),
+    set.list_to_set(TVarsToCheck0, TVarsToCheck),
+    set.intersect(TVarsToCheck, CallTVars, RelevantTVars),
+    set.is_non_empty(RelevantTVars).
+
+:- pred rename_constraint(tvar_renaming::in, hlds_constraint::in,
+    hlds_constraint::out) is semidet.
+
+rename_constraint(TVarRenaming, Constraint0, Constraint) :-
+    Constraint0 = hlds_constraint(Ids, ClassName, ArgTypes0),
+    some [Var] (
+        type_list_contains_var(ArgTypes0, Var),
+        map.contains(TVarRenaming, Var)
+    ),
+    apply_variable_renaming_to_type_list(TVarRenaming, ArgTypes0, ArgTypes),
+    Constraint = hlds_constraint(Ids, ClassName, ArgTypes).
 
 %---------------------------------------------------------------------------%
 :- end_module check_hlds.typecheck.

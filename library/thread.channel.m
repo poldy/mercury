@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2000-2001, 2006-2007 The University of Melbourne.
-% Copyright (C) 2014-2015, 2018 The Mercury team.
+% Copyright (C) 2014-2015, 2018, 2020-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -56,8 +56,8 @@
 
     % Place an item back at the start of the channel.
     %
-    % WARNING: a call to `channel.untake' will deadlock if a call to
-    % `channel.take' is blocked on the same channel.
+    % WARNING: a call to channel.untake will deadlock if a call to
+    % channel.take is blocked on the same channel.
     %
 :- pred untake(channel(T)::in, T::in, io::di, io::uo) is det.
 :- pragma obsolete(pred(untake/4)).

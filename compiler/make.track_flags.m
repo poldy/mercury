@@ -48,10 +48,11 @@
 :- import_module make.dependencies.
 :- import_module make.options_file.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.read_modules.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module bool.
 :- import_module getopt.
@@ -74,25 +75,47 @@
             ).
 
 make_track_flags_files(Globals, ModuleName, Succeeded, !Info, !IO) :-
-    find_reachable_local_modules(Globals, ModuleName, Succeeded0, Modules,
+    find_reachable_local_modules(Globals, ModuleName, Succeeded0, ModuleNames,
         !Info, !IO),
     (
         Succeeded0 = succeeded,
-        KeepGoing = do_not_keep_going,
         DummyLastHash = last_hash([], ""),
-        foldl3_maybe_stop_at_error(KeepGoing, make_track_flags_files_2,
-            Globals, set.to_sorted_list(Modules), Succeeded,
-            DummyLastHash, _LastHash, !Info, !IO)
+        foldl3_make_track_flags_for_modules_loop(Globals,
+            set.to_sorted_list(ModuleNames),
+            Succeeded, DummyLastHash, _LastHash, !Info, !IO)
     ;
         Succeeded0 = did_not_succeed,
         Succeeded = did_not_succeed
     ).
 
-:- pred make_track_flags_files_2(globals::in, module_name::in,
+%---------------------------------------------------------------------------%
+
+:- pred foldl3_make_track_flags_for_modules_loop(globals::in,
+    list(module_name)::in, maybe_succeeded::out, last_hash::in, last_hash::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+foldl3_make_track_flags_for_modules_loop(_Globals, [],
+        succeeded, !LastHash, !Info, !IO).
+foldl3_make_track_flags_for_modules_loop(Globals, [ModuleName | ModuleNames],
+        Succeeded, !LastHash, !Info, !IO) :-
+    make_track_flags_files_for_module(Globals, ModuleName, Succeeded0,
+        !LastHash, !Info, !IO),
+    (
+        Succeeded0 = succeeded,
+        foldl3_make_track_flags_for_modules_loop(Globals, ModuleNames,
+            Succeeded, !LastHash, !Info, !IO)
+    ;
+        Succeeded0 = did_not_succeed,
+        Succeeded = did_not_succeed
+    ).
+
+%---------------------------------------------------------------------------%
+
+:- pred make_track_flags_files_for_module(globals::in, module_name::in,
     maybe_succeeded::out, last_hash::in, last_hash::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-make_track_flags_files_2(Globals, ModuleName, Succeeded,
+make_track_flags_files_for_module(Globals, ModuleName, Succeeded,
         !LastHash, !Info, !IO) :-
     lookup_mmc_module_options(!.Info ^ mki_options_variables, ModuleName,
         MaybeModuleOptionArgs),
@@ -129,6 +152,8 @@ make_track_flags_files_2(Globals, ModuleName, Succeeded,
         write_error_specs(Globals, LookupSpecs, !IO),
         Succeeded = did_not_succeed
     ).
+
+%---------------------------------------------------------------------------%
 
 :- pred option_table_hash(list(string)::in, string::out,
     io::di, io::uo) is det.
@@ -187,7 +212,8 @@ option_table_hash(AllOptionArgs, Hash, !IO) :-
     % all three of these kinds of changes grounds for updating a timestamp
     % of when the option database last changed.
     %
-    handle_given_options(AllOptionArgs, _, _, OptionsErrors,
+    io.output_stream(CurStream, !IO),
+    handle_given_options(CurStream, AllOptionArgs, _, _, OptionsErrors,
         AllOptionArgsGlobals, !IO),
     (
         OptionsErrors = []

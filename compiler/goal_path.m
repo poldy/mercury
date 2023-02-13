@@ -23,9 +23,10 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.goal_path.
+:- import_module parse_tree.
+:- import_module parse_tree.var_table.
 
 %-----------------------------------------------------------------------------%
 %
@@ -39,7 +40,7 @@
 :- pred fill_goal_id_slots_in_proc(module_info::in,
     containing_goal_map::out, proc_info::in, proc_info::out) is det.
 
-:- pred fill_goal_id_slots_in_proc_body(module_info::in, vartypes::in,
+:- pred fill_goal_id_slots_in_proc_body(module_info::in, var_table::in,
     containing_goal_map::out, hlds_goal::in, hlds_goal::out) is det.
 
     % Fill in the goal_ids for goals in the clauses_info.
@@ -66,7 +67,6 @@
 
 :- import_module check_hlds.
 :- import_module check_hlds.type_util.
-:- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 
 :- import_module assoc_list.
@@ -81,20 +81,20 @@
 
 :- type slot_info
     --->    slot_info(
-                slot_info_module_info               :: module_info,
-                slot_info_vartypes                  :: vartypes
+                slot_info_module_info       :: module_info,
+                slot_info_var_table         :: var_table
             ).
 
 fill_goal_id_slots_in_proc(ModuleInfo, ContainingGoalMap, !ProcInfo) :-
-    proc_info_get_vartypes(!.ProcInfo, VarTypes),
+    proc_info_get_var_table(!.ProcInfo, VarTable),
     proc_info_get_goal(!.ProcInfo, Goal0),
-    fill_goal_id_slots_in_proc_body(ModuleInfo, VarTypes,
-        ContainingGoalMap, Goal0, Goal),
+    fill_goal_id_slots_in_proc_body(ModuleInfo, VarTable, ContainingGoalMap,
+        Goal0, Goal),
     proc_info_set_goal(Goal, !ProcInfo).
 
-fill_goal_id_slots_in_proc_body(ModuleInfo, VarTypes, ContainingGoalMap,
+fill_goal_id_slots_in_proc_body(ModuleInfo, VarTypeSrc, ContainingGoalMap,
         Goal0, Goal) :-
-    SlotInfo = slot_info(ModuleInfo, VarTypes),
+    SlotInfo = slot_info(ModuleInfo, VarTypeSrc),
     fill_goal_id_slots(SlotInfo, whole_body_goal, counter.init(0), _,
         [], ContainingGoalList, Goal0, Goal),
     map.from_rev_sorted_assoc_list(ContainingGoalList, ContainingGoalMap).
@@ -103,8 +103,8 @@ fill_goal_id_slots_in_clauses(ModuleInfo, ContainingGoalMap,
         ClausesInfo0, ClausesInfo) :-
     clauses_info_get_clauses_rep(ClausesInfo0, ClausesRep0, ItemNumbers),
     get_clause_list_for_replacement(ClausesRep0, Clauses0),
-    clauses_info_get_vartypes(ClausesInfo0, VarTypes),
-    SlotInfo = slot_info(ModuleInfo, VarTypes),
+    clauses_info_get_var_table(ClausesInfo0, VarTable),
+    SlotInfo = slot_info(ModuleInfo, VarTable),
     % If there is exactly one clause, we could theoretically start the counter
     % at zero, assigning goal_id(0) to the whole clause, since it is also
     % the whole procedure body. However, all passes that care about the whole
@@ -192,9 +192,9 @@ fill_goal_id_slots(SlotInfo, ContainingGoal, !GoalNumCounter,
         GoalExpr = disj(Goals)
     ;
         GoalExpr0 = switch(Var, CanFail, Cases0),
-        VarTypes = SlotInfo ^ slot_info_vartypes,
+        VarTable = SlotInfo ^ slot_info_var_table,
         ModuleInfo = SlotInfo ^ slot_info_module_info,
-        lookup_var_type(VarTypes, Var, Type),
+        lookup_var_type(VarTable, Var, Type),
         ( if switch_type_num_functors(ModuleInfo, Type, NumFunctors) then
             MaybeNumFunctors = known_num_functors_in_type(NumFunctors)
         else
@@ -326,12 +326,12 @@ fill_orelse_id_slots(SlotInfo, GoalId, LastOrElseNum, !GoalNumCounter,
 
 %-----------------------------------------------------------------------------%
 
-fill_goal_path_slots_in_proc(ModuleInfo, !Proc) :-
-    proc_info_get_goal(!.Proc, Goal0),
-    proc_info_get_vartypes(!.Proc, VarTypes),
-    SlotInfo = slot_info(ModuleInfo, VarTypes),
+fill_goal_path_slots_in_proc(ModuleInfo, !ProcInfo) :-
+    proc_info_get_var_table(!.ProcInfo, VarTable),
+    SlotInfo = slot_info(ModuleInfo, VarTable),
+    proc_info_get_goal(!.ProcInfo, Goal0),
     fill_goal_path_slots(rgp_nil, SlotInfo, Goal0, Goal),
-    proc_info_set_goal(Goal, !Proc).
+    proc_info_set_goal(Goal, !ProcInfo).
 
 :- pred fill_goal_path_slots(reverse_goal_path::in, slot_info::in,
     hlds_goal::in, hlds_goal::out) is det.
@@ -349,9 +349,9 @@ fill_goal_path_slots(RevGoalPath, SlotInfo, Goal0, Goal) :-
         GoalExpr = disj(Goals)
     ;
         GoalExpr0 = switch(Var, CanFail, Cases0),
-        VarTypes = SlotInfo ^ slot_info_vartypes,
+        VarTable = SlotInfo ^ slot_info_var_table,
         ModuleInfo = SlotInfo ^ slot_info_module_info,
-        lookup_var_type(VarTypes, Var, Type),
+        lookup_var_type(VarTable, Var, Type),
         ( if switch_type_num_functors(ModuleInfo, Type, NumFunctors) then
             MaybeNumFunctors = known_num_functors_in_type(NumFunctors)
         else

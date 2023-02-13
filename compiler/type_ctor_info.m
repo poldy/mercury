@@ -99,11 +99,11 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module uint.
-:- import_module uint8.
 :- import_module uint16.
 :- import_module uint32.
+:- import_module uint8.
 :- import_module univ.
 :- import_module varset.
 
@@ -232,9 +232,9 @@ builtin_type_defn = TypeDefn :-
     TypeBody = hlds_abstract_type(abstract_type_general),
     TypeStatus = type_status(status_local),
     NeedQual = may_be_unqualified,
-    term.context_init(Context),
     create_hlds_type_defn(TVarSet, Params, Kinds, TypeBody, no,
-        TypeStatus, NeedQual, type_defn_no_prev_errors, Context, TypeDefn).
+        TypeStatus, NeedQual, type_defn_no_prev_errors,
+        term_context.dummy_context, TypeDefn).
 
 :- pred gen_type_ctor_gen_info( module_info::in, type_ctor::in,
     module_name::in, string::in, int::in, hlds_type_defn::in,
@@ -914,10 +914,10 @@ generate_du_arg_info(NumUnivTVars, ExistTVars, ConsArgRepn, ArgInfo,
         NumUnivTVars, ExistTVars, MaybePseudoTypeInfo),
     (
         MaybePseudoTypeInfo = plain(TypeInfo),
-        MaybePseudoTypeInfoOrSelf = plain(TypeInfo)
-        ;
+        MaybePseudoTypeInfoOrSelf = arg_plain(TypeInfo)
+    ;
         MaybePseudoTypeInfo = pseudo(PseudoTypeInfo),
-        MaybePseudoTypeInfoOrSelf = pseudo(PseudoTypeInfo)
+        MaybePseudoTypeInfoOrSelf = arg_pseudo(PseudoTypeInfo)
     ),
     ArgInfo = du_arg_info(MaybeArgName, MaybePseudoTypeInfoOrSelf, ArgWidth),
     ( if ArgType = higher_order_type(_, _, higher_order(_), _, _) then
@@ -985,7 +985,7 @@ first_matching_type_class_info([], _, !N, _, _) :-
 first_matching_type_class_info([Constraint | Constraints], TVar,
         !N, MatchingConstraint, TypeInfoIndex) :-
     Constraint = constraint(_, ArgTypes),
-    type_vars_list(ArgTypes, TVs),
+    type_vars_in_types(ArgTypes, TVs),
     ( if list.index1_of_first_occurrence(TVs, TVar, Index) then
         MatchingConstraint = Constraint,
         TypeInfoIndex = Index
@@ -1162,12 +1162,12 @@ compute_contains_var_bit_vector(ArgTypes) = Vector :-
 compute_contains_var_bit_vector_2([], _, !Vector).
 compute_contains_var_bit_vector_2([ArgType | ArgTypes], ArgNum, !Vector) :-
     (
-        ArgType = plain(_)
+        ArgType = arg_plain(_)
     ;
-        ArgType = pseudo(_),
+        ArgType = arg_pseudo(_),
         update_contains_var_bit_vector(ArgNum, !Vector)
     ;
-        ArgType = self,
+        ArgType = arg_self,
         % The backend currently doesn't perform the optimization that
         % lets it avoid memory allocation on self types.
         update_contains_var_bit_vector(ArgNum, !Vector)

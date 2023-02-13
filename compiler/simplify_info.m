@@ -25,13 +25,13 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.optimization_options.
 :- import_module libs.trace_params.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module list.
@@ -101,8 +101,7 @@
     % Initialise the simplify_info.
     %
 :- pred simplify_info_init(module_info::in, pred_id::in, proc_id::in,
-    proc_info::in, simplify_tasks::in,
-    simplify_info::out) is det.
+    proc_info::in, simplify_tasks::in, simplify_info::out) is det.
 
     % Reinitialise the simplify_info before reprocessing a goal.
     %
@@ -150,8 +149,7 @@
     simplify_tasks::out) is det.
 :- pred simplify_info_get_module_info(simplify_info::in, module_info::out)
     is det.
-:- pred simplify_info_get_varset(simplify_info::in, prog_varset::out) is det.
-:- pred simplify_info_get_var_types(simplify_info::in, vartypes::out) is det.
+:- pred simplify_info_get_var_table(simplify_info::in, var_table::out) is det.
 :- pred simplify_info_get_rerun_quant_instmap_delta(simplify_info::in,
     maybe_rerun_quant_instmap_deltas::out) is det.
 :- pred simplify_info_get_rerun_det(simplify_info::in,
@@ -163,8 +161,8 @@
     inst_varset::out) is det.
 :- pred simplify_info_get_fully_strict(simplify_info::in,
     maybe_fully_strict::out) is det.
-:- pred simplify_info_get_trace_level_optimized(simplify_info::in,
-    trace_level::out, maybe_trace_optimized::out) is det.
+:- pred simplify_info_get_eff_trace_level_optimized(simplify_info::in,
+    eff_trace_level::out, maybe_trace_optimized::out) is det.
 :- pred simplify_info_get_ignore_marked_static(simplify_info::in,
     maybe_ignore_marked_static::out) is det.
 
@@ -192,9 +190,7 @@
     simplify_info::in, simplify_info::out) is det.
 :- pred simplify_info_set_module_info(module_info::in,
     simplify_info::in, simplify_info::out) is det.
-:- pred simplify_info_set_varset(prog_varset::in,
-    simplify_info::in, simplify_info::out) is det.
-:- pred simplify_info_set_var_types(vartypes::in,
+:- pred simplify_info_set_var_table(var_table::in,
     simplify_info::in, simplify_info::out) is det.
 :- pred simplify_info_set_rerun_quant_instmap_delta(
     simplify_info::in, simplify_info::out) is det.
@@ -249,6 +245,7 @@
 
 :- implementation.
 
+:- import_module check_hlds.type_util.
 :- import_module hlds.status.
 :- import_module libs.globals.
 :- import_module libs.options.
@@ -285,19 +282,18 @@
 /* 2 */         simp_module_info            :: module_info,
 
                 % The variables of the procedure being simplified.
-/* 3 */         simp_varset                 :: prog_varset,
-/* 4 */         simp_vartypes               :: vartypes,
+/* 3 */         simp_var_table              :: var_table,
 
                 % Does the goal need requantification, and the recomputation
                 % of instmap_deltas?
-/* 5 */         simp_rerun_quant_instmap_delta
+/* 4 */         simp_rerun_quant_instmap_delta
                                         :: maybe_rerun_quant_instmap_deltas,
 
                 % Does determinism analysis need to be rerun?
-/* 6 */         simp_rerun_det              :: maybe_rerun_det,
+/* 5 */         simp_rerun_det              :: maybe_rerun_det,
 
-/* 7 */         simp_params                 :: simplify_info_params,
-/* 8 */         simp_sub_info               :: simplify_sub_info
+/* 6 */         simp_params                 :: simplify_info_params,
+/* 7 */         simp_sub_info               :: simplify_sub_info
             ).
 
 :- type simplify_info_params
@@ -310,7 +306,7 @@
                 % The value of the --fully-strict option.
                 sip_fully_strict            :: maybe_fully_strict,
 
-                sip_trace_level             :: trace_level,
+                sip_eff_trace_level         :: eff_trace_level,
 
                 % The value of the --trace-optimized option.
                 sip_trace_optimized         :: maybe_trace_optimized,
@@ -322,9 +318,9 @@
     --->    simplify_sub_info(
                 % Information about the typeinfo and typeclass info vars
                 % for the type variables of the procedure being simplified.
-                % Logically, this field belongs next to simp_varset and
-                % simp_vartypes, but it is not used frequently enough
-                % to store at the top level of simplify_info.
+                % Logically, this field belongs next to simp_var_table,
+                % but it is not used frequently enough to store at the
+                % top level of simplify_info.
                 ssimp_rtti_varmaps          :: rtti_varmaps,
 
                 % The variables we have eliminated. Each list of vars consists
@@ -372,6 +368,9 @@ simplify_info_init(ModuleInfo, PredId, ProcId, ProcInfo, SimplifyTasks,
     ; FullyStrict0 = yes, FullyStrict = fully_strict
     ),
     globals.get_trace_level(Globals, TraceLevel),
+    module_info_pred_info(ModuleInfo, PredId, PredInfo),
+    EffTraceLevel =
+        eff_trace_level_for_proc(ModuleInfo, PredInfo, ProcInfo, TraceLevel),
     globals.lookup_bool_option(Globals, trace_optimized, TraceOptimized0),
     ( TraceOptimized0 = no,  TraceOptimized = not_trace_optimized
     ; TraceOptimized0 = yes, TraceOptimized = trace_optimized
@@ -386,7 +385,7 @@ simplify_info_init(ModuleInfo, PredId, ProcId, ProcInfo, SimplifyTasks,
     ),
 
     Params = simplify_info_params(PredProcId, InstVarSet, FullyStrict,
-        TraceLevel, TraceOptimized, IgnoreMarkedStatic),
+        EffTraceLevel, TraceOptimized, IgnoreMarkedStatic),
 
     proc_info_get_rtti_varmaps(ProcInfo, RttiVarMaps),
     ElimVars = [],
@@ -397,7 +396,6 @@ simplify_info_init(ModuleInfo, PredId, ProcId, ProcInfo, SimplifyTasks,
     FoundContainsTrace = no,
     HasUserEvent = has_no_user_event,
     set.init(TraceGoalProcs),
-    module_info_pred_info(ModuleInfo, PredId, PredInfo),
     pred_info_get_status(PredInfo, PredStatus),
     pred_status_defined_in_this_module(PredStatus) = InThisModule,
     ( InThisModule = yes, DefinedWhere = defined_in_this_module
@@ -410,12 +408,11 @@ simplify_info_init(ModuleInfo, PredId, ProcId, ProcInfo, SimplifyTasks,
 
     % SimplifyTasks
     % ModuleInfo
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     RerunQuant = do_not_rerun_quant_instmap_deltas,
     RerunDet = do_not_rerun_det,
 
-    Info = simplify_info(SimplifyTasks, ModuleInfo, VarSet, VarTypes,
+    Info = simplify_info(SimplifyTasks, ModuleInfo, VarTable,
         RerunQuant, RerunDet, Params, SubInfo).
 
 simplify_info_reinit(SimplifyTasks, !Info) :-
@@ -456,14 +453,16 @@ simplify_info_incr_cost_delta(Incr, !Info) :-
 
 simplify_info_apply_substitutions_and_duplicate(ToVar, FromVar, TSubst,
         !Info) :-
-    simplify_info_get_var_types(!.Info, VarTypes0),
+    simplify_info_get_module_info(!.Info, ModuleInfo),
+    simplify_info_get_var_table(!.Info, VarTable0),
     simplify_info_get_rtti_varmaps(!.Info, RttiVarMaps0),
-    apply_rec_subst_to_vartypes(TSubst, VarTypes0, VarTypes),
+    apply_rec_subst_to_var_table(is_type_a_dummy(ModuleInfo), TSubst,
+        VarTable0, VarTable),
     Renaming = map.singleton(ToVar, FromVar),
     apply_substitutions_to_rtti_varmaps(map.init, TSubst, Renaming,
         RttiVarMaps0, RttiVarMaps1),
     rtti_var_info_duplicate(FromVar, ToVar, RttiVarMaps1, RttiVarMaps),
-    simplify_info_set_var_types(VarTypes, !Info),
+    simplify_info_set_var_table(VarTable, !Info),
     simplify_info_set_rtti_varmaps(RttiVarMaps, !Info).
 
 %---------------------------------------------------------------------------%
@@ -472,10 +471,8 @@ simplify_info_get_simplify_tasks(Info, X) :-
     X = Info ^ simp_simplify_tasks.
 simplify_info_get_module_info(Info, X) :-
     X = Info ^ simp_module_info.
-simplify_info_get_varset(Info, X) :-
-    X = Info ^ simp_varset.
-simplify_info_get_var_types(Info, X) :-
-    X = Info ^ simp_vartypes.
+simplify_info_get_var_table(Info, X) :-
+    X = Info ^ simp_var_table.
 simplify_info_get_rerun_quant_instmap_delta(Info, X) :-
     X = Info ^ simp_rerun_quant_instmap_delta.
 simplify_info_get_rerun_det(Info, X) :-
@@ -487,8 +484,8 @@ simplify_info_get_inst_varset(Info, X) :-
     X = Info ^ simp_params ^ sip_inst_varset.
 simplify_info_get_fully_strict(Info, X) :-
     X = Info ^ simp_params ^ sip_fully_strict.
-simplify_info_get_trace_level_optimized(Info, X, Y) :-
-    X = Info ^ simp_params ^ sip_trace_level,
+simplify_info_get_eff_trace_level_optimized(Info, X, Y) :-
+    X = Info ^ simp_params ^ sip_eff_trace_level,
     Y = Info ^ simp_params ^ sip_trace_optimized.
 simplify_info_get_ignore_marked_static(Info, X) :-
     X = Info ^ simp_params ^ sip_ignore_marked_static.
@@ -524,17 +521,11 @@ simplify_info_set_module_info(X, !Info) :-
     else
         !Info ^ simp_module_info := X
     ).
-simplify_info_set_varset(X, !Info) :-
-    ( if private_builtin.pointer_equal(X, !.Info ^ simp_varset) then
+simplify_info_set_var_table(X, !Info) :-
+    ( if private_builtin.pointer_equal(X, !.Info ^ simp_var_table) then
         true
     else
-        !Info ^ simp_varset := X
-    ).
-simplify_info_set_var_types(X, !Info) :-
-    ( if private_builtin.pointer_equal(X, !.Info ^ simp_vartypes) then
-        true
-    else
-        !Info ^ simp_vartypes := X
+        !Info ^ simp_var_table := X
     ).
 simplify_info_set_rerun_quant_instmap_delta(!Info) :-
     X = rerun_quant_instmap_deltas,

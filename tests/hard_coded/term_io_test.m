@@ -12,6 +12,7 @@
 :- implementation.
 
 :- import_module list.
+:- import_module mercury_term_parser.
 :- import_module string.
 :- import_module term_io.
 
@@ -29,4 +30,3 @@ main(!IO) :-
         io.format(StdErr, "%d: %s\n", [i(Line), s(Msg)], !IO),
         main(!IO)
     ).
-

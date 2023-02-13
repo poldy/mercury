@@ -13,7 +13,7 @@ traditional logic programming syntax, but also allows the
 syntactic convenience of user-defined functions, smoothly integrating
 logic and functional programming into a single paradigm.
 
-For a list of what's new in this release, see the NEWS file.
+For a list of what's new in this release, see the NEWS.md file.
 
 The main features of Mercury are:
 
@@ -140,9 +140,8 @@ inline assembler.  Using these extensions, it generates code that is
 significantly better than all previous Prolog systems known to us.  However,
 the system does not need these extensions, and will work in their absence.
 
-The Mercury compiler can also compile Mercury programs to Java, C# or
-Erlang.  See README.Java, README.CSharp, and README.Erlang respectively
-for further details.
+The Mercury compiler can also compile Mercury programs to Java or C#.
+See README.Java.md and README.CSharp.md respectively.
 
 The current Mercury system has been tested on Linux (x86, x86_64, arm),
 macOS (x86_64), Windows 7 and Windows 10 (x86 and x86_64),
@@ -155,7 +154,7 @@ Mac OS X (PowerPC) and Windows 95, 98, ME, NT, 2000 and XP.
 
 It should run without too many changes on other Unix variants as well.
 If you do encounter any problems, please report them to us via the
-Mercury bug tracking system at <http://bugs.mercurylang.org>
+Mercury bug tracking system at <https://bugs.mercurylang.org>
 (see the BUGS file).
 
 We recommend that you use gcc as the C compiler, preferably gcc version 3.4 or
@@ -163,7 +162,7 @@ later.  Do not use gcc versions 2.96, 3.0 or 4.0; those versions have bugs that
 cause trouble for Mercury.  If you are using gcc, you will need at least
 version 2.95 or higher, except on Mac OS X where you will need version 3.3 or
 higher.  Visual C++ or clang may also be used as a C compiler.
-(See README.MS-VisualC and README.clang for further details.)  
+(See README.MS-VisualC.md and README.clang.md for further details.)
 You will also need GNU make version 3.69 or higher.
 
 The Mercury distribution contains:
@@ -204,11 +203,11 @@ The Mercury distribution contains:
 The Mercury distribution is available via WWW from the following locations:
 
         Australia:
-                <http://dl.mercurylang.org/index.html>
+                <https://dl.mercurylang.org/index.html>
 
 The home page of the project on the Web is:
 
-    <http://www.mercurylang.org>.
+    <https://www.mercurylang.org>.
 
 --
-The Mercury Team <http://www.mercurylang.org/development/people.html>
+The Mercury Team <https://www.mercurylang.org/development/people.html>

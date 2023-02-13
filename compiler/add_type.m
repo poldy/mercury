@@ -21,9 +21,12 @@
 
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_module.
+:- import_module hlds.make_hlds.make_hlds_types.
+:- import_module hlds.status.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.prog_item.
 
 :- import_module list.
 
@@ -54,7 +57,6 @@
 :- import_module backend_libs.
 :- import_module backend_libs.foreign.
 :- import_module hlds.hlds_cons.
-:- import_module hlds.make_hlds.make_hlds_passes.
 :- import_module hlds.make_hlds_error.
 :- import_module libs.
 :- import_module libs.globals.
@@ -78,7 +80,7 @@
 :- import_module one_or_more.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 %
@@ -108,7 +110,7 @@ module_add_type_defn(TypeStatus0, NeedQual, ItemTypeDefnInfo,
             Body = hlds_abstract_type(_)
         ;
             Body = hlds_du_type(_),
-            string.suffix(term.context_file(Context), ".int2")
+            string.suffix(term_context.context_file(Context), ".int2")
             % If the type definition comes from a .int2 file then we must
             % treat it as abstract. The constructors may only be used
             % by the mode system for comparing `bound' insts to `ground'.
@@ -213,8 +215,8 @@ check_for_duplicate_type_declaration(TypeCtor, OldDefn, NewStatus, NewContext,
     get_type_defn_context(OldDefn, OldContext),
     get_type_defn_status(OldDefn, OldStatus),
     ( if
-        string.suffix(term.context_file(OldContext), ".m"),
-        string.suffix(term.context_file(NewContext), ".m")
+        string.suffix(term_context.context_file(OldContext), ".m"),
+        string.suffix(term_context.context_file(NewContext), ".m")
     then
         % The flattening of source item blocks by modules.m puts
         % all items in a given section together. Since the original
@@ -310,7 +312,7 @@ module_add_type_defn_mercury(TypeStatus1, TypeCtor, TypeParams,
             hlds_data.get_type_defn_body(OldDefn, OldDefnBody),
             OldDefnBody \= hlds_abstract_type(_)
         then
-            maybe_report_multiple_def_error(TypeStatus, TypeCtor, Context,
+            maybe_report_multiply_defined_type(TypeStatus, TypeCtor, Context,
                 OldDefn, !ModuleInfo, !FoundInvalidType, !Specs)
         else
             replace_type_ctor_defn(TypeCtor, TypeDefn, TypeTable0, TypeTable),
@@ -392,8 +394,8 @@ module_add_type_defn_foreign(TypeStatus0, TypeStatus1, TypeCtor,
                 module_info_set_type_table(TypeTable, !ModuleInfo)
             else
                 % ... or not.
-                maybe_report_multiple_def_error(TypeStatus, TypeCtor, Context,
-                    OldDefn, !ModuleInfo, !FoundInvalidType, !Specs)
+                maybe_report_multiply_defined_type(TypeStatus, TypeCtor,
+                    Context, OldDefn, !ModuleInfo, !FoundInvalidType, !Specs)
             )
         )
     else
@@ -580,7 +582,7 @@ merge_foreign_and_du_type_bodies(Globals, ForeignTypeBodyA, TypeBodyDuB,
     globals.get_op_mode(Globals, OpMode),
     ( if
         have_foreign_type_for_backend(Target, ForeignTypeBody, yes),
-        OpMode \= opm_top_args(opma_augment(opmau_make_opt_int))
+        OpMode \= opm_top_args(opma_augment(opmau_make_plain_opt))
     then
         Body = hlds_foreign_type(ForeignTypeBody)
     else
@@ -611,12 +613,12 @@ merge_maybe(no, yes(T), yes(T)).
 % Predicates that check for errors and/or report them.
 %
 
-:- pred maybe_report_multiple_def_error(type_status::in, type_ctor::in,
+:- pred maybe_report_multiply_defined_type(type_status::in, type_ctor::in,
     prog_context::in, hlds_type_defn::in, module_info::in, module_info::out,
     found_invalid_type::in, found_invalid_type::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-maybe_report_multiple_def_error(TypeStatus, TypeCtor, Context, OldDefn,
+maybe_report_multiply_defined_type(TypeStatus, TypeCtor, Context, OldDefn,
         !ModuleInfo, !FoundInvalidType, !Specs) :-
     % Issue an error message if the second definition wasn't read
     % while reading .opt files.
@@ -626,8 +628,8 @@ maybe_report_multiple_def_error(TypeStatus, TypeCtor, Context, OldDefn,
     else
         TypeCtor = type_ctor(SymName, Arity),
         hlds_data.get_type_defn_context(OldDefn, OldContext),
-        report_multiple_def_error(SymName, Arity, "type", Context, OldContext,
-            [], !Specs),
+        report_multiply_defined("type", SymName, user_arity(Arity),
+            Context, OldContext, [], !Specs),
         !:FoundInvalidType = found_invalid_type
     ).
 
@@ -658,7 +660,8 @@ check_for_invalid_user_defined_unify_compare(TypeStatus, TypeCtor, DetailsDu,
                 words("and as such it is not allowed to have"),
                 words("user-defined equality or comparison."), nl],
             VerbosePieces = [words("Discriminated union types"),
-                words("whose body consists of a single zero-arity constructor"),
+                words("whose body consists of"),
+                words("a single zero-arity constructor"),
                 words("cannot have user-defined equality or comparison."), nl],
             DummyMsg = simple_msg(Context, [always(MainPieces),
                 verbose_only(verbose_once, VerbosePieces)]),
@@ -710,7 +713,7 @@ check_for_polymorphic_eqv_type_with_monomorphic_body(TypeStatus, TypeCtor,
         true
     ).
 
-:- func abstract_monotype_workaround = list(format_component).
+:- func abstract_monotype_workaround = list(format_piece).
 
 abstract_monotype_workaround = [
     words("A quick workaround is to just export the type as a concrete type"),
@@ -761,8 +764,8 @@ check_for_inconsistent_solver_nosolver_type(TypeCtor, OldDefn, NewBody,
                 OldDeclOrDefn = "declaration"
             else
                 % We add some declarations OUT of their order in the source.
-                OldContext = term.context(OldFileName, OldLineNumber),
-                NewContext = term.context(NewFileName, NewLineNumber),
+                OldContext = term_context.context(OldFileName, OldLineNumber),
+                NewContext = term_context.context(NewFileName, NewLineNumber),
                 ( if
                     % Did we do so in this case?
                     OldFileName = NewFileName,
@@ -1503,7 +1506,7 @@ special_type_ctor_not_du(TypeCtor) :-
 %---------------------%
 
 :- func report_non_du_supertype(tvarset, type_ctor,
-    list(type_ctor), mer_type) = list(format_component).
+    list(type_ctor), mer_type) = list(format_piece).
 
 report_non_du_supertype(TVarSet, OrigTypeCtor, PrevSuperTypeCtors1,
         NextSuperType) = Pieces :-
@@ -1517,7 +1520,7 @@ report_non_du_supertype(TVarSet, OrigTypeCtor, PrevSuperTypeCtors1,
 %---------------------%
 
 :- func describe_supertype_chain(type_ctor, list(type_ctor), type_ctor)
-    = list(format_component).
+    = list(format_piece).
 
 describe_supertype_chain(OrigTypeCtor, PrevSuperTypeCtors, LastSuperTypeCtor)
         = Pieces :-
@@ -1530,7 +1533,7 @@ describe_supertype_chain(OrigTypeCtor, PrevSuperTypeCtors, LastSuperTypeCtor)
     ;       is_first.
 
 :- func describe_which_is_supertype_of_chain(maybe_first, type_ctor,
-    list(type_ctor)) = list(format_component).
+    list(type_ctor)) = list(format_piece).
 
 describe_which_is_supertype_of_chain(First, OrigTypeCtor, SuperTypeCtors)
         = Pieces :-
@@ -1978,7 +1981,7 @@ check_subtype_ctors_order(TypeCtor, Ctors, SuperTypeCtor, SuperCtors, Context,
     ).
 
 :- pred compute_subtype_ctors_diff(list(constructor)::in,
-    list(constructor)::in, list(format_component)::out) is det.
+    list(constructor)::in, list(format_piece)::out) is det.
 
 compute_subtype_ctors_diff(Ctors, SuperCtors, ChangeHunkPieces) :-
     (

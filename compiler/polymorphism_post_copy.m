@@ -92,16 +92,18 @@ class_id_is_from_given_module(ModuleName, ClassId) :-
     module_info::in, module_info::out) is det.
 
 expand_class_method_bodies_in_defn(ClassDefn, !ModuleInfo) :-
-    Interface = ClassDefn ^ classdefn_hlds_interface,
-    list.foldl2(expand_class_method_body, Interface, 1, _, !ModuleInfo).
+    MethodInfos = ClassDefn ^ classdefn_method_infos,
+    list.foldl2(expand_class_method_body, MethodInfos,
+        1, _, !ModuleInfo).
 
-:- pred expand_class_method_body(pred_proc_id::in, int::in, int::out,
+:- pred expand_class_method_body(method_info::in, int::in, int::out,
     module_info::in, module_info::out) is det.
 
-expand_class_method_body(ClassProc, !ProcNum, !ModuleInfo) :-
+expand_class_method_body(ClassMethodInfo, !ProcNum, !ModuleInfo) :-
+    ClassMethodInfo = method_info(_MethodNum, _MethodName,
+        _ClassOrigProc, ClassProc),
     ClassProc = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
 
     % XXX Looking up the proc_info for ProcId can fail here because
@@ -158,7 +160,7 @@ expand_class_method_body(ClassProc, !ProcNum, !ModuleInfo) :-
         list.length(InstanceArgs, InstanceArity),
         pred_info_get_pf_sym_name_arity(PredInfo0, PFSymNameArity),
         BodyGoalExpr = generic_call(
-            class_method(TypeClassInfoVar, !.ProcNum,
+            class_method(TypeClassInfoVar, method_proc_num(!.ProcNum),
                 class_id(ClassName, InstanceArity), PFSymNameArity),
             HeadVars, Modes, arg_reg_types_unset, Detism),
 
@@ -183,8 +185,7 @@ expand_class_method_body(ClassProc, !ProcNum, !ModuleInfo) :-
             PredInfo = PredInfo1
         ),
 
-        map.det_update(PredId, PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo)
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     else
         true
     ),

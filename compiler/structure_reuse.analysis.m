@@ -97,7 +97,6 @@
 :- import_module hlds.passes_aux.
 :- import_module hlds.pred_table.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.file_util.
 :- import_module libs.globals.
@@ -111,6 +110,7 @@
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.ctgc.structure_reuse.direct.
 :- import_module transform_hlds.ctgc.structure_reuse.indirect.
 :- import_module transform_hlds.ctgc.structure_reuse.lbu.
@@ -131,6 +131,7 @@
 :- import_module set.
 :- import_module string.
 :- import_module term.
+:- import_module term_context.
 :- import_module term_conversion.
 
 %---------------------------------------------------------------------------%
@@ -502,13 +503,9 @@ process_imported_reuse(!ModuleInfo):-
     module_info::out) is det.
 
 process_imported_reuse_in_pred(PredId, !ModuleInfo) :-
-    some [!PredTable] (
-        module_info_get_preds(!.ModuleInfo, !:PredTable),
-        map.lookup(!.PredTable, PredId, PredInfo0),
-        process_imported_reuse_in_procs(PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, !PredTable),
-        module_info_set_preds(!.PredTable, !ModuleInfo)
-    ).
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    process_imported_reuse_in_procs(PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 :- pred process_imported_reuse_in_procs(pred_info::in,
     pred_info::out) is det.
@@ -759,7 +756,7 @@ save_reuse_in_module_info(PPId, ReuseAs_Status, !ModuleInfo) :-
 
 annotate_in_use_information(ModuleInfo, !ProcInfo) :-
     forward_use_information(!ProcInfo),
-    backward_use_information(ModuleInfo, !ProcInfo),
+    backward_use_information(!ProcInfo),
     fill_goal_path_slots_in_proc(ModuleInfo, !ProcInfo).
 
 %---------------------------------------------------------------------------%
@@ -861,8 +858,8 @@ analysis_name = "structure_reuse".
             Answer2 = structure_reuse_answer_conditional(_, _, _),
             FuncInfo = structure_reuse_func_info(ModuleInfo, ProcInfo),
             proc_info_get_headvars(ProcInfo, HeadVars),
-            proc_info_get_vartypes(ProcInfo, VarTypes),
-            lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+            proc_info_get_var_table(ProcInfo, VarTable),
+            lookup_var_types(VarTable, HeadVars, HeadVarTypes),
             structure_reuse_answer_to_domain(HeadVarTypes, ProcInfo, Answer1,
                 Reuse1),
             structure_reuse_answer_to_domain(HeadVarTypes, ProcInfo, Answer2,
@@ -882,8 +879,8 @@ analysis_name = "structure_reuse".
             Answer2 = structure_reuse_answer_conditional(_, _, _),
             FuncInfo = structure_reuse_func_info(ModuleInfo, ProcInfo),
             proc_info_get_headvars(ProcInfo, HeadVars),
-            proc_info_get_vartypes(ProcInfo, VarTypes),
-            lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+            proc_info_get_var_table(ProcInfo, VarTable),
+            lookup_var_types(VarTable, HeadVars, HeadVarTypes),
             structure_reuse_answer_to_domain(HeadVarTypes, ProcInfo, Answer1,
                 Reuse1),
             structure_reuse_answer_to_domain(HeadVarTypes, ProcInfo, Answer2,
@@ -906,10 +903,10 @@ analysis_name = "structure_reuse".
 reuse_answer_to_term(Answer) = Term :-
     (
         Answer = structure_reuse_answer_no_reuse,
-        Term = term.functor(atom("no_reuse"), [], term.context_init)
+        Term = term.functor(atom("no_reuse"), [], dummy_context)
     ;
         Answer = structure_reuse_answer_unconditional,
-        Term = term.functor(atom("uncond"), [], term.context_init)
+        Term = term.functor(atom("uncond"), [], dummy_context)
     ;
         Answer = structure_reuse_answer_conditional(HeadVars, Types,
             Conditions),
@@ -917,7 +914,7 @@ reuse_answer_to_term(Answer) = Term :-
         type_to_term(Types, TypesTerm),
         type_to_term(Conditions, ConditionsTerm),
         Term = term.functor(atom("cond"),
-            [HeadVarsTerm, TypesTerm, ConditionsTerm], term.context_init)
+            [HeadVarsTerm, TypesTerm, ConditionsTerm], dummy_context)
     ).
 
 :- pred reuse_answer_from_term(term::in, structure_reuse_answer::out)
@@ -1000,8 +997,8 @@ reuse_as_to_structure_reuse_answer(ModuleInfo, PPId, ReuseAs, Answer) :-
         Reuse = has_conditional_reuse(Conditions),
         module_info_proc_info(ModuleInfo, PPId, ProcInfo),
         proc_info_get_headvars(ProcInfo, HeadVars),
-        proc_info_get_vartypes(ProcInfo, VarTypes),
-        lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        lookup_var_types(VarTable, HeadVars, HeadVarTypes),
         Answer = structure_reuse_answer_conditional(HeadVars, HeadVarTypes,
             Conditions)
     ).
@@ -1065,7 +1062,8 @@ structure_reuse_answer_harsher_than_in_analysis_registry(ModuleInfo,
                 io(!IO)
             ] (
                 get_debug_output_stream(ModuleInfo, DebugStream, !IO),
-                ReusePPIdStr = pred_proc_id_to_string(ModuleInfo, ReusePPId),
+                ReusePPIdStr =
+                    pred_proc_id_to_dev_string(ModuleInfo, ReusePPId),
                 io.format(DebugStream,
                     "Structure reuse answer for %s\n" ++
                     "has harsher conditions than listed in analysis file.\n",
@@ -1114,7 +1112,7 @@ remove_useless_reuse_proc(ModuleInfo, VeryVerbose, ReuseAsMap, _, PPId,
             VeryVerbose = yes,
             trace [io(!IO)] (
                 get_progress_output_stream(ModuleInfo, ProgressStream, !IO),
-                PPIdStr = pred_proc_id_to_string(ModuleInfo, PPId),
+                PPIdStr = pred_proc_id_to_dev_string(ModuleInfo, PPId),
                 io.format(ProgressStream, "%% Removing useless reuse %s\n",
                     [s(PPIdStr)], !IO)
             )

@@ -131,7 +131,8 @@
 
 :- pred mercury_output_constraint(tvarset::in, var_name_print::in,
     prog_constraint::in, io.text_output_stream::in, io::di, io::uo) is det.
-:- func mercury_constraint_to_string(tvarset, prog_constraint) = string.
+:- func mercury_constraint_to_string(tvarset, var_name_print, prog_constraint)
+    = string.
 :- pred mercury_format_constraint(tvarset::in, var_name_print::in,
     prog_constraint::in, S::in, U::di, U::uo) is det <= output(S, U).
 
@@ -212,10 +213,9 @@ mercury_format_type(TypeVarSet, VarNamePrint, Type, S, !U) :-
     % for this is that we have to be very careful about handling operators
     % and precedence properly, and it is better to have the code to manage
     % that in one place, rather than duplicated here.
-    %
     unparse_type(Type, Term),
     VarSet = varset.coerce(TypeVarSet),
-    mercury_format_term(VarSet, VarNamePrint, Term, S, !U).
+    mercury_format_term_vs(VarSet, VarNamePrint, Term, S, !U).
 
 %---------------------------------------------------------------------------%
 
@@ -250,7 +250,7 @@ mercury_format_quantifier(TypeVarSet, VarNamePrint, ExistQVars, S, !U) :-
     ;
         ExistQVars = [_ | _],
         add_string("some [", S, !U),
-        mercury_format_vars(TypeVarSet, VarNamePrint, ExistQVars, S, !U),
+        mercury_format_vars_vs(TypeVarSet, VarNamePrint, ExistQVars, S, !U),
         add_string("] ", S, !U)
     ).
 
@@ -265,7 +265,7 @@ mercury_output_state_vars(VarSet, VarNamePrint, StateVars, Stream, !IO) :-
 
 mercury_output_state_var(VarSet, VarNamePrint, Var, Stream, !IO) :-
     io.write_string(Stream, "!", !IO),
-    mercury_output_var(VarSet, VarNamePrint, Var, Stream, !IO).
+    mercury_output_var_vs(VarSet, VarNamePrint, Var, Stream, !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -357,23 +357,19 @@ mercury_format_cons_id(Lang, NeedsBrackets, ConsId, S, !U) :-
         add_strings(["<type_ctor_info for ",
             ModuleString, ".", Type, "/", ArityString, ">"], S, !U)
     ;
-        ConsId = base_typeclass_info_const(ModuleName, ClassId, InstanceNum,
-            InstanceString),
-        ModuleString = sym_name_to_string(ModuleName),
+        ConsId = base_typeclass_info_const(ModuleSymName, ClassId,
+            InstanceNum, InstanceStr),
+        ModuleNameStr = sym_name_to_string(ModuleSymName),
         ClassId = class_id(ClassName, ClassArity),
-        add_string("<base_typeclass_info for ", S, !U),
-        add_string("class_id(", S, !U),
-        mercury_format_sym_name(ClassName, S, !U),
-        add_string(", ", S, !U),
-        add_int(ClassArity, S, !U),
-        add_string(")", S, !U),
-        ( if ModuleString \= "some bogus module name" then
-            add_strings([" from module ", ModuleString], S, !U)
-        else
-            true
-        ),
-        add_format(", instance number %d (%s)>",
-            [i(InstanceNum), s(InstanceString)], S, !U)
+        string.format("class_id(%s, %d)",
+            [s(mercury_sym_name_to_string(ClassName)), i(ClassArity)],
+            ClassStr),
+        string.format("from module %s, instance number %d (%s)",
+            [s(ModuleNameStr), i(InstanceNum), s(InstanceStr)],
+            ModuleInstanceStr),
+        string.format("<base_typeclass_info for %s, %s>",
+            [s(ClassStr), s(ModuleInstanceStr)], ConsIdStr),
+        add_string(ConsIdStr, S, !U)
     ;
         ConsId = type_info_cell_constructor(_),
         add_string("<type_info_cell_constructor>", S, !U)
@@ -495,8 +491,8 @@ mercury_output_constraint(TypeVarSet, VarNamePrint, Constraint, Stream, !IO) :-
     mercury_format_constraint(TypeVarSet, VarNamePrint,
         Constraint, Stream, !IO).
 
-mercury_constraint_to_string(TypeVarSet, Constraint) = String :-
-    mercury_format_constraint(TypeVarSet, print_name_only, Constraint,
+mercury_constraint_to_string(TypeVarSet, VarNamePrint, Constraint) = String :-
+    mercury_format_constraint(TypeVarSet, VarNamePrint, Constraint,
         unit, "", String).
 
 mercury_format_constraint(TypeVarSet, VarNamePrint, Constraint, S, !U) :-

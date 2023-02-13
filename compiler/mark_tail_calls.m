@@ -44,7 +44,7 @@
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 
 :- import_module list.
@@ -230,11 +230,12 @@
 :- import_module check_hlds.mode_top_functor.
 :- import_module check_hlds.type_util.
 :- import_module hlds.hlds_goal.
-:- import_module hlds.vartypes.
 :- import_module libs.options.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.prog_data_pragma.
+:- import_module parse_tree.prog_type.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module int.
@@ -294,10 +295,8 @@ mark_tail_rec_calls_in_scc(_Params, _SCC, [], !ModuleInfo, !Specs).
 mark_tail_rec_calls_in_scc(Params, SCC, [PredProcId | PredProcIds],
         !ModuleInfo, !Specs) :-
     PredProcId = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
-    pred_info_get_proc_table(PredInfo0, ProcTable0),
-    map.lookup(ProcTable0, ProcId, ProcInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    pred_info_proc_info(PredInfo0, ProcId, ProcInfo0),
 
     maybe_override_params_for_proc(ProcInfo0, Params, ProcParams),
 
@@ -310,10 +309,8 @@ mark_tail_rec_calls_in_scc(Params, SCC, [PredProcId | PredProcIds],
         WasProcChanged = proc_was_not_changed
     ;
         WasProcChanged = proc_may_have_been_changed,
-        map.det_update(ProcId, ProcInfo, ProcTable0, ProcTable),
-        pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo)
+        pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     ),
 
     mark_tail_rec_calls_in_scc(Params, SCC, PredProcIds, !ModuleInfo, !Specs).
@@ -540,11 +537,11 @@ do_mark_tail_rec_calls_in_proc(Params, ModuleInfo, SCC, PredId, ProcId,
             proc_info_get_goal(!.ProcInfo, Goal0),
             proc_info_get_argmodes(!.ProcInfo, Modes),
             proc_info_get_headvars(!.ProcInfo, HeadVars),
-            proc_info_get_vartypes(!.ProcInfo, VarTypes),
+            proc_info_get_var_table(!.ProcInfo, VarTable),
             find_output_args(ModuleInfo, Types, Modes, HeadVars, Outputs),
 
             Info0 = mark_tail_rec_calls_info(ModuleInfo, PredInfo,
-                proc(PredId, ProcId), SCC, VarTypes, Params,
+                proc(PredId, ProcId), SCC, VarTable, Params,
                 has_no_self_tail_rec_call, has_no_mutual_tail_rec_call,
                 not_found_any_rec_calls, []),
             mark_tail_rec_calls_in_goal(Goal0, Goal, at_tail(Outputs), _,
@@ -633,7 +630,7 @@ find_output_args(ModuleInfo, Types, Modes, Vars, OutputVars) :-
                 mtc_pred_info               :: pred_info,
                 mtc_cur_proc                :: pred_proc_id,
                 mtc_cur_scc                 :: set(pred_proc_id),
-                mtc_vartypes                :: vartypes,
+                mtc_var_table               :: var_table,
                 mtc_params                  :: tail_rec_params,
                 mtc_self_tail_rec_calls     :: has_self_tail_rec_call,
                 mtc_mutual_tail_rec_calls   :: has_mutual_tail_rec_call,
@@ -740,15 +737,18 @@ mark_tail_rec_calls_in_goal(Goal0, Goal, AtTail0, AtTail, !Info) :-
         ),
         Goal = hlds_goal(scope(Reason, SubGoal), GoalInfo0)
     ;
-        GoalExpr0 = unify(LHS, _, _, Unify0, _),
+        GoalExpr0 = unify(LHSVar, _, _, Unify0, _),
         Goal = Goal0,
-        ModuleInfo = !.Info ^ mtc_module,
-        VarTypes = !.Info ^ mtc_vartypes,
-        ( if var_is_of_dummy_type(ModuleInfo, VarTypes, LHS) then
+        VarTable = !.Info ^ mtc_var_table,
+        lookup_var_entry(VarTable, LHSVar, LHSVarEntry),
+        LHSVarIsDummy = LHSVarEntry ^ vte_is_dummy,
+        (
+            LHSVarIsDummy = is_dummy_type,
             % Unifications involving dummy type variables are no-ops,
             % and do not inhibit a preceding tail call.
             AtTail = AtTail0
-        else
+        ;
+            LHSVarIsDummy = is_not_dummy_type,
             (
                 ( Unify0 = construct(_, _, _, _, _, _, _)
                 ; Unify0 = deconstruct(_, _, _, _, _, _)
@@ -1101,9 +1101,9 @@ report_nontail_recursive_call(ModuleInfo, CallerPredProcId, CalleePredProcId,
     module_info_pred_info(ModuleInfo, CallerPredId, CallerPredInfo),
     CallerPredOrFunc = pred_info_is_pred_or_func(CallerPredInfo),
     CallerName = pred_info_name(CallerPredInfo),
-    CallerArity = pred_info_orig_arity(CallerPredInfo),
+    CallerPredFormArity = pred_info_pred_form_arity(CallerPredInfo),
     CallerId = pf_sym_name_arity(CallerPredOrFunc, unqualified(CallerName),
-        CallerArity),
+        CallerPredFormArity),
     ( if CallerPredProcId = CalleePredProcId then
         add_message_for_nontail_self_recursive_call(CallerId, CallerProcId,
             Context, Reason, WarnOrError, !Specs)
@@ -1113,9 +1113,9 @@ report_nontail_recursive_call(ModuleInfo, CallerPredProcId, CalleePredProcId,
         CalleePredOrFunc = pred_info_is_pred_or_func(CalleePredInfo),
         CalleeName = qualified(pred_info_module(CalleePredInfo),
             pred_info_name(CalleePredInfo)),
-        CalleeArity = pred_info_orig_arity(CalleePredInfo),
-        CalleeId =
-            pf_sym_name_arity(CalleePredOrFunc, CalleeName, CalleeArity),
+        CalleePredFormArity = pred_info_pred_form_arity(CalleePredInfo),
+        CalleeId = pf_sym_name_arity(CalleePredOrFunc, CalleeName,
+            CalleePredFormArity),
         add_message_for_nontail_mutual_recursive_call(CallerId,
             CallerProcId, CalleeId, Context, Reason, WarnOrError, !Specs)
     ).
@@ -1130,7 +1130,7 @@ add_message_for_nontail_self_recursive_call(PFSymNameArity, ProcId, Context,
     proc_id_to_int(ProcId, ProcNumber0),
     ProcNumber = ProcNumber0 + 1,
     MainPieces = [words("In mode number"), int_fixed(ProcNumber),
-        words("of"), unqual_pf_sym_name_orig_arity(PFSymNameArity),
+        words("of"), unqual_pf_sym_name_pred_form_arity(PFSymNameArity),
         suffix(":"), nl,
         WarnOrErrorWord, words("self-recursive call")] ++ ReasonPieces,
     MainMsg = simplest_msg(Context, MainPieces),
@@ -1146,22 +1146,22 @@ add_message_for_nontail_mutual_recursive_call(CallerId, CallerProcId,
     proc_id_to_int(CallerProcId, ProcNumber0),
     ProcNumber = ProcNumber0 + 1,
     MainPieces = [words("In mode number"), int_fixed(ProcNumber), words("of"),
-        unqual_pf_sym_name_orig_arity(CallerId), suffix(":"), nl,
+        unqual_pf_sym_name_pred_form_arity(CallerId), suffix(":"), nl,
         WarnOrErrorWord, words("mutually recursive call to"),
-        unqual_pf_sym_name_orig_arity(CalleeId)] ++ ReasonPieces,
+        unqual_pf_sym_name_pred_form_arity(CalleeId)] ++ ReasonPieces,
     MainMsg = simplest_msg(Context, MainPieces),
     Spec = error_spec($pred, Severity, phase_code_gen,
         [MainMsg | VerboseMsgs]),
     !:Specs = [Spec | !.Specs].
 
 :- pred woe_to_severity_and_string(warning_or_error::in,
-    error_severity::out, format_component::out) is det.
+    error_severity::out, format_piece::out) is det.
 
 woe_to_severity_and_string(we_warning, severity_warning, words("warning:")).
 woe_to_severity_and_string(we_error, severity_error, words("error:")).
 
 :- pred nontail_rec_call_reason_to_pieces(nontail_rec_call_reason::in,
-    prog_context::in, list(format_component)::out, list(error_msg)::out)
+    prog_context::in, list(format_piece)::out, list(error_msg)::out)
     is det.
 
 nontail_rec_call_reason_to_pieces(Reason, Context,
@@ -1216,9 +1216,9 @@ maybe_report_no_tail_or_nontail_recursive_calls(PredInfo, ProcInfo,
             ),
             pred_info_get_is_pred_or_func(PredInfo, PredOrFunc),
             pred_info_get_name(PredInfo, PredName),
-            pred_info_get_orig_arity(PredInfo, PredArity),
+            PredFormArity = pred_info_pred_form_arity(PredInfo),
             PFSymNameArity = pf_sym_name_arity(PredOrFunc,
-                unqualified(PredName), PredArity),
+                unqualified(PredName), PredFormArity),
             report_no_tail_or_nontail_recursive_calls(PFSymNameArity, Context,
                 !Specs)
         )
@@ -1230,7 +1230,7 @@ maybe_report_no_tail_or_nontail_recursive_calls(PredInfo, ProcInfo,
 report_no_tail_or_nontail_recursive_calls(PFSymNameArity, Context, !Specs) :-
     PFSymNameArity = pf_sym_name_arity(PredOrFunc, _, _),
     Pieces = [words("In"), pragma_decl("require_tail_recursion"), words("for"),
-        unqual_pf_sym_name_orig_arity(PFSymNameArity), suffix(":"), nl,
+        unqual_pf_sym_name_pred_form_arity(PFSymNameArity), suffix(":"), nl,
         words("warning: the code defining this"), p_or_f(PredOrFunc),
         words("contains no recursive calls at all,"),
         words("tail-recursive or otherwise."), nl],

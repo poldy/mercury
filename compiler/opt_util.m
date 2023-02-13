@@ -368,16 +368,15 @@
 
 :- import_module backend_libs.
 :- import_module backend_libs.builtin_ops.
-:- import_module check_hlds.
-:- import_module check_hlds.type_util.
 :- import_module hlds.
 :- import_module hlds.hlds_llds.
-:- import_module hlds.special_pred.
+:- import_module hlds.pred_name.
 :- import_module ll_backend.code_util.
 :- import_module ll_backend.exprn_aux.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.prog_type.
 
 :- import_module int.
 :- import_module require.
@@ -2790,7 +2789,7 @@ format_proc_label(special_proc_label(_Module, SpecialPredId, TypeModule,
         PredName ++ "_" ++ TypeName ++ "/" ++ int_to_string(TypeArity)
             ++ " mode " ++ int_to_string(Mode) :-
     TypeCtor = type_ctor(qualified(TypeModule, TypeName), TypeArity),
-    PredName = special_pred_name(SpecialPredId, TypeCtor).
+    PredName = uci_pred_name(SpecialPredId, TypeCtor).
 
 %---------------------------------------------------------------------------%
 :- end_module ll_backend.opt_util.

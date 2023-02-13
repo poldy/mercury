@@ -67,6 +67,7 @@
 :- import_module parse_tree.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_db.
 
 :- import_module assoc_list.
 :- import_module int.
@@ -90,16 +91,15 @@ push_goals_in_proc(PushGoals, OverallResult, !ProcInfo, !ModuleInfo) :-
     module_info_get_globals(!.ModuleInfo, Globals),
     module_info_get_name(!.ModuleInfo, ModuleName),
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
     PushInfo = push_info(Globals, ModuleName, RttiVarMaps0),
     OutInfo = init_hlds_out_info(Globals, output_debug),
     trace [compiletime(flag("debug_push_goals")), io(!IO)] (
         get_debug_output_stream(Globals, ModuleName, DebugStream, !IO),
         io.write_string(DebugStream, "Goal before pushes:\n", !IO),
-        write_goal_nl(OutInfo, DebugStream, !.ModuleInfo, VarSet0,
-            print_name_and_num, 0, "", Goal0, !IO)
+        write_goal_nl(OutInfo, DebugStream, !.ModuleInfo,
+            vns_var_table(VarTable0), print_name_and_num, 0, "", Goal0, !IO)
     ),
     do_push_list(PushInfo, PushGoals, OverallResult, Goal0, Goal1),
     (
@@ -109,8 +109,9 @@ push_goals_in_proc(PushGoals, OverallResult, !ProcInfo, !ModuleInfo) :-
         trace [compiletime(flag("debug_push_goals")), io(!IO)] (
             get_debug_output_stream(Globals, ModuleName, DebugStream, !IO),
             io.write_string(DebugStream, "Goal after pushes:\n", !IO),
-            write_goal_nl(OutInfo, DebugStream, !.ModuleInfo, VarSet0,
-                print_name_and_num, 0, "", Goal1, !IO)
+            write_goal_nl(OutInfo, DebugStream, !.ModuleInfo,
+                vns_var_table(VarTable0), print_name_and_num, 0, "",
+                Goal1, !IO)
         ),
 
         % We need to fix up the goal_infos of the goals touched directly or
@@ -129,23 +130,21 @@ push_goals_in_proc(PushGoals, OverallResult, !ProcInfo, !ModuleInfo) :-
         % renamings will be needed.
 
         proc_info_get_headvars(!.ProcInfo, HeadVars),
-        implicitly_quantify_clause_body_general(ordinary_nonlocals_no_lambda,
+        implicitly_quantify_clause_body_general(ord_nl_no_lambda,
             HeadVars, _Warnings, Goal1, Goal2,
-            VarSet0, VarSet, VarTypes0, VarTypes,
-            RttiVarMaps0, RttiVarMaps),
+            VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
         proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InstMap0),
         proc_info_get_inst_varset(!.ProcInfo, InstVarSet),
-        recompute_instmap_delta(do_not_recompute_atomic_instmap_deltas,
-            Goal2, Goal, VarTypes, InstVarSet, InstMap0, !ModuleInfo),
+        recompute_instmap_delta(no_recomp_atomics, VarTable, InstVarSet,
+            InstMap0, Goal2, Goal, !ModuleInfo),
         proc_info_set_goal(Goal, !ProcInfo),
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
         trace [compiletime(flag("debug_push_goals")), io(!IO)] (
             get_debug_output_stream(Globals, ModuleName, DebugStream, !IO),
             io.write_string(DebugStream, "Goal after fixups:\n", !IO),
-            write_goal_nl(OutInfo, DebugStream, !.ModuleInfo, VarSet,
-                print_name_and_num, 0, "", Goal, !IO)
+            write_goal_nl(OutInfo, DebugStream, !.ModuleInfo,
+                vns_var_table(VarTable), print_name_and_num, 0, "", Goal, !IO)
         )
     ).
 
@@ -187,7 +186,7 @@ do_one_push(PushInfo, PushGoal, Result, !Goal) :-
     push_result::out, hlds_goal::in, hlds_goal::out) is det.
 
 do_push_in_goal(PushInfo, fgp_nil, PushGoal, Result, !Goal) :-
-    % We have arrives at the goal in which the push should take place.
+    % We have arrived at the goal in which the push should take place.
     perform_push_transform(PushInfo, PushGoal, Result, !Goal).
 do_push_in_goal(PushInfo, fgp_cons(Step, Path), PushGoal, Result, !Goal) :-
     !.Goal = hlds_goal(GoalExpr0, GoalInfo0),

@@ -2,7 +2,7 @@
 % vim: ts=4 sw=4 et ft=mercury
 %---------------------------------------------------------------------------%
 % Copyright (C) 1993-2007, 2009-2014 The University of Melbourne.
-% Copyright (C) 2013-2018 The Mercury team.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -107,6 +107,7 @@
 :- import_module eqvclass.
 :- import_module exception.
 :- import_module fat_sparse_bitset.
+:- import_module fatter_sparse_bitset.
 :- import_module float.
 :- import_module gc.
 :- import_module getopt.
@@ -120,6 +121,14 @@
 :- import_module int64.
 :- import_module integer.
 :- import_module io.
+:- import_module io.call_system.
+:- import_module io.environment.
+:- import_module io.error_util.
+:- import_module io.file.
+:- import_module io.primitives_read.
+:- import_module io.primitives_write.
+:- import_module io.stream_db.
+:- import_module io.stream_ops.
 :- import_module kv_list.
 :- import_module lazy.
 :- import_module list.
@@ -145,6 +154,7 @@
 :- import_module random.sfc32.
 :- import_module random.sfc64.
 :- import_module random.system_rng.
+:- import_module ra_list.
 :- import_module ranges.
 :- import_module rational.
 :- import_module rbtree.
@@ -170,7 +180,12 @@
 :- import_module string.parse_util.
 :- import_module table_statistics.
 :- import_module term.
+:- import_module term_context.
 :- import_module term_conversion.
+:- import_module term_int.
+:- import_module term_subst.
+:- import_module term_unify.
+:- import_module term_vars.
 :- import_module term_io.
 :- import_module term_to_xml.
 :- import_module thread.
@@ -208,10 +223,10 @@
 :- import_module test_bitset.
 
 % library.version must be implemented using pragma foreign_proc,
-% so we can get at the MR_VERSION and MR_FULLARCH configuration
-% parameters.  We can't just generate library.m from library.m.in
-% at configuration time, because that would cause bootstrapping problems --
-% we might not have a Mercury compiler around to compile library.m with.
+% so we can get at the MR_VERSION and MR_FULLARCH configuration parameters.
+% We can't just generate library.m from library.m.in at configuration time,
+% because that would cause bootstrapping problems: we might not have
+% a working Mercury compiler to compile library.m with.
 
 :- pragma no_inline(pred(library.version/2)).
 
@@ -222,8 +237,8 @@
     MR_ConstString version_string = MR_VERSION;
     MR_ConstString fullarch_string = MR_FULLARCH;
 
-    // Cast away const needed here, because Mercury declares Version
-    // with type MR_String rather than MR_ConstString.
+    // We need to cast away const here, because Mercury declares Version
+    // and Fullarch to have type MR_String, not MR_ConstString.
     Version = (MR_String) (MR_Word) version_string;
     Fullarch = (MR_String) (MR_Word) fullarch_string;
 ").
@@ -249,6 +264,10 @@
 mercury_std_library_module(ModuleName) :-
     stdlib_module_doc_undoc(ModuleName, _).
 
+% NOTE If you ever add any module name here that contains more than two dots,
+% i.e. it represents the submodule of a submodule of a submodule, then
+% you will need to update the code of the "trusted" predicate in
+% browse/declarative_oracle.m to handle such names.
 stdlib_module_doc_undoc("array",                        doc).
 stdlib_module_doc_undoc("array2d",                      doc).
 stdlib_module_doc_undoc("assoc_list",                   doc).
@@ -277,6 +296,7 @@ stdlib_module_doc_undoc("enum",                         doc).
 stdlib_module_doc_undoc("eqvclass",                     doc).
 stdlib_module_doc_undoc("exception",                    doc).
 stdlib_module_doc_undoc("fat_sparse_bitset",            doc).
+stdlib_module_doc_undoc("fatter_sparse_bitset",         doc).
 stdlib_module_doc_undoc("float",                        doc).
 stdlib_module_doc_undoc("gc",                           doc).
 stdlib_module_doc_undoc("getopt",                       doc).
@@ -290,6 +310,15 @@ stdlib_module_doc_undoc("int32",                        doc).
 stdlib_module_doc_undoc("int64",                        doc).
 stdlib_module_doc_undoc("integer",                      doc).
 stdlib_module_doc_undoc("io",                           doc).
+stdlib_module_doc_undoc("io.call_system",               doc).
+stdlib_module_doc_undoc("io.environment",               doc).
+stdlib_module_doc_undoc("io.error_util",                undoc).
+stdlib_module_doc_undoc("io.file",                      doc).
+stdlib_module_doc_undoc("io.primitives_read",           undoc).
+stdlib_module_doc_undoc("io.primitives_write",          undoc).
+stdlib_module_doc_undoc("io.stream_db",                 undoc).
+stdlib_module_doc_undoc("io.stream_ops",                undoc).
+stdlib_module_doc_undoc("io.text_read",                 undoc).
 stdlib_module_doc_undoc("kv_list",                      doc).
 stdlib_module_doc_undoc("lazy",                         doc).
 stdlib_module_doc_undoc("library",                      doc).
@@ -315,6 +344,7 @@ stdlib_module_doc_undoc("profiling_builtin",            undoc).
 stdlib_module_doc_undoc("prolog",                       doc).
 stdlib_module_doc_undoc("psqueue",                      doc).
 stdlib_module_doc_undoc("queue",                        doc).
+stdlib_module_doc_undoc("ra_list",                      doc).
 stdlib_module_doc_undoc("random",                       doc).
 stdlib_module_doc_undoc("random.sfc16",                 doc).
 stdlib_module_doc_undoc("random.sfc32",                 doc).
@@ -351,7 +381,12 @@ stdlib_module_doc_undoc("string.to_string",             undoc).
 stdlib_module_doc_undoc("table_builtin",                undoc).
 stdlib_module_doc_undoc("table_statistics",             doc).
 stdlib_module_doc_undoc("term",                         doc).
+stdlib_module_doc_undoc("term_context",                 doc).
 stdlib_module_doc_undoc("term_conversion",              doc).
+stdlib_module_doc_undoc("term_int",                     doc).
+stdlib_module_doc_undoc("term_subst",                   doc).
+stdlib_module_doc_undoc("term_unify",                   doc).
+stdlib_module_doc_undoc("term_vars",                    doc).
 stdlib_module_doc_undoc("term_io",                      doc).
 stdlib_module_doc_undoc("term_size_prof_builtin",       undoc).
 stdlib_module_doc_undoc("term_to_xml",                  doc).

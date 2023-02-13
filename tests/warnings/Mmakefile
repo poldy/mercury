@@ -25,9 +25,14 @@ ERRORCHECK_PROGS = \
 	bug412 \
 	bug477 \
 	det_infer_warning \
+	disabled_warning \
 	double_underscore \
 	duplicate_call \
 	duplicate_const \
+	empty_interface \
+	foreign_singleton \
+	format_call_multi \
+	format_call_warning \
 	gh85 \
 	inconsistent_pred_order \
 	inf_recursion_lambda \
@@ -37,6 +42,7 @@ ERRORCHECK_PROGS = \
 	missing_if \
 	non_contiguous_decls \
 	non_stratification \
+	obsolete_proc_pragma \
 	occurs \
 	pragma_source_file \
 	purity_warnings \
@@ -52,6 +58,7 @@ ERRORCHECK_PROGS = \
 	unify_f_g \
 	unify_x_f_x \
 	unknown_warning \
+	unneeded_mode_specific_clause \
 	unsigned_zero_cmp \
 	unused_args_test \
 	unused_import \

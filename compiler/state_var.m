@@ -17,11 +17,13 @@
 
 :- import_module hlds.hlds_goal.
 :- import_module hlds.make_hlds.goal_expr_to_goal.
+:- import_module libs.
+:- import_module libs.globals.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 
 :- import_module list.
@@ -60,8 +62,8 @@
     %
 :- pred expand_bang_state_pairs_in_terms(list(prog_term)::in,
     list(prog_term)::out) is det.
-:- pred expand_bang_state_pairs_in_instance_body(instance_body::in,
-    instance_body::out) is det.
+:- pred expand_bang_state_pairs_in_instance_method(instance_method::in,
+    instance_method::out) is det.
 
 %-----------------------------------------------------------------------------%
 
@@ -138,8 +140,8 @@
     % Make sure that all arms of a disjunction produce the same state variable
     % bindings, by adding unifiers as necessary.
     %
-:- pred svar_finish_disjunction(prog_context::in,
-    list(hlds_goal_svar_state)::in, list(hlds_goal)::out,
+:- pred svar_finish_disjunction(list(hlds_goal_svar_state)::in,
+    list(hlds_goal)::out,
     prog_varset::in, prog_varset::out, svar_state::in, svar_state::out,
     svar_store::in, svar_store::out) is det.
 
@@ -302,14 +304,16 @@
 
 :- import_module hlds.goal_util.
 :- import_module hlds.make_goal.
-:- import_module libs.
 :- import_module libs.options.
 :- import_module mdbcomp.goal_path.
+:- import_module parse_tree.error_util.
+:- import_module parse_tree.prog_item.
 :- import_module parse_tree.prog_util.
 :- import_module parse_tree.set_of_var.
 
 :- import_module assoc_list.
 :- import_module bool.
+:- import_module cord.
 :- import_module counter.
 :- import_module io.
 :- import_module maybe.
@@ -317,6 +321,7 @@
 :- import_module require.
 :- import_module string.
 :- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %-----------------------------------------------------------------------------%
@@ -425,51 +430,40 @@ expand_bang_state_pairs_in_terms([HeadArg0 | TailArgs0], Args) :-
         HeadArg0 = variable(_, _),
         Args = [HeadArg0 | TailArgs]
     ;
-        HeadArg0 = functor(Const, FunctorArgs, Ctxt),
+        HeadArg0 = functor(Const, FunctorArgs, Context),
         ( if
             Const = atom("!"),
             FunctorArgs = [variable(_StateVar, _)]
         then
-            HeadArg1 = functor(atom("!."), FunctorArgs, Ctxt),
-            HeadArg2 = functor(atom("!:"), FunctorArgs, Ctxt),
+            HeadArg1 = functor(atom("!."), FunctorArgs, Context),
+            HeadArg2 = functor(atom("!:"), FunctorArgs, Context),
             Args = [HeadArg1, HeadArg2 | TailArgs]
         else
             Args = [HeadArg0 | TailArgs]
         )
     ).
 
-expand_bang_state_pairs_in_instance_body(InstanceBody0, InstanceBody) :-
-    (
-        InstanceBody0 = instance_body_abstract,
-        InstanceBody = instance_body_abstract
-    ;
-        InstanceBody0 = instance_body_concrete(Methods0),
-        list.map(expand_bang_state_pairs_in_method, Methods0, Methods),
-        InstanceBody = instance_body_concrete(Methods)
-    ).
-
-:- pred expand_bang_state_pairs_in_method(instance_method::in,
-    instance_method::out) is det.
-
-expand_bang_state_pairs_in_method(IM0, IM) :-
-    IM0 = instance_method(PredOrFunc, Method, ProcDef0, Arity0, Ctxt),
+expand_bang_state_pairs_in_instance_method(IM0, IM) :-
+    IM0 = instance_method(MethodId0, ProcDef0, Context),
+    MethodId0 = pred_pf_name_arity(PredOrFunc, MethodSymName, _UserArity0),
     (
         ProcDef0 = instance_proc_def_name(_),
         IM = IM0
     ;
-        ProcDef0 = instance_proc_def_clauses(ItemClauses0),
-        list.map(expand_bang_state_pairs_in_clause, ItemClauses0, ItemClauses),
-        % Note that ItemClauses should never be empty...
-        (
-            ItemClauses = [ItemClause | _],
+        ProcDef0 = instance_proc_def_clauses(ItemClausesCord0),
+        cord.map_pred(expand_bang_state_pairs_in_clause,
+            ItemClausesCord0, ItemClausesCord),
+        % Note that ItemClausesCord0 should never be empty...
+        ( if cord.head(ItemClausesCord, ItemClause) then
             Args = ItemClause ^ cl_head_args,
-            adjust_func_arity(PredOrFunc, Arity, list.length(Args))
-        ;
-            ItemClauses = [],
-            Arity = Arity0
+            PredFormArity = arg_list_arity(Args),
+            user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+            MethodId = pred_pf_name_arity(PredOrFunc, MethodSymName, UserArity)
+        else
+            MethodId = MethodId0
         ),
-        ProcDef = instance_proc_def_clauses(ItemClauses),
-        IM  = instance_method(PredOrFunc, Method, ProcDef, Arity, Ctxt)
+        ProcDef = instance_proc_def_clauses(ItemClausesCord),
+        IM = instance_method(MethodId, ProcDef, Context)
     ).
 
 :- pred expand_bang_state_pairs_in_clause(item_clause_info::in,
@@ -722,11 +716,11 @@ svar_finish_clause_body(Globals, ModuleName, Context, FinalMap,
         % subject to singleton warnings.
         %
         % We don't actually *want* to generate warnings about the assignments
-        % to STATE_VARIABLE_S_7, because the problem not in those assignments
-        % or in the if-then-else arms that contain them. Instead, it is
-        % in the condition, However, with this version of the code,
-        % the occurrence of STATE_VARIABLE_S_6 in the condition is *not*
-        % a singleton.
+        % to STATE_VARIABLE_S_7, because the problem is not in those
+        % assignments or in the if-then-else arms that contain them.
+        % Instead, it is in the condition. However, with this version
+        % of the code, the occurrence of STATE_VARIABLE_S_6 in the condition
+        % is *not* a singleton.
         %
         % To allow us to generate a warning about !:S in the condition,
         % we delete all copy unifications inserted by the state variable
@@ -998,7 +992,7 @@ finish_svars_for_scope([SVar | SVars], StatusMapBeforeOutside,
 %   state var, it schedules the prog_var representing the final value in
 %   that arm to be renamed to the picked prog_var.
 
-svar_finish_disjunction(_Context, DisjStates, Disjs, !VarSet,
+svar_finish_disjunction(DisjStates, Disjs, !VarSet,
         StateBefore, StateAfter, !Store) :-
     StateBefore = svar_state(StatusMapBefore),
     ( if map.is_empty(StatusMapBefore) then
@@ -1240,7 +1234,7 @@ make_copy_goal(FromVar, ToVar, CopyGoal) :-
     % make_copy_goal.
 
     create_pure_atomic_complicated_unification(ToVar, rhs_var(FromVar),
-        term.context_init, umc_implicit("state variable"), [], CopyGoal0),
+        dummy_context, umc_implicit("state variable"), [], CopyGoal0),
     goal_add_features([feature_dont_warn_singleton, feature_state_var_copy],
         CopyGoal0, CopyGoal).
 

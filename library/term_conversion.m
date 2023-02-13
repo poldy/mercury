@@ -57,7 +57,7 @@
 %---------------------------------------------------------------------------%
 %
 % The following predicates can convert values of (almost) any type
-% to the type `term' and back again.
+% to the type term and back again.
 %
 
     % try_term_to_type(Term, Result):
@@ -114,6 +114,9 @@
 :- import_module integer.
 :- import_module require.
 :- import_module string.
+:- import_module term_context.
+:- import_module term_int.
+:- import_module term_subst.
 :- import_module version_array.
 
 %---------------------------------------------------------------------------%
@@ -332,43 +335,43 @@ term_to_univ_special_case(ModuleName, TypeCtorName, TypeArgs, Term,
         ArgTerm = functor(atom(":"), [ValueTerm, TypeTerm], _),
         (
             TypeTerm = functor(atom("int"), [], _),
-            term_to_int(ValueTerm, Int),
+            term_int.term_to_int(ValueTerm, Int),
             Univ = univ(Int)
         ;
             TypeTerm = functor(atom("uint"), [], _),
-            term_to_uint(ValueTerm, UInt),
+            term_int.term_to_uint(ValueTerm, UInt),
             Univ = univ(UInt)
         ;
             TypeTerm = functor(atom("int8"), [], _),
-            term_to_int8(ValueTerm, Int8),
+            term_int.term_to_int8(ValueTerm, Int8),
             Univ = univ(Int8)
         ;
             TypeTerm = functor(atom("uint8"), [], _),
-            term_to_uint8(ValueTerm, UInt8),
+            term_int.term_to_uint8(ValueTerm, UInt8),
             Univ = univ(UInt8)
         ;
             TypeTerm = functor(atom("int16"), [], _),
-            term_to_int16(ValueTerm, Int16),
+            term_int.term_to_int16(ValueTerm, Int16),
             Univ = univ(Int16)
         ;
             TypeTerm = functor(atom("uint16"), [], _),
-            term_to_uint16(ValueTerm, UInt16),
+            term_int.term_to_uint16(ValueTerm, UInt16),
             Univ = univ(UInt16)
         ;
             TypeTerm = functor(atom("int32"), [], _),
-            term_to_int32(ValueTerm, Int32),
+            term_int.term_to_int32(ValueTerm, Int32),
             Univ = univ(Int32)
         ;
             TypeTerm = functor(atom("uint32"), [], _),
-            term_to_uint32(ValueTerm, UInt32),
+            term_int.term_to_uint32(ValueTerm, UInt32),
             Univ = univ(UInt32)
         ;
             TypeTerm = functor(atom("int64"), [], _),
-            term_to_int64(ValueTerm, Int64),
+            term_int.term_to_int64(ValueTerm, Int64),
             Univ = univ(Int64)
         ;
             TypeTerm = functor(atom("uint64"), [], _),
-            term_to_uint64(ValueTerm, UInt64),
+            term_int.term_to_uint64(ValueTerm, UInt64),
             Univ = univ(UInt64)
         ;
             TypeTerm = functor(atom("string"), [], _),
@@ -379,7 +382,7 @@ term_to_univ_special_case(ModuleName, TypeCtorName, TypeArgs, Term,
             ValueTerm = functor(float(Float), [], _),
             Univ = univ(Float)
         ),
-        % The result is a `univ', but it is also wrapped in a `univ'
+        % The result is a univ, but it is also wrapped in a univ
         % like all the other results returned from this procedure.
         Result = ok(univ(Univ))
     ).
@@ -417,7 +420,7 @@ det_term_to_type(Term) = X :-
 det_term_to_type(Term, X) :-
     ( if term_to_type(Term, XPrime) then
         X = XPrime
-    else if \+ is_ground(Term) then
+    else if \+ term_subst.term_is_ground(Term) then
         unexpected($pred, "the term is not ground")
     else
         Message = "type error:\nthe term is not a valid term" ++
@@ -438,7 +441,7 @@ univ_to_term(Univ) = Term :-
     univ_to_term(Univ, Term).
 
 univ_to_term(Univ, Term) :-
-    context_init(Context),
+    Context = term_context.dummy_context,
     Type = univ_type(Univ),
     ( if construct.num_functors(Type) = _ then
         deconstruct(univ_value(Univ), canonicalize, FunctorString,

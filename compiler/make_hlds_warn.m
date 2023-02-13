@@ -17,11 +17,15 @@
 
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
+:- import_module hlds.hlds_pred.
 :- import_module hlds.quantification.
+:- import_module libs.
+:- import_module libs.globals.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
+:- import_module parse_tree.prog_item.
 
 :- import_module list.
 :- import_module maybe.
@@ -83,8 +87,7 @@
 :- implementation.
 
 :- import_module hlds.goal_util.
-:- import_module libs.
-:- import_module libs.globals.
+:- import_module hlds.status.
 :- import_module libs.options.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_out.
@@ -95,6 +98,7 @@
 :- import_module char.
 :- import_module require.
 :- import_module string.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -110,19 +114,19 @@ add_quant_warnings(PredCallId, VarSet, Warnings, !Specs) :-
 quant_warning_to_spec(PredCallId, VarSet, Warning) = Spec :-
     Warning = warn_overlap(Vars, Context),
     Pieces1 = [words("In clause for"),
-        unqual_pf_sym_name_orig_arity(PredCallId), suffix(":"), nl],
+        unqual_pf_sym_name_pred_form_arity(PredCallId), suffix(":"), nl],
     (
         Vars = [],
         unexpected($pred, "Vars = []")
     ;
         Vars = [Var],
         Pieces2 = [words("warning: variable"),
-            quote(mercury_var_to_name_only(VarSet, Var)),
+            quote(mercury_var_to_name_only_vs(VarSet, Var)),
             words("has overlapping scopes."), nl]
     ;
         Vars = [_, _ | _],
         Pieces2 = [words("warning: variables"),
-            quote(mercury_vars_to_name_only(VarSet, Vars)),
+            quote(mercury_vars_to_name_only_vs(VarSet, Vars)),
             words("each have overlapping scopes."), nl]
     ),
     Spec = conditional_spec($pred, warn_overlapping_scopes, yes,
@@ -156,7 +160,7 @@ warn_singletons(ModuleInfo, PredCallId, VarSet, Body, !Specs) :-
     % be singletons, but aren't.
 
     Info0 = warn_info(ModuleInfo, PredCallId, VarSet,
-        [], set_of_var.init, set_of_var.init, context_init),
+        [], set_of_var.init, set_of_var.init, dummy_context),
     QuantVars = set_of_var.init,
     warn_singletons_in_goal(Body, QuantVars, Info0, Info),
     Info = warn_info(_ModuleInfo, _PredCallId, _VarSet,
@@ -487,8 +491,8 @@ generate_variable_warning(SingleMulti, Context, CallId, VarSet, Vars, Spec) :-
         Count = "more than once"
     ),
     Preamble = [words("In clause for"),
-        unqual_pf_sym_name_orig_arity(CallId), suffix(":"), nl],
-    VarStrs0 = list.map(mercury_var_to_name_only(VarSet), Vars),
+        unqual_pf_sym_name_pred_form_arity(CallId), suffix(":"), nl],
+    VarStrs0 = list.map(mercury_var_to_name_only_vs(VarSet), Vars),
     list.sort_and_remove_dups(VarStrs0, VarStrs),
     VarsStr = "`" ++ string.join_list(", ", VarStrs) ++ "'",
     % We want VarsPiece to be breakable into two or more lines
@@ -530,7 +534,8 @@ warn_singletons_in_pragma_foreign_proc(ModuleInfo, PragmaImpl, Lang,
     ;
         UnmentionedVars = [_ | _],
         Pieces = [words("In the"), words(LangStr), words("code for"),
-            unqual_pf_sym_name_orig_arity(PFSymNameArity), suffix(":"), nl] ++
+            unqual_pf_sym_name_pred_form_arity(PFSymNameArity),
+            suffix(":"), nl] ++
             variable_warning_start(UnmentionedVars) ++
             [words("not occur in the"), words(LangStr), words("code."), nl],
         Spec = conditional_spec($pred, warn_singleton_vars, yes,
@@ -549,7 +554,7 @@ var_is_unmentioned(NameList1, MaybeArg, Name) :-
     not string.prefix(Name, "_"),
     not list.member(Name, NameList1).
 
-:- func variable_warning_start(list(string)) = list(format_component).
+:- func variable_warning_start(list(string)) = list(format_piece).
 
 variable_warning_start(UnmentionedVars) = Pieces :-
     ( if UnmentionedVars = [Var] then
@@ -674,7 +679,7 @@ check_fp_body_for_success_indicator(ModuleInfo, Lang, Context, PFSymNameArity,
                 LangStr = foreign_language_string(Lang),
                 Pieces = [words("Warning: the"), fixed(LangStr),
                     words("code for"),
-                    unqual_pf_sym_name_orig_arity(PFSymNameArity),
+                    unqual_pf_sym_name_pred_form_arity(PFSymNameArity),
                     words("may set"), quote(SuccIndStr), suffix(","),
                     words("but it cannot fail.")],
                 Spec = conditional_spec($pred,
@@ -695,7 +700,7 @@ check_fp_body_for_success_indicator(ModuleInfo, Lang, Context, PFSymNameArity,
                 LangStr = foreign_language_string(Lang),
                 Pieces = [words("Warning: the"), fixed(LangStr),
                     words("code for"),
-                    unqual_pf_sym_name_orig_arity(PFSymNameArity),
+                    unqual_pf_sym_name_pred_form_arity(PFSymNameArity),
                     words("does not appear to set"),
                     quote(SuccIndStr), suffix(","),
                     words("but it can fail.")],
@@ -727,7 +732,7 @@ check_fp_body_for_return(Lang, Context, PFSymNameArity, BodyPieces, !Specs) :-
         LangStr = foreign_language_string(Lang),
         Pieces = [words("Warning: the"), fixed(LangStr),
             words("code for"),
-            unqual_pf_sym_name_orig_arity(PFSymNameArity),
+            unqual_pf_sym_name_pred_form_arity(PFSymNameArity),
             words("may contain a"), quote("return"),
             words("statement."), nl],
         Spec = conditional_spec($pred, warn_suspicious_foreign_procs, yes,
@@ -766,9 +771,9 @@ check_promise_ex_goal(PromiseType, Goal, !Specs) :-
     then
         check_promise_ex_goal(PromiseType, SubGoal, !Specs)
     else if
-        Goal = disj_expr(_, _, _)
+        Goal = disj_expr(_, Disjunct1, Disjunct2, Disjuncts3plus)
     then
-        flatten_to_disj_list(Goal, DisjList),
+        DisjList = [Disjunct1, Disjunct2 | Disjuncts3plus],
         list.map(flatten_to_conj_list, DisjList, DisjConjList),
         check_promise_ex_disjunction(PromiseType, DisjConjList, !Specs)
     else if
@@ -784,30 +789,16 @@ check_promise_ex_goal(PromiseType, Goal, !Specs) :-
             "goal in declaration is not a disjunction", !Specs)
     ).
 
-    % Turns the goal of a promise_ex declaration into a list of goals,
-    % where each goal is an arm of the disjunction.
-    %
-:- pred flatten_to_disj_list(goal::in, list(goal)::out) is det.
-
-flatten_to_disj_list(Goal, GoalList) :-
-    ( if Goal = disj_expr(_, GoalA, GoalB) then
-        flatten_to_disj_list(GoalA, GoalListA),
-        flatten_to_disj_list(GoalB, GoalListB),
-        GoalList = GoalListA ++ GoalListB
-    else
-        GoalList = [Goal]
-    ).
-
     % Takes a goal representing an arm of a disjunction and turns it into
     % a list of conjunct goals.
     %
 :- pred flatten_to_conj_list(goal::in, list(goal)::out) is det.
 
 flatten_to_conj_list(Goal, GoalList) :-
-    ( if Goal = conj_expr(_, GoalA, GoalB) then
-        flatten_to_conj_list(GoalA, GoalListA),
-        flatten_to_conj_list(GoalB, GoalListB),
-        GoalList = GoalListA ++ GoalListB
+    ( if Goal = conj_expr(_, ConjunctA, ConjunctsB) then
+        list.map(flatten_to_conj_list, [ConjunctA | ConjunctsB],
+            ConjunctGoalLists),
+        list.condense(ConjunctGoalLists, GoalList)
     else
         GoalList = [Goal]
     ).

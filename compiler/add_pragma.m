@@ -10,9 +10,10 @@
 :- interface.
 
 :- import_module hlds.hlds_module.
+:- import_module hlds.make_hlds.make_hlds_types.
 :- import_module hlds.make_hlds.qual_info.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_item.
 
 :- import_module list.
@@ -22,6 +23,28 @@
 :- pred add_decl_pragmas(ims_list(item_decl_pragma_info)::in,
     module_info::in, module_info::out, qual_info::in, qual_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_decl_pragmas_type_spec(list(item_type_spec)::in,
+    module_info::in, module_info::out, qual_info::in, qual_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_decl_pragmas_term_info(list(item_termination)::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_decl_pragmas_term2_info(list(item_termination2)::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_decl_pragmas_sharing(list(item_struct_sharing)::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_decl_pragmas_reuse(list(item_struct_reuse)::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+%---------------------%
 
 :- pred add_impl_pragmas(ims_list(item_impl_pragma_info)::in,
     ims_list(item_tabled)::in, ims_list(item_tabled)::out,
@@ -37,7 +60,21 @@
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-:- pred add_gen_pragma(item_generated_pragma_info::in,
+%---------------------%
+
+:- pred add_gen_pragma_unused_args(item_unused_args::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_gen_pragma_exceptions(item_exceptions::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_gen_pragma_trailing(item_trailing::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+:- pred add_gen_pragma_mm_tabling(item_mm_tabling::in,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
@@ -49,6 +86,7 @@
 :- include_module hlds.make_hlds.add_pragma.add_pragma_tabling.
 :- include_module hlds.make_hlds.add_pragma.add_pragma_type_spec.
 
+:- import_module hlds.hlds_clauses.
 :- import_module hlds.hlds_code_util.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_error_util.
@@ -59,6 +97,7 @@
 :- import_module hlds.make_hlds.make_hlds_warn.
 :- import_module hlds.make_hlds_error.
 :- import_module hlds.pred_table.
+:- import_module hlds.status.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.op_mode.
@@ -66,8 +105,10 @@
 :- import_module ll_backend.
 :- import_module ll_backend.fact_table.
 :- import_module mdbcomp.
+:- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.maybe_error.
+:- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_foreign.
@@ -84,9 +125,11 @@
 :- import_module io.
 :- import_module map.
 :- import_module maybe.
+:- import_module one_or_more.
 :- import_module pair.
 :- import_module require.
 :- import_module set.
+:- import_module term.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -100,6 +143,43 @@ add_decl_pragmas([ImsList | ImsLists], !ModuleInfo, !QualInfo, !Specs) :-
     list.foldl3(add_decl_pragma(ItemMercuryStatus), Items,
         !ModuleInfo, !QualInfo, !Specs),
     add_decl_pragmas(ImsLists, !ModuleInfo, !QualInfo, !Specs).
+
+add_decl_pragmas_type_spec([], !ModuleInfo, !QualInfo, !Specs).
+add_decl_pragmas_type_spec([PragmaInfo | PragmaInfos],
+        !ModuleInfo, !QualInfo, !Specs) :-
+    PragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
+    add_pragma_type_spec(Pragma, Context, !ModuleInfo, !QualInfo, !Specs),
+    add_decl_pragmas_type_spec(PragmaInfos, !ModuleInfo, !QualInfo, !Specs).
+
+add_decl_pragmas_term_info([], !ModuleInfo, !Specs).
+add_decl_pragmas_term_info([PragmaInfo | PragmaInfos],
+        !ModuleInfo, !Specs) :-
+    PragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
+    add_pragma_termination_info(Pragma, Context, !ModuleInfo, !Specs),
+    add_decl_pragmas_term_info(PragmaInfos, !ModuleInfo, !Specs).
+
+add_decl_pragmas_term2_info([], !ModuleInfo, !Specs).
+add_decl_pragmas_term2_info([PragmaInfo | PragmaInfos],
+        !ModuleInfo, !Specs) :-
+    PragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
+    add_pragma_termination2_info(Pragma, Context, !ModuleInfo, !Specs),
+    add_decl_pragmas_term2_info(PragmaInfos, !ModuleInfo, !Specs).
+
+add_decl_pragmas_sharing([], !ModuleInfo, !Specs).
+add_decl_pragmas_sharing([PragmaInfo | PragmaInfos],
+        !ModuleInfo, !Specs) :-
+    PragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
+    add_pragma_structure_sharing(Pragma, Context, !ModuleInfo, !Specs),
+    add_decl_pragmas_sharing(PragmaInfos, !ModuleInfo, !Specs).
+
+add_decl_pragmas_reuse([], !ModuleInfo, !Specs).
+add_decl_pragmas_reuse([PragmaInfo | PragmaInfos],
+        !ModuleInfo, !Specs) :-
+    PragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
+    add_pragma_structure_reuse(Pragma, Context, !ModuleInfo, !Specs),
+    add_decl_pragmas_reuse(PragmaInfos, !ModuleInfo, !Specs).
+
+%---------------------%
 
 add_impl_pragmas([], !RevPragmaTabled, !ModuleInfo, !QualInfo, !Specs).
 add_impl_pragmas([ImsList | ImsLists],
@@ -140,13 +220,15 @@ add_decl_pragma(ItemMercuryStatus, ItemPragmaInfo,
     ItemPragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
     (
         Pragma = decl_pragma_obsolete_pred(ObsoletePredInfo),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        mark_pred_as_obsolete(ObsoletePredInfo, PredStatus, Context,
+        mark_pred_as_obsolete(ObsoletePredInfo, ItemMercuryStatus, Context,
             !ModuleInfo, !Specs)
     ;
         Pragma = decl_pragma_obsolete_proc(ObsoleteProcInfo),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        mark_proc_as_obsolete(ObsoleteProcInfo, PredStatus, Context,
+        mark_proc_as_obsolete(ObsoleteProcInfo, ItemMercuryStatus, Context,
+            !ModuleInfo, !Specs)
+    ;
+        Pragma = decl_pragma_format_call(FormatCallInfo),
+        mark_pred_as_format_call(FormatCallInfo, ItemMercuryStatus, Context,
             !ModuleInfo, !Specs)
     ;
         Pragma = decl_pragma_type_spec(TypeSpecInfo),
@@ -157,23 +239,20 @@ add_decl_pragma(ItemMercuryStatus, ItemPragmaInfo,
         add_pragma_oisu(OISUInfo, ItemMercuryStatus, Context,
             !ModuleInfo, !Specs)
     ;
-        Pragma = decl_pragma_terminates(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("terminates", PredNameArity, PredStatus, Context,
-            marker_terminates,
+        Pragma = decl_pragma_terminates(PFUNameArity),
+        add_pred_marker(PFUNameArity, "terminates", psc_decl,
+            ItemMercuryStatus, Context, marker_terminates,
             [marker_check_termination, marker_does_not_terminate],
             !ModuleInfo, !Specs)
     ;
-        Pragma = decl_pragma_does_not_terminate(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("does_not_terminate", PredNameArity, PredStatus,
-            Context, marker_does_not_terminate,
+        Pragma = decl_pragma_does_not_terminate(PFUNameArity),
+        add_pred_marker(PFUNameArity, "does_not_terminate", psc_decl,
+            ItemMercuryStatus, Context, marker_does_not_terminate,
             [marker_check_termination, marker_terminates], !ModuleInfo, !Specs)
     ;
-        Pragma = decl_pragma_check_termination(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("check_termination", PredNameArity, PredStatus,
-            Context, marker_check_termination,
+        Pragma = decl_pragma_check_termination(PFUNameArity),
+        add_pred_marker(PFUNameArity, "check_termination", psc_decl,
+            ItemMercuryStatus, Context, marker_check_termination,
             [marker_terminates, marker_does_not_terminate],
             !ModuleInfo, !Specs)
     ;
@@ -193,58 +272,42 @@ add_decl_pragma(ItemMercuryStatus, ItemPragmaInfo,
 %---------------------%
 
 :- pred mark_pred_as_obsolete(pragma_info_obsolete_pred::in,
-    pred_status::in, prog_context::in, module_info::in, module_info::out,
+    item_mercury_status::in, prog_context::in,
+    module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 mark_pred_as_obsolete(ObsoletePredInfo, PragmaStatus, Context,
         !ModuleInfo, !Specs) :-
     ObsoletePredInfo =
         pragma_info_obsolete_pred(PredSpec, ObsoleteInFavourOf),
-    maybe_warn_about_pfu_unknown(!.ModuleInfo, "obsolete", PredSpec, Context,
-        !Specs),
     PredSpec = pred_pfu_name_arity(PFU, SymName, UserArity),
-    get_matching_pred_ids(!.ModuleInfo, PFU, SymName, UserArity,
-        PredIds, OtherUserArities),
+    get_matching_pred_ids(!.ModuleInfo, "obsolete", do_not_require_one_match,
+        pragma_does_not_allow_modes, Context, PFU, SymName, UserArity,
+        MatchingPredIdResult),
     (
-        PredIds = [_ | _],
-        module_info_get_predicate_table(!.ModuleInfo, PredTable0),
-        predicate_table_get_preds(PredTable0, Preds0),
-        mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, PredIds,
-            no, WrongStatus, Preds0, Preds),
-        (
-            WrongStatus = yes,
-            pragma_status_error(pfu_to_string(PFU), SymName, UserArity,
-                Context, "obsolete", !Specs)
-        ;
-            WrongStatus = no
-        ),
-        predicate_table_set_preds(Preds, PredTable0, PredTable),
-        module_info_set_predicate_table(PredTable, !ModuleInfo)
+        MatchingPredIdResult = mpids_ok(HeadPredId, TailPredIds, WarnSpecs),
+        PredIds = [HeadPredId | TailPredIds],
+        !:Specs = WarnSpecs ++ !.Specs,
+        module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+        mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, Context,
+            PredIds, PredIdTable0, PredIdTable, !Specs),
+        module_info_set_pred_id_table(PredIdTable, !ModuleInfo)
     ;
-        PredIds = [],
-        DescPieces = [pragma_decl("obsolete"), words("declaration")],
-        UserArity = user_arity(UserArityInt),
-        OtherArities = list.map(project_user_arity_int, OtherUserArities),
-        report_undefined_pred_or_func_error(pfu_to_maybe_pred_or_func(PFU),
-            SymName, UserArityInt, OtherArities, Context, DescPieces, !Specs)
+        MatchingPredIdResult = mpids_error(ErrorSpecs),
+        !:Specs = ErrorSpecs ++ !.Specs
     ).
 
 :- pred mark_pred_ids_as_obsolete(list(sym_name_arity)::in,
-    pred_status::in, list(pred_id)::in, bool::in, bool::out,
-    pred_table::in, pred_table::out) is det.
+    item_mercury_status::in, prog_context::in, list(pred_id)::in,
+    pred_id_table::in, pred_id_table::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
 
-mark_pred_ids_as_obsolete(_, _, [], !WrongStatus, !PredTable).
-mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, [PredId | PredIds],
-        !WrongStatus, !PredTable) :-
+mark_pred_ids_as_obsolete(_, _, _, [], !PredTable, !Specs).
+mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, Context,
+        [PredId | PredIds], !PredTable, !Specs) :-
     map.lookup(!.PredTable, PredId, PredInfo0),
-    ( if
-        pred_info_is_exported(PredInfo0),
-        pred_status_is_exported(PragmaStatus) = no
-    then
-        !:WrongStatus = yes
-    else
-        true
-    ),
+    check_pragma_status("obsolete", psc_decl, PragmaStatus, Context,
+        PredInfo0, !Specs),
     pred_info_get_obsolete_in_favour_of(PredInfo0, MaybeObsoleteInFavourOf0),
     (
         MaybeObsoleteInFavourOf0 = no,
@@ -257,13 +320,14 @@ mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, [PredId | PredIds],
     pred_info_set_obsolete_in_favour_of(MaybeObsoleteInFavourOf,
         PredInfo0, PredInfo),
     map.det_update(PredId, PredInfo, !PredTable),
-    mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, PredIds,
-        !WrongStatus, !PredTable).
+    mark_pred_ids_as_obsolete(ObsoleteInFavourOf, PragmaStatus, Context,
+        PredIds, !PredTable, !Specs).
 
 %---------------------%
 
 :- pred mark_proc_as_obsolete(pragma_info_obsolete_proc::in,
-    pred_status::in, prog_context::in, module_info::in, module_info::out,
+    item_mercury_status::in, prog_context::in,
+    module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 mark_proc_as_obsolete(ObsoleteProcInfo, PragmaStatus, Context,
@@ -280,15 +344,8 @@ mark_proc_as_obsolete(ObsoleteProcInfo, PragmaStatus, Context,
     (
         MaybePredId = ok1(PredId),
         module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
-        ( if
-            pred_info_is_exported(PredInfo0),
-            pred_status_is_exported(PragmaStatus) = no
-        then
-            pragma_status_error(pf_to_string(PredOrFunc), SymName, UserArity,
-                Context, "obsolete_proc", !Specs)
-        else
-            true
-        ),
+        check_pragma_status("obsolete_proc", psc_decl, PragmaStatus, Context,
+            PredInfo0, !Specs),
         PFNameArity = pred_pf_name_arity(PredOrFunc, SymName, UserArity),
         ProcTransform =
             ( pred(ProcInfo0::in, ProcInfo::out) is det :-
@@ -310,6 +367,58 @@ mark_proc_as_obsolete(ObsoleteProcInfo, PragmaStatus, Context,
     ;
         MaybePredId = error1(Specs),
         !:Specs = Specs ++ !.Specs
+    ).
+
+%---------------------%
+
+:- pred mark_pred_as_format_call(pragma_info_format_call::in,
+    item_mercury_status::in, prog_context::in,
+    module_info::in, module_info::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+mark_pred_as_format_call(FormatCallInfo, PragmaStatus, Context,
+        !ModuleInfo, !Specs) :-
+    FormatCallInfo = pragma_info_format_call(PredSpec, OoMArgSpecs),
+    PredSpec = pred_pf_name_arity(PredOrFunc, SymName, UserArity),
+    look_up_pragma_pf_sym_arity(!.ModuleInfo, is_fully_qualified,
+        lfh_user_error, Context, "format_call",
+        PredOrFunc, SymName, UserArity, MaybePredId),
+    (
+        MaybePredId = error1(PredIdSpecs),
+        !:Specs = PredIdSpecs ++ !.Specs
+    ;
+        MaybePredId = ok1(PredId),
+        module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+        map.lookup(PredIdTable0, PredId, PredInfo0),
+        check_pragma_status("format_call", psc_decl, PragmaStatus, Context,
+            PredInfo0, !Specs),
+        pred_info_get_format_call(PredInfo0, MaybeFormatCall0),
+        (
+            MaybeFormatCall0 = no,
+            % Record the presence of the format_call pragma for this pred.
+            FormatCall = format_call(Context, OoMArgSpecs),
+            pred_info_set_format_call(yes(FormatCall), PredInfo0, PredInfo),
+            map.det_update(PredId, PredInfo, PredIdTable0, PredIdTable),
+            module_info_set_pred_id_table(PredIdTable, !ModuleInfo),
+            % Record this pragma as needing to be checked by the
+            % check_pragma_format_call_preds pass.
+            module_info_get_format_call_pragma_preds(!.ModuleInfo, FCPreds0),
+            set.insert(PredId, FCPreds0, FCPreds),
+            module_info_set_format_call_pragma_preds(FCPreds, !ModuleInfo)
+        ;
+            MaybeFormatCall0 = yes(format_call(OldContext, _)),
+            FirstPieces = [words("Error: duplicate"),
+                pragma_decl("format_call"), words("declaration for"),
+                unqual_pf_sym_name_user_arity(PredSpec), suffix("."), nl],
+            FirstMsg = simplest_msg(Context, FirstPieces),
+            SecondPieces = [words("The original"),
+                pragma_decl("format_call"), words("declaration"),
+                words("was here."), nl],
+            SecondMsg = simplest_msg(OldContext, SecondPieces),
+            Spec = error_spec($pred, severity_error,
+                phase_parse_tree_to_hlds, [FirstMsg, SecondMsg]),
+            !:Specs = [Spec | !.Specs]
+        )
     ).
 
 %---------------------%
@@ -404,10 +513,9 @@ find_unique_pred_for_oisu(ModuleInfo, Context, TypeCtor, Kind,
         PredSpec, PredId, !SeqNum, !Specs) :-
     module_info_get_predicate_table(ModuleInfo, PredicateTable),
     PredSpec = pred_pf_name_arity(PredOrFunc, PredName, UserArity),
-    user_arity_pred_form_arity(PredOrFunc, UserArity,
-        pred_form_arity(PredFormArityInt)),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     predicate_table_lookup_pf_sym_arity(PredicateTable, is_fully_qualified,
-        PredOrFunc, PredName, PredFormArityInt, PredIds),
+        PredOrFunc, PredName, PredFormArity, PredIds),
     (
         PredIds = [],
         predicate_table_lookup_sym(PredicateTable, is_fully_qualified,
@@ -479,7 +587,7 @@ find_unique_pred_for_oisu(ModuleInfo, Context, TypeCtor, Kind,
     !:SeqNum = !.SeqNum + 1.
 
 :- pred lookup_pred_orig_arity(module_info::in, pred_id::in,
-    format_component::out) is det.
+    format_piece::out) is det.
 
 lookup_pred_orig_arity(ModuleInfo, PredId, Piece) :-
     module_info_pred_info(ModuleInfo, PredId, PredInfo),
@@ -496,9 +604,8 @@ add_pragma_termination_info(TermInfo, Context, !ModuleInfo, !Specs) :-
     TermInfo = pragma_info_termination_info(PredNameModesPF,
         MaybePragmaArgSizeInfo, MaybePragmaTerminationInfo),
     PredNameModesPF = proc_pf_name_modes(PredOrFunc, SymName, Modes),
-    list.length(Modes, PredFormArityInt),
-    user_arity_pred_form_arity(PredOrFunc, UserArity,
-        pred_form_arity(PredFormArityInt)),
+    PredFormArity = arg_list_arity(Modes),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     % XXX lfh_ignore:
     % This happens in `.trans_opt' files sometimes, so just ignore it.
     look_up_pragma_pf_sym_arity(!.ModuleInfo, is_fully_qualified,
@@ -535,9 +642,8 @@ add_pragma_termination2_info(Term2Info, Context, !ModuleInfo, !Specs) :-
         MaybePragmaSuccessArgSizeInfo, MaybePragmaFailureArgSizeInfo,
         MaybePragmaTerminationInfo),
     PredNameModesPF = proc_pf_name_modes(PredOrFunc, SymName, Modes),
-    list.length(Modes, PredFormArityInt),
-    user_arity_pred_form_arity(PredOrFunc, UserArity,
-        pred_form_arity(PredFormArityInt)),
+    PredFormArity = arg_list_arity(Modes),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     % XXX lfh_ignore:
     % This happens in `.trans_opt' files sometimes, so just ignore it.
     look_up_pragma_pf_sym_arity(!.ModuleInfo, is_fully_qualified,
@@ -692,62 +798,59 @@ add_impl_pragma(ItemMercuryStatus, ItemPragmaInfo, !RevPragmaTabled,
         !:RevPragmaTabled = [ItemPragmaTabledInfo | !.RevPragmaTabled]
     ;
         Pragma = impl_pragma_inline(PredSymNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
         % Note that mode_check_inline conflicts with inline because
         % it implies no_inline.
-        add_pred_marker("inline", PredSymNameArity, PredStatus, Context,
-            marker_user_marked_inline,
+        add_pred_marker(PredSymNameArity, "inline", psc_impl,
+            ItemMercuryStatus, Context, marker_user_marked_inline,
             [marker_user_marked_no_inline, marker_mode_check_clauses],
             !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_no_inline(PredSymNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("no_inline", PredSymNameArity, PredStatus, Context,
-            marker_user_marked_no_inline, [marker_user_marked_inline],
-            !ModuleInfo, !Specs)
+        add_pred_marker(PredSymNameArity, "no_inline", psc_impl,
+            ItemMercuryStatus, Context, marker_user_marked_no_inline,
+            [marker_user_marked_inline], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_consider_used(PredSymNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("consider_used", PredSymNameArity, PredStatus, Context,
-            marker_consider_used, [], !ModuleInfo, !Specs)
+        add_pred_marker(PredSymNameArity, "consider_used", psc_impl,
+            ItemMercuryStatus, Context, marker_consider_used,
+            [], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_mode_check_clauses(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("mode_check_clauses", PredNameArity, PredStatus,
-            Context, marker_mode_check_clauses, [], !ModuleInfo, !Specs),
+        add_pred_marker(PredNameArity, "mode_check_clauses", psc_impl,
+            ItemMercuryStatus, Context, marker_mode_check_clauses,
+            [], !ModuleInfo, !Specs),
         % Allowing the predicate to be inlined could lead to code generator
         % aborts. This is because the caller that inlines this predicate may
         % then push other code into the disjunction or switch's branches,
         % which would invalidate the instmap_deltas that the mode_check_clauses
         % marker prevents the recomputation of.
-        add_pred_marker("mode_check_clauses", PredNameArity, PredStatus,
-            Context, marker_user_marked_no_inline, [marker_user_marked_inline],
-            !ModuleInfo, !Specs)
+        add_pred_marker(PredNameArity, "mode_check_clauses", psc_impl,
+            ItemMercuryStatus, Context, marker_mmc_marked_no_inline,
+            [marker_user_marked_inline], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_no_detism_warning(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("no_determinism_warning", PredNameArity, PredStatus,
-            Context, marker_no_detism_warning, [], !ModuleInfo, !Specs)
+        add_pred_marker(PredNameArity, "no_determinism_warning", psc_impl,
+            ItemMercuryStatus, Context, marker_no_detism_warning,
+            [], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_require_tail_rec(TailrecWarningPragma),
         add_pragma_require_tail_rec(TailrecWarningPragma, Context,
             !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_promise_pure(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("promise_pure", PredNameArity, PredStatus,
-            Context, marker_promised_pure, [], !ModuleInfo, !Specs)
+        add_pred_marker(PredNameArity, "promise_pure", psc_impl,
+            ItemMercuryStatus, Context, marker_promised_pure,
+            [], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_promise_semipure(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("promise_semipure", PredNameArity, PredStatus,
-            Context, marker_promised_semipure, [], !ModuleInfo, !Specs)
+        add_pred_marker(PredNameArity, "promise_semipure", psc_impl,
+            ItemMercuryStatus, Context, marker_promised_semipure,
+            [], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_promise_eqv_clauses(PredNameArity),
-        item_mercury_status_to_pred_status(ItemMercuryStatus, PredStatus),
-        add_pred_marker("promise_equivalent_clauses", PredNameArity,
-            PredStatus, Context, marker_promised_equivalent_clauses, [],
-            !ModuleInfo, !Specs)
+        add_pred_marker(PredNameArity, "promise_equivalent_clauses", psc_impl,
+            ItemMercuryStatus, Context, marker_promised_equivalent_clauses,
+            [], !ModuleInfo, !Specs)
     ;
         Pragma = impl_pragma_require_feature_set(RFSInfo),
         RFSInfo = pragma_info_require_feature_set(FeatureSet),
@@ -767,11 +870,10 @@ add_pragma_info_foreign_proc_export(PragmaFPEInfo, !ModuleInfo, !Specs) :-
 
 add_pragma_foreign_proc_export(FPEInfo, Context, !ModuleInfo, !Specs) :-
     FPEInfo = pragma_info_foreign_proc_export(Origin, Lang,
-        PrednameModesPF, ExportedName),
-    PrednameModesPF = proc_pf_name_modes(PredOrFunc, SymName, Modes),
-    list.length(Modes, PredFormArityInt),
-    user_arity_pred_form_arity(PredOrFunc, UserArity,
-        pred_form_arity(PredFormArityInt)),
+        PredNameModesPF, ExportedName, VarSet),
+    PredNameModesPF = proc_pf_name_modes(PredOrFunc, SymName, ArgModes),
+    PredFormArity = arg_list_arity(ArgModes),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     look_up_pragma_pf_sym_arity(!.ModuleInfo, may_be_partially_qualified,
         lfh_user_error, Context, "foreign_export",
         PredOrFunc, SymName, UserArity, MaybePredId),
@@ -784,7 +886,7 @@ add_pragma_foreign_proc_export(FPEInfo, Context, !ModuleInfo, !Specs) :-
         map.to_assoc_list(Procs, ExistingProcs),
         ( if
             get_procedure_matching_declmodes_with_renaming(!.ModuleInfo,
-                ExistingProcs, Modes, ProcId)
+                ExistingProcs, ArgModes, ProcId)
         then
             map.lookup(Procs, ProcId, ProcInfo0),
             proc_info_get_declared_determinism(ProcInfo0, MaybeDetism),
@@ -835,10 +937,10 @@ add_pragma_foreign_proc_export(FPEInfo, Context, !ModuleInfo, !Specs) :-
         else
             (
                 Origin = item_origin_user,
-                UserArity = user_arity(UserArityInt),
-                report_undefined_mode_error(SymName, UserArityInt, Context,
+                DescPieces =
                     [pragma_decl("foreign_export"), words("declaration")],
-                    !Specs)
+                report_undeclared_mode_error(!.ModuleInfo, PredId, PredInfo,
+                    VarSet, ArgModes, DescPieces, Context, !Specs)
             ;
                 Origin = item_origin_compiler(_CompilerAttrs)
                 % We do not warn about errors in export pragmas created by
@@ -882,18 +984,17 @@ add_pragma_external_proc(ExternalInfo, Context, !ModuleInfo, !Specs) :-
         % in this module, since everything else is already external.
         module_info_get_predicate_table(!.ModuleInfo, PredicateTable0),
         PFNameArity = pred_pf_name_arity(PredOrFunc, SymName, UserArity),
-        UserArity = user_arity(UserArityInt),
         (
             PredOrFunc = pf_predicate,
             predicate_table_lookup_pred_sym_arity(PredicateTable0,
-                is_fully_qualified, SymName, UserArityInt, PredIds),
+                is_fully_qualified, SymName, UserArity, PredIds),
             predicate_table_lookup_pred_sym(PredicateTable0,
                 is_fully_qualified, SymName, AllArityPredIds),
             MissingPieces = [decl("external_pred"), words("pragma")]
         ;
             PredOrFunc = pf_function,
             predicate_table_lookup_func_sym_arity(PredicateTable0,
-                is_fully_qualified, SymName, UserArityInt, PredIds),
+                is_fully_qualified, SymName, UserArity, PredIds),
             predicate_table_lookup_func_sym(PredicateTable0,
                 is_fully_qualified, SymName, AllArityPredIds),
             MissingPieces = [decl("external_func"), words("pragma")]
@@ -904,13 +1005,11 @@ add_pragma_external_proc(ExternalInfo, Context, !ModuleInfo, !Specs) :-
                 !ModuleInfo, !Specs)
         ;
             PredIds = [],
-            module_info_get_preds(!.ModuleInfo, PredTable0),
-            find_user_arities_other_than(PredTable0, AllArityPredIds,
+            module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+            find_user_arities_other_than(PredIdTable0, AllArityPredIds,
                 UserArity, OtherUserArities),
-            OtherArities =
-                list.map(project_user_arity_int, OtherUserArities),
             report_undefined_pred_or_func_error(yes(PredOrFunc),
-                SymName, UserArityInt, OtherArities, Context,
+                SymName, UserArity, OtherUserArities, Context,
                 MissingPieces, !Specs)
         )
     else
@@ -922,16 +1021,14 @@ add_pragma_external_proc(ExternalInfo, Context, !ModuleInfo, !Specs) :-
     list(error_spec)::in, list(error_spec)::out) is det.
 
 mark_pred_as_external(Context, PredId, !ModuleInfo, !Specs) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_clauses_info(PredInfo0, ClausesInfo0),
     clauses_info_get_clauses_rep(ClausesInfo0, ClausesRep0, _ItemNumbers),
     IsEmpty = clause_list_is_empty(ClausesRep0),
     (
         IsEmpty = yes,
         pred_info_mark_as_external(PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo)
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     ;
         IsEmpty = no,
         PredOrFunc = pred_info_is_pred_or_func(PredInfo0),
@@ -962,81 +1059,67 @@ mark_pred_as_external(Context, PredId, !ModuleInfo, !Specs) :-
 
 add_pragma_fact_table(FTInfo, PredStatus, Context, !ModuleInfo, !Specs) :-
     FTInfo = pragma_info_fact_table(PredSpec, FileName),
-    maybe_warn_about_pfu_unknown(!.ModuleInfo, "fact_table", PredSpec,
-        Context, !Specs),
     PredSpec = pred_pfu_name_arity(PFU, PredSymName, UserArity),
-    get_matching_pred_ids(!.ModuleInfo, PFU, PredSymName, UserArity,
-        PredIds, OtherUserArities),
+    get_matching_pred_ids(!.ModuleInfo, "fact_table", require_one_match,
+        pragma_does_not_allow_modes, Context, PFU, PredSymName, UserArity,
+        MatchingPredIdResult),
     (
-        PredIds = [],
-        UserArity = user_arity(UseArityInt),
-        OtherArities = list.map(project_user_arity_int, OtherUserArities),
-        report_undefined_pred_or_func_error(pfu_to_maybe_pred_or_func(PFU),
-            PredSymName, UseArityInt, OtherArities, Context,
-            [pragma_decl("fact_table"), words("declaration")], !Specs)
-    ;
-        PredIds = [HeadPredId | TailPredIds],
+        MatchingPredIdResult = mpids_ok(PredId, _TailPredIds, _WarnSpecs),
+        module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+        fact_table_check_args(!.ModuleInfo, Context, PredId, PredInfo0,
+            CheckResult),
         (
-            TailPredIds = [],      % only one predicate found
-            PredId = HeadPredId,
-            module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
-
-            fact_table_check_args(!.ModuleInfo, Context, PredId, PredInfo0,
-                CheckResult),
-            (
-                CheckResult = fact_table_args_not_ok(CheckSpecs),
-                !:Specs = CheckSpecs ++ !.Specs,
-                pred_info_get_markers(PredInfo0, PredMarkers0),
-                add_marker(marker_fact_table_semantic_errors,
-                    PredMarkers0, PredMarkers),
-                pred_info_set_markers(PredMarkers, PredInfo0, PredInfo),
-                module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
-            ;
-                CheckResult = fact_table_args_ok(GenInfo),
-
-                % Compile the fact table into a separate .o file.
-                % We should be able to dispense with the impure shenanigans
-                % when we replace fact tables with fast code for large
-                % disjunctions.
-                some [!IO] (
-                    promise_pure (
-                        semipure io.unsafe_get_io_state(!:IO),
-                        fact_table_compile_facts(!.ModuleInfo, FileName,
-                            Context, GenInfo, C_HeaderCode, PrimaryProcId,
-                            PredInfo0, PredInfo, !Specs, !IO),
-                        impure io.unsafe_set_io_state(!.IO)
-                    )
-                ),
-
-                module_info_set_pred_info(PredId, PredInfo, !ModuleInfo),
-                pred_info_get_proc_table(PredInfo, ProcTable),
-                ProcIds = pred_info_all_procids(PredInfo),
-                PredOrFunc = pred_info_is_pred_or_func(PredInfo),
-
-                % Create foreign_decls to declare extern variables.
-                ForeignDeclCode = foreign_decl_code(lang_c,
-                    foreign_decl_is_local, floi_literal(C_HeaderCode),
-                    Context),
-                module_add_foreign_decl_code_aux(ForeignDeclCode, !ModuleInfo),
-
-                module_add_fact_table_file(FileName, !ModuleInfo),
-
-                % Create foreign_procs to access the table in each mode.
-                add_fact_table_procs(PredOrFunc, PredSymName, UserArity,
-                    PredStatus, ProcTable,  PrimaryProcId, Context, GenInfo,
-                    ProcIds, !ModuleInfo, !Specs)
-            )
+            CheckResult = fact_table_args_not_ok(CheckSpecs),
+            !:Specs = CheckSpecs ++ !.Specs,
+            pred_info_get_markers(PredInfo0, PredMarkers0),
+            add_marker(marker_fact_table_semantic_errors,
+                PredMarkers0, PredMarkers),
+            pred_info_set_markers(PredMarkers, PredInfo0, PredInfo),
+            module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
         ;
-            TailPredIds = [_ | _],     % >1 predicate found
-            UserArity = user_arity(UserArityInt),
-            Pieces = [words("In"), quote("pragma fact_table"), words("for"),
-                qual_sym_name_arity(sym_name_arity(PredSymName, UserArityInt)),
-                suffix(":"), nl,
-                words("error: ambiguous predicate/function name."), nl],
-            Spec = simplest_spec($pred, severity_error,
-                phase_parse_tree_to_hlds, Context, Pieces),
-            !:Specs = [Spec | !.Specs]
+            CheckResult = fact_table_args_ok(GenInfo),
+
+            % Compile the fact table into a separate .o file.
+            % We should be able to dispense with the impure shenanigans
+            % when we replace fact tables with fast code for large
+            % disjunctions.
+            some [!IO] (
+                promise_pure (
+                    semipure io.unsafe_get_io_state(!:IO),
+                    fact_table_compile_facts(!.ModuleInfo, FileName,
+                        Context, GenInfo, C_HeaderCode, PrimaryProcId,
+                        PredInfo0, PredInfo1, !Specs, !IO),
+                    impure io.unsafe_set_io_state(!.IO)
+                )
+            ),
+
+            % The C code for fact tables includes C labels. We cannot inline
+            % this code, because if we did, the result would be duplicate
+            % labels in the generated code. So we must disable inlining
+            % for fact_table procedures.
+            add_marker_pred_info(marker_user_marked_no_inline,
+                PredInfo1, PredInfo),
+            module_info_set_pred_info(PredId, PredInfo, !ModuleInfo),
+            pred_info_get_proc_table(PredInfo, ProcTable),
+            ProcIds = pred_info_all_procids(PredInfo),
+            PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+
+            % Create foreign_decls to declare extern variables.
+            ForeignDeclCode = foreign_decl_code(lang_c,
+                foreign_decl_is_local, floi_literal(C_HeaderCode),
+                Context),
+            module_add_foreign_decl_code_aux(ForeignDeclCode, !ModuleInfo),
+
+            module_add_fact_table_file(FileName, !ModuleInfo),
+
+            % Create foreign_procs to access the table in each mode.
+            add_fact_table_procs(PredOrFunc, PredSymName,
+                PredStatus, ProcTable,  PrimaryProcId, Context, GenInfo,
+                ProcIds, !ModuleInfo, !Specs)
         )
+    ;
+        MatchingPredIdResult = mpids_error(ErrorSpecs),
+        !:Specs = ErrorSpecs ++ !.Specs
     ).
 
     % Add a `pragma foreign_proc' for each mode of the fact table lookup
@@ -1045,28 +1128,28 @@ add_pragma_fact_table(FTInfo, PredStatus, Context, !ModuleInfo, !Specs) :-
     % `pragma fact_table's are represented in the HLDS by a
     % `pragma foreign_proc' for each mode of the predicate.
     %
-:- pred add_fact_table_procs(pred_or_func::in, sym_name::in, user_arity::in,
+:- pred add_fact_table_procs(pred_or_func::in, sym_name::in,
     pred_status::in, proc_table::in, proc_id::in, prog_context::in,
     fact_table_gen_info::in, list(proc_id)::in,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-add_fact_table_procs(_, _, _, _, _, _, _, _, [], !ModuleInfo, !Specs).
-add_fact_table_procs(PredOrFunc, SymName, UserArity, PredStatus, ProcTable,
+add_fact_table_procs(_, _, _, _, _, _, _, [], !ModuleInfo, !Specs).
+add_fact_table_procs(PredOrFunc, SymName, PredStatus, ProcTable,
         PrimaryProcId, Context, GenInfo, [ProcId | ProcIds],
         !ModuleInfo, !Specs) :-
-    add_fact_table_proc(PredOrFunc, SymName, UserArity, PredStatus, ProcTable,
+    add_fact_table_proc(PredOrFunc, SymName, PredStatus, ProcTable,
         PrimaryProcId, Context, GenInfo, ProcId, !ModuleInfo, !Specs),
-    add_fact_table_procs(PredOrFunc, SymName, UserArity, PredStatus, ProcTable,
+    add_fact_table_procs(PredOrFunc, SymName, PredStatus, ProcTable,
         PrimaryProcId, Context, GenInfo, ProcIds, !ModuleInfo, !Specs).
 
-:- pred add_fact_table_proc(pred_or_func::in, sym_name::in, user_arity::in,
+:- pred add_fact_table_proc(pred_or_func::in, sym_name::in,
     pred_status::in, proc_table::in, proc_id::in, prog_context::in,
     fact_table_gen_info::in, proc_id::in,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-add_fact_table_proc(PredOrFunc, SymName, UserArity, PredStatus, ProcTable,
+add_fact_table_proc(PredOrFunc, SymName, PredStatus, ProcTable,
         PrimaryProcId, Context, GenInfo, ProcId, !ModuleInfo, !Specs) :-
     map.lookup(ProcTable, ProcId, ProcInfo),
     proc_info_get_inst_varset(ProcInfo, InstVarSet),
@@ -1092,17 +1175,7 @@ add_fact_table_proc(PredOrFunc, SymName, UserArity, PredStatus, ProcTable,
         ForeignBodyCode = foreign_body_code(lang_c, floi_literal(C_ExtraCode),
             Context),
         module_add_foreign_body_code(ForeignBodyCode, !ModuleInfo)
-    ),
-
-    % The C code for fact tables includes C labels. We cannot inline this code,
-    % because if we did, the result would be duplicate labels in the generated
-    % code. So we must disable inlining for fact_table procedures.
-    ( PredOrFunc = pf_predicate, PFU = pfu_predicate
-    ; PredOrFunc = pf_function, PFU = pfu_function
-    ),
-    PredSpec = pred_pfu_name_arity(PFU, SymName, UserArity),
-    add_pred_marker("fact_table", PredSpec, PredStatus, Context,
-        marker_user_marked_no_inline, [], !ModuleInfo, !Specs).
+    ).
 
 %---------------------%
 
@@ -1117,16 +1190,11 @@ add_pragma_require_tail_rec(Pragma, Context, !ModuleInfo, !Specs) :-
         MaybeModes),
     UserArity = user_arity(UserArityInt),
     PFU = maybe_pred_or_func_to_pfu(MaybePredOrFunc),
-    get_matching_pred_ids(!.ModuleInfo, PFU, PredSymName, UserArity,
-        PredIds, OtherUserArities),
+    get_matching_pred_ids(!.ModuleInfo, "require_tail_recursion",
+        require_one_match, pragma_allows_modes, Context,
+        PFU, PredSymName, UserArity, MatchingPredIdResult),
     (
-        PredIds = [],
-        Pieces = [pragma_decl("require_tail_recursion"), words("pragma")],
-        OtherArities = list.map(project_user_arity_int, OtherUserArities),
-        report_undefined_pred_or_func_error(MaybePredOrFunc, PredSymName,
-            UserArityInt, OtherArities, Context, Pieces, !Specs)
-    ;
-        PredIds = [PredId],
+        MatchingPredIdResult = mpids_ok(PredId, _TailPredIds, _WarnSpecs),
         SNA = sym_name_arity(PredSymName, UserArityInt),
         module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
         pred_info_get_proc_table(PredInfo0, Procs0),
@@ -1176,12 +1244,8 @@ add_pragma_require_tail_rec(Pragma, Context, !ModuleInfo, !Specs) :-
         ),
         module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     ;
-        PredIds = [_, _ | _],
-        Pieces = [words("Error: ambiguous predicate or function in"),
-            pragma_decl("require_tail_recursion"), words("pragma."), nl],
-        Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-            Context, Pieces),
-        !:Specs = [Spec | !.Specs]
+        MatchingPredIdResult = mpids_error(ErrorSpecs),
+        !:Specs = ErrorSpecs ++ !.Specs
     ).
 
 :- pred add_pragma_require_tail_rec_proc(require_tail_recursion::in,
@@ -1332,8 +1396,7 @@ check_required_feature(Globals, Context, Feature, !Specs) :-
             Pieces = [words("Error: this module must be compiled in a grade"),
                 words("that supports trailing.")],
             VerbosePieces = [words("Grades that support trailing contain"),
-                words("the grade modifiers"), quote("tr"),
-                words("or"), quote("trseg"), suffix("."), nl],
+                words("the grade modifier"), quote("tr"), suffix("."), nl],
             Msg = simple_msg(Context,
                 [always(Pieces), verbose_only(verbose_once, VerbosePieces)]),
             Spec = error_spec($pred, severity_error, phase_parse_tree_to_hlds,
@@ -1417,29 +1480,8 @@ add_impl_pragma_tabled(ItemMercuryStatus, ItemPragmaInfo,
 % Adding generated pragmas to the HLDS.
 %
 
-add_gen_pragma(ItemPragmaInfo, !ModuleInfo, !Specs) :-
-    ItemPragmaInfo = item_pragma_info(Pragma, Context, _SeqNum),
-    (
-        Pragma = gen_pragma_unused_args(UnusedArgsInfo),
-        add_pragma_unused_args(UnusedArgsInfo, Context, !ModuleInfo, !Specs)
-    ;
-        Pragma = gen_pragma_exceptions(ExceptionsInfo),
-        add_pragma_exceptions(ExceptionsInfo, Context, !ModuleInfo, !Specs)
-    ;
-        Pragma = gen_pragma_trailing_info(TrailingInfo),
-        add_pragma_trailing_info(TrailingInfo, Context, !ModuleInfo, !Specs)
-    ;
-        Pragma = gen_pragma_mm_tabling_info(MMTablingInfo),
-        add_pragma_mm_tabling_info(MMTablingInfo, Context, !ModuleInfo, !Specs)
-    ).
-
-%---------------------%
-
-:- pred add_pragma_unused_args(pragma_info_unused_args::in,
-    prog_context::in, module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-add_pragma_unused_args(UnusedArgsInfo, Context, !ModuleInfo, !Specs) :-
+add_gen_pragma_unused_args(ItemPragmaInfo, !ModuleInfo, !Specs) :-
+    ItemPragmaInfo = item_pragma_info(UnusedArgsInfo, Context, _SeqNum),
     UnusedArgsInfo = pragma_info_unused_args(PredNameArityPFMn, UnusedArgs),
     PredNameArityPFMn = proc_pf_name_arity_mn(PredOrFunc, SymName, UserArity,
         ModeNum),
@@ -1459,13 +1501,8 @@ add_pragma_unused_args(UnusedArgsInfo, Context, !ModuleInfo, !Specs) :-
         !:Specs = Specs ++ !.Specs
     ).
 
-%---------------------%
-
-:- pred add_pragma_exceptions(pragma_info_exceptions::in, prog_context::in,
-    module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-add_pragma_exceptions(ExceptionsInfo, Context, !ModuleInfo, !Specs) :-
+add_gen_pragma_exceptions(ItemPragmaInfo, !ModuleInfo, !Specs) :-
+    ItemPragmaInfo = item_pragma_info(ExceptionsInfo, Context, _SeqNum),
     ExceptionsInfo = pragma_info_exceptions(PredNameArityPFMn, ThrowStatus),
     PredNameArityPFMn = proc_pf_name_arity_mn(PredOrFunc, SymName, UserArity,
         ModeNum),
@@ -1487,13 +1524,8 @@ add_pragma_exceptions(ExceptionsInfo, Context, !ModuleInfo, !Specs) :-
         !:Specs = Specs ++ !.Specs
     ).
 
-%---------------------%
-
-:- pred add_pragma_trailing_info(pragma_info_trailing_info::in,
-    prog_context::in, module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-add_pragma_trailing_info(TrailingInfo, Context, !ModuleInfo, !Specs) :-
+add_gen_pragma_trailing(ItemPragmaInfo, !ModuleInfo, !Specs) :-
+    ItemPragmaInfo = item_pragma_info(TrailingInfo, Context, _SeqNum),
     TrailingInfo = pragma_info_trailing_info(PredNameArityPFMn,
         TrailingStatus),
     PredNameArityPFMn = proc_pf_name_arity_mn(PredOrFunc, SymName, UserArity,
@@ -1516,13 +1548,8 @@ add_pragma_trailing_info(TrailingInfo, Context, !ModuleInfo, !Specs) :-
         !:Specs = Specs ++ !.Specs
     ).
 
-%---------------------%
-
-:- pred add_pragma_mm_tabling_info(pragma_info_mm_tabling_info::in,
-    prog_context::in, module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-add_pragma_mm_tabling_info(MMTablingInfo, Context, !ModuleInfo, !Specs) :-
+add_gen_pragma_mm_tabling(ItemPragmaInfo, !ModuleInfo, !Specs) :-
+    ItemPragmaInfo = item_pragma_info(MMTablingInfo, Context, _SeqNum),
     MMTablingInfo = pragma_info_mm_tabling_info(PredNameArityPFMn,
         TablingStatus),
     PredNameArityPFMn = proc_pf_name_arity_mn(PredOrFunc, SymName, UserArity,
@@ -1551,140 +1578,84 @@ add_pragma_mm_tabling_info(MMTablingInfo, Context, !ModuleInfo, !Specs) :-
 %
 %---------------------------------------------------------------------------%
 
-    % add_pred_marker(PragmaName, PredNameArity, Status, Context,
-    %   Marker, ConflictMarkers, !ModuleInfo, !Specs):
+    % add_pred_marker(PredSymNameArity, Status, Context, PragmaName, Marker,
+    %   ConflictMarkers, !ModuleInfo, !Specs):
     %
     % Adds Marker to the marker list of the pred(s) with the given
     % PredNameArity, updating the ModuleInfo. If the named pred does not exist,
     % or the pred(s) already has/have a marker in ConflictMarkers,
     % report an error.
     %
-:- pred add_pred_marker(string::in, pred_pfu_name_arity::in,
-    pred_status::in, prog_context::in, pred_marker::in, list(pred_marker)::in,
+:- pred add_pred_marker(pred_pfu_name_arity::in, string::in,
+    pragma_status_class::in, item_mercury_status::in, prog_context::in,
+    pred_marker::in, list(pred_marker)::in,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-add_pred_marker(PragmaName, PredSymNameArity, Status, Context,
+add_pred_marker(PredSpec, PragmaName, PragmaStatusClass, PragmaStatus, Context,
         Marker, ConflictMarkers, !ModuleInfo, !Specs) :-
-    ( if marker_must_be_exported(Marker) then
-        MustBeExported = yes
-    else
-        MustBeExported = no
-    ),
-    maybe_warn_about_pfu_unknown(!.ModuleInfo, PragmaName, PredSymNameArity,
-        Context, !Specs),
-    do_add_pred_marker(PragmaName, PredSymNameArity, Status, MustBeExported,
-        Context, add_marker_pred_info(Marker), !ModuleInfo, PredIds, !Specs),
-    module_info_get_preds(!.ModuleInfo, PredTable),
-    list.map(get_pred_markers(PredTable), PredIds, PredMarkerSets),
-    PredMarkers = set.union_list(PredMarkerSets),
-    set.intersect(PredMarkers, set.list_to_set(ConflictMarkers),
-        ConflictingPredMarkerSet),
-    set.to_sorted_list(ConflictingPredMarkerSet, ConflictingPredMarkers0),
-    (
-        ConflictingPredMarkers0 = [_ | _],
-        ( if
-            list.member(marker_mode_check_clauses, ConflictingPredMarkers0),
-            list.member(marker_user_marked_no_inline, ConflictingPredMarkers0)
-        then
-            % The no_inline marker would have been added implicitly
-            % for the mode_check_clauses pragma. In the usual case where
-            % the programmer didn't also add an explicit no_inline pragma,
-            % mentioning the conflict with no_inline would be more confusing
-            % than helpful.
-            list.delete_all(ConflictingPredMarkers0,
-                marker_user_marked_no_inline, ConflictingPredMarkers)
-        else
-            ConflictingPredMarkers = ConflictingPredMarkers0
-        ),
-        pragma_conflict_error(PredSymNameArity, Context, PragmaName,
-            ConflictingPredMarkers, !Specs)
-    ;
-        ConflictingPredMarkers0 = []
-    ).
-
-    % Succeed if a marker for an exported procedure must also be exported.
-    %
-:- pred marker_must_be_exported(pred_marker::in) is semidet.
-
-marker_must_be_exported(_) :-
-    semidet_fail.
-
-:- type add_marker_pred_info == pred(pred_info, pred_info).
-:- inst add_marker_pred_info == (pred(in, out) is det).
-
-:- pred do_add_pred_marker(string::in, pred_pfu_name_arity::in,
-    pred_status::in, bool::in, term.context::in,
-    add_marker_pred_info::in(add_marker_pred_info),
-    module_info::in, module_info::out, list(pred_id)::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-do_add_pred_marker(PragmaName, PredSpec, Status, MustBeExported,
-        Context, UpdatePredInfo, !ModuleInfo, PredIds, !Specs) :-
     PredSpec = pred_pfu_name_arity(PFU, PredSymName, UserArity),
-    get_matching_pred_ids(!.ModuleInfo, PFU, PredSymName, UserArity,
-        PredIds, OtherUserArities),
+    get_matching_pred_ids(!.ModuleInfo, PragmaName, do_not_require_one_match,
+        pragma_does_not_allow_modes, Context, PFU, PredSymName, UserArity,
+        MatchingPredIdResult),
     (
-        PredIds = [_ | _],
-        module_info_get_predicate_table(!.ModuleInfo, PredTable0),
-        predicate_table_get_preds(PredTable0, Preds0),
-        pragma_add_marker(PredIds, UpdatePredInfo, Status,
-            MustBeExported, Preds0, Preds, WrongStatus),
-        (
-            WrongStatus = yes,
-            pragma_status_error(pfu_to_string(PFU), PredSymName, UserArity,
-                Context, PragmaName, !Specs)
-        ;
-            WrongStatus = no
-        ),
-        predicate_table_set_preds(Preds, PredTable0, PredTable),
-        module_info_set_predicate_table(PredTable, !ModuleInfo)
+        MatchingPredIdResult = mpids_ok(HeadPredId, TailPredIds, WarnSpecs),
+        PredIds = [HeadPredId | TailPredIds],
+        !:Specs = WarnSpecs ++ !.Specs,
+        module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+        pragma_add_marker(PragmaName, PragmaStatusClass, PragmaStatus, Context,
+            add_marker_pred_info(Marker), PredIds,
+            PredIdTable0, PredIdTable, !Specs),
+        module_info_set_pred_id_table(PredIdTable, !ModuleInfo),
+
+        list.map(get_pred_markers(PredIdTable), PredIds, PredMarkerSets),
+        PredMarkers = set.union_list(PredMarkerSets),
+        set.intersect(PredMarkers, set.list_to_set(ConflictMarkers),
+            BadPredMarkers),
+        ( if set.is_empty(BadPredMarkers) then
+            true
+        else
+            pragma_conflict_error(PredSpec, Context, PragmaName,
+                BadPredMarkers, !Specs)
+        )
     ;
-        PredIds = [],
-        UserArity = user_arity(UserArityInt),
-        OtherArities = list.map(project_user_arity_int, OtherUserArities),
-        DescPieces = [pragma_decl(PragmaName), words("declaration")],
-        report_undefined_pred_or_func_error(pfu_to_maybe_pred_or_func(PFU),
-            PredSymName, UserArityInt, OtherArities, Context, DescPieces,
-            !Specs)
+        MatchingPredIdResult = mpids_error(ErrorSpecs),
+        !:Specs = ErrorSpecs ++ !.Specs
     ).
 
     % For each pred_id in the list, check whether markers present in the list
     % of conflicting markers are also present in the corresponding pred_info.
     % The output is a set of the names of the conflicting markers present.
     %
-:- pred get_pred_markers(pred_table::in, pred_id::in,
+:- pred get_pred_markers(pred_id_table::in, pred_id::in,
     set(pred_marker)::out) is det.
 
-get_pred_markers(PredTable, PredId, Markers) :-
-    map.lookup(PredTable, PredId, PredInfo),
+get_pred_markers(PredIdTable, PredId, Markers) :-
+    map.lookup(PredIdTable, PredId, PredInfo),
     pred_info_get_markers(PredInfo, Markers).
+
+:- type add_marker_pred_info == pred(pred_info, pred_info).
+:- inst add_marker_pred_info == (pred(in, out) is det).
 
     % For each pred_id in the list, add the given markers to the
     % list of markers in the corresponding pred_info.
     %
-:- pred pragma_add_marker(list(pred_id)::in,
-    add_marker_pred_info::in(add_marker_pred_info), pred_status::in,
-    bool::in, pred_table::in, pred_table::out, bool::out) is det.
+:- pred pragma_add_marker(string::in, pragma_status_class::in,
+    item_mercury_status::in, prog_context::in,
+    add_marker_pred_info::in(add_marker_pred_info),
+    list(pred_id)::in, pred_id_table::in, pred_id_table::out,
+    list(error_spec)::in, list(error_spec)::out) is det.
 
-pragma_add_marker([], _, _, _, !PredTable, no).
-pragma_add_marker([PredId | PredIds], UpdatePredInfo, Status, MustBeExported,
-        !PredTable, WrongStatus) :-
+pragma_add_marker(_, _, _, _, _, [], !PredTable, !Specs).
+pragma_add_marker(PragmaName, PragmaStatusClass, PragmaStatus, Context,
+        UpdatePredInfo, [PredId | PredIds], !PredTable, !Specs) :-
     map.lookup(!.PredTable, PredId, PredInfo0),
     UpdatePredInfo(PredInfo0, PredInfo),
-    ( if
-        pred_info_is_exported(PredInfo),
-        MustBeExported = yes,
-        Status \= pred_status(status_exported)
-    then
-        WrongStatus0 = yes
-    else
-        WrongStatus0 = no
-    ),
     map.det_update(PredId, PredInfo, !PredTable),
-    pragma_add_marker(PredIds, UpdatePredInfo, Status, MustBeExported,
-        !PredTable, WrongStatus1),
-    bool.or(WrongStatus0, WrongStatus1, WrongStatus).
+    check_pragma_status(PragmaName, PragmaStatusClass, PragmaStatus, Context,
+        PredInfo, !Specs),
+    pragma_add_marker(PragmaName, PragmaStatusClass, PragmaStatus,
+        Context, UpdatePredInfo, PredIds, !PredTable, !Specs).
 
 :- pred add_marker_pred_info(pred_marker::in, pred_info::in, pred_info::out)
     is det.
@@ -1695,7 +1666,7 @@ add_marker_pred_info(Marker, !PredInfo) :-
     pred_info_set_markers(Markers, !PredInfo).
 
 :- pred pragma_conflict_error(pred_pfu_name_arity::in, prog_context::in,
-    string::in, list(pred_marker)::in,
+    string::in, set(pred_marker)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 pragma_conflict_error(PredSpec, Context, PragmaName, ConflictMarkers,
@@ -1713,7 +1684,7 @@ pragma_conflict_error(PredSpec, Context, PragmaName, ConflictMarkers,
         PFU = pfu_function,
         PorFPieces = [words("function")]
     ),
-    list.map(marker_name, ConflictMarkers, ConflictNames),
+    list.map(marker_name, set.to_sorted_list(ConflictMarkers), ConflictNames),
     Pieces = [words("Error:"), pragma_decl(PragmaName),
         words("declaration conflicts with previous")] ++
         list_to_pieces(ConflictNames) ++
@@ -1724,6 +1695,18 @@ pragma_conflict_error(PredSpec, Context, PragmaName, ConflictMarkers,
     !:Specs = [Spec | !.Specs].
 
 %---------------------%
+
+:- type maybe_require_one_match
+    --->    do_not_require_one_match
+    ;       require_one_match.
+
+:- type does_pragma_allow_modes
+    --->    pragma_does_not_allow_modes
+    ;       pragma_allows_modes.
+
+:- type matching_pred_ids_result
+    --->    mpids_ok(pred_id, list(pred_id), list(error_spec))
+    ;       mpids_error(list(error_spec)).
 
     % Given maybe a pred_or_func, a symname and arity, return all
     % the pred_ids that match. Reasons for the possible return of more than one
@@ -1738,12 +1721,13 @@ pragma_conflict_error(PredSpec, Context, PragmaName, ConflictMarkers,
     % so we also return (in OtherArities) the arities of all the predicates
     % and functions with that name but with some *other* arity.
     %
-:- pred get_matching_pred_ids(module_info::in,
+:- pred get_matching_pred_ids(module_info::in, string::in,
+    maybe_require_one_match::in, does_pragma_allow_modes::in, prog_context::in,
     pred_func_or_unknown::in, sym_name::in, user_arity::in,
-    list(pred_id)::out, list(user_arity)::out) is det.
+    matching_pred_ids_result::out) is det.
 
-get_matching_pred_ids(ModuleInfo, PFU, SymName, UserArity, PredIds,
-        OtherUserArities) :-
+get_matching_pred_ids(ModuleInfo, Pragma, RequireOneMatch, PragmaAllowsModes,
+        Context, PFU, SymName, UserArity, Result) :-
     module_info_get_predicate_table(ModuleInfo, PredTable0),
     % Check that the pragma is module qualified.
     (
@@ -1753,21 +1737,22 @@ get_matching_pred_ids(ModuleInfo, PFU, SymName, UserArity, PredIds,
         SymName = qualified(_, _),
         (
             PFU = pfu_unknown,
-            UserArity = user_arity(UserArityInt),
             predicate_table_lookup_sym_arity(PredTable0, is_fully_qualified,
-                SymName, UserArityInt, PredIds)
+                SymName, UserArity, PredIds),
+            warn_about_pfu_unknown(ModuleInfo, Pragma, PragmaAllowsModes,
+                SymName, UserArity, Context, WarnSpecs)
         ;
             PFU = pfu_predicate,
-            user_arity_pred_form_arity(pf_predicate, UserArity,
-                pred_form_arity(PredFormArityInt)),
+            user_arity_pred_form_arity(pf_predicate, UserArity, PredFormArity),
             predicate_table_lookup_pf_sym_arity(PredTable0, is_fully_qualified,
-                pf_predicate, SymName, PredFormArityInt, PredIds)
+                pf_predicate, SymName, PredFormArity, PredIds),
+            WarnSpecs = []
         ;
             PFU = pfu_function,
-            user_arity_pred_form_arity(pf_function, UserArity,
-                pred_form_arity(PredFormArityInt)),
+            user_arity_pred_form_arity(pf_function, UserArity, PredFormArity),
             predicate_table_lookup_pf_sym_arity(PredTable0, is_fully_qualified,
-                pf_function, SymName, PredFormArityInt, PredIds)
+                pf_function, SymName, PredFormArity, PredIds),
+            WarnSpecs = []
         ),
         (
             PredIds = [],
@@ -1779,13 +1764,57 @@ get_matching_pred_ids(ModuleInfo, PFU, SymName, UserArity, PredIds,
             % - there may be no such pred_id, and
             % - even if there are such pred_ids, there is no guarantee
             %   that the user meant one of them.
-            module_info_get_preds(ModuleInfo, Preds0),
-            find_user_arities_other_than(Preds0, SymOnlyPredIds,
-                UserArity, OtherUserArities)
+            module_info_get_pred_id_table(ModuleInfo, PredIdTable0),
+            find_user_arities_other_than(PredIdTable0, SymOnlyPredIds,
+                UserArity, OtherUserArities),
+            Pieces = [pragma_decl(Pragma), words("declaration")],
+            report_undefined_pred_or_func_error(pfu_to_maybe_pred_or_func(PFU),
+                SymName, UserArity, OtherUserArities, Context, Pieces,
+                [], NoMatchSpecs),
+            Result = mpids_error(NoMatchSpecs ++ WarnSpecs)
         ;
-            PredIds = [_ | _],
-            % There is no point in filling this in; our caller won't need it.
-            OtherUserArities = []
+            PredIds = [HeadPredId],
+            Result = mpids_ok(HeadPredId, [], WarnSpecs)
+        ;
+            PredIds = [HeadPredId | TailPredIds],
+            TailPredIds = [_ | _],
+            UserArity = user_arity(UserArityInt),
+            (
+                RequireOneMatch = do_not_require_one_match,
+                module_info_get_globals(ModuleInfo, Globals),
+                globals.lookup_bool_option(Globals, warn_ambiguous_pragma,
+                    WarnActual),
+                (
+                    WarnActual = no,
+                    Result = mpids_ok(HeadPredId, TailPredIds, WarnSpecs)
+                ;
+                    WarnActual = yes,
+                    SNA = sym_name_arity(SymName, UserArityInt),
+                    ActualPieces = [words("In"), pragma_decl(Pragma),
+                        words("declaration for"),
+                        unqual_sym_name_arity(SNA), suffix(":"), nl,
+                        words("warning: ambiguous name could refer to"),
+                        words("either a predicate or a function."), nl],
+                    ActualSpec = simplest_spec($pred, severity_warning,
+                        phase_parse_tree_to_hlds, Context, ActualPieces),
+                    % There is no point in printing WarnSpecs warning about
+                    % *possible* ambiguity when ActualSpec reports a warning
+                    % about an *actual* ambiguity, since the latter implies
+                    % the former.
+                    Result = mpids_ok(HeadPredId, TailPredIds, [ActualSpec])
+                )
+            ;
+                RequireOneMatch = require_one_match,
+                SNA = sym_name_arity(SymName, UserArityInt),
+                ErrorPieces = [words("In"), pragma_decl(Pragma),
+                    words("declaration for"),
+                    unqual_sym_name_arity(SNA), suffix(":"), nl,
+                    words("error: ambiguous name could refer to"),
+                    words("either a predicate or a function."), nl],
+                ErrorSpec = simplest_spec($pred, severity_error,
+                    phase_parse_tree_to_hlds, Context, ErrorPieces),
+                Result = mpids_error([ErrorSpec])
+            )
         )
     ).
 
@@ -1799,8 +1828,7 @@ get_matching_pred_ids(ModuleInfo, PFU, SymName, UserArity, PredIds,
 
 transform_selected_mode_of_pred(PredId, PFNameArity, Modes,
         PragmaName, Context, ProcTransform, !ModuleInfo, !Specs) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
     map.to_assoc_list(ProcTable0, ProcList),
     ( if
@@ -1809,10 +1837,8 @@ transform_selected_mode_of_pred(PredId, PFNameArity, Modes,
     then
         map.lookup(ProcTable0, ProcId, ProcInfo0),
         ProcTransform(ProcInfo0, ProcInfo),
-        map.det_update(ProcId, ProcInfo, ProcTable0, ProcTable),
-        pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo)
+        pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     else
         Pieces = [words("Error:"), pragma_decl(PragmaName),
             words("declaration for undeclared mode of"),
@@ -1837,10 +1863,9 @@ transform_selected_mode_of_pred(PredId, PFNameArity, Modes,
 look_up_pragma_pf_sym_arity(ModuleInfo, IsFullyQualified, FailHandling,
         Context, PragmaName, PredOrFunc, SymName, UserArity, MaybePredId) :-
     module_info_get_predicate_table(ModuleInfo, PredTable),
-    user_arity_pred_form_arity(PredOrFunc, UserArity,
-        pred_form_arity(PredFormArityInt)),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     predicate_table_lookup_pf_sym_arity(PredTable, IsFullyQualified,
-        PredOrFunc, SymName, PredFormArityInt, PredIds),
+        PredOrFunc, SymName, PredFormArity, PredIds),
     (
         PredIds = [],
         (
@@ -1848,14 +1873,12 @@ look_up_pragma_pf_sym_arity(ModuleInfo, IsFullyQualified, FailHandling,
             predicate_table_lookup_pf_sym(PredTable,
                 may_be_partially_qualified,
                 PredOrFunc, SymName, AllArityPredIds),
-            module_info_get_preds(ModuleInfo, Preds),
-            find_user_arities_other_than(Preds, AllArityPredIds, UserArity,
-                OtherUserArities),
-            UserArity = user_arity(UserArityInt),
-            OtherArities = list.map(project_user_arity_int, OtherUserArities),
+            module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+            find_user_arities_other_than(PredIdTable, AllArityPredIds,
+                UserArity, OtherUserArities),
             DescPieces = [pragma_decl(PragmaName), words("declaration")],
             report_undefined_pred_or_func_error(yes(PredOrFunc), SymName,
-                UserArityInt, OtherArities, Context, DescPieces, [], Specs)
+                UserArity, OtherUserArities, Context, DescPieces, [], Specs)
         ;
             FailHandling = lfh_internal_error,
             Spec = report_unknown_pred_or_func(severity_error,
@@ -1895,7 +1918,7 @@ look_up_pragma_pf_sym_arity(ModuleInfo, IsFullyQualified, FailHandling,
                 describe_one_pred_name(ModuleInfo, should_module_qualify),
                 PredIds),
             PredIdPieces = component_list_to_line_pieces(PredIdPiecesList,
-                [suffix(".")]),
+                [suffix("."), nl_indent_delta(-1)]),
             MainPieces = StartPieces ++ PredIdPieces,
             VerbosePieces = [words("An explicit module qualifier"),
                 words("may be necessary to select the right match."), nl],
@@ -1961,9 +1984,9 @@ report_ambiguous_pred_or_func(Severity, PragmaName, Context,
     string::in, pred_or_func::in, sym_name::in, user_arity::in, int::in,
     maybe4(pred_id, proc_id, pred_info, proc_info)::out) is det.
 
-look_up_pragma_pf_sym_arity_mode_num(ModuleInfo, IsFullyQualified, FailHandling,
-        Context, PragmaName, PredOrFunc, SymName, UserArity, ModeNum,
-        MaybePredProcId) :-
+look_up_pragma_pf_sym_arity_mode_num(ModuleInfo, IsFullyQualified,
+        FailHandling, Context, PragmaName, PredOrFunc, SymName, UserArity,
+        ModeNum, MaybePredProcId) :-
     look_up_pragma_pf_sym_arity(ModuleInfo, IsFullyQualified, FailHandling,
         Context, PragmaName, PredOrFunc, SymName, UserArity, MaybePredId),
     (
@@ -1988,30 +2011,26 @@ look_up_pragma_pf_sym_arity_mode_num(ModuleInfo, IsFullyQualified, FailHandling,
 
 %---------------------%
 
-:- pred maybe_warn_about_pfu_unknown(module_info::in, string::in,
-    pred_pfu_name_arity::in, prog_context::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
+:- pred warn_about_pfu_unknown(module_info::in, string::in,
+    does_pragma_allow_modes::in, sym_name::in, user_arity::in,
+    prog_context::in, list(error_spec)::out) is det.
 
-maybe_warn_about_pfu_unknown(ModuleInfo, PragmaName, PFUSNA, Context,
-        !Specs) :-
-    PFUSNA = pred_pfu_name_arity(PFU, SymName, user_arity(UserArityInt)),
-    (
-        ( PFU = pfu_predicate
-        ; PFU = pfu_function
-        )
-    ;
-        PFU = pfu_unknown,
-        module_info_get_globals(ModuleInfo, Globals),
-        module_info_get_name(ModuleInfo, ModuleName),
-        globals.lookup_bool_option(Globals,
-            warn_potentially_ambiguous_pragma, Warn),
-        globals.get_op_mode(Globals, OpMode),
-        ( if
-            Warn = yes,
-            OpMode = opm_top_args(opma_augment(opmau_generate_code(_))),
-            SymName = qualified(ModuleName, _)
-        then
-            SNA = sym_name_arity(SymName, UserArityInt),
+warn_about_pfu_unknown(ModuleInfo, PragmaName, PragmaAllowsModes,
+        SymName, UserArity, Context, Specs) :-
+    module_info_get_globals(ModuleInfo, Globals),
+    module_info_get_name(ModuleInfo, ModuleName),
+    globals.lookup_bool_option(Globals,
+        warn_potentially_ambiguous_pragma, Warn),
+    globals.get_op_mode(Globals, OpMode),
+    ( if
+        Warn = yes,
+        OpMode = opm_top_args(opma_augment(opmau_generate_code(_))),
+        SymName = qualified(ModuleName, _)
+    then
+        UserArity = user_arity(UserArityInt),
+        SNA = sym_name_arity(SymName, UserArityInt),
+        (
+            PragmaAllowsModes = pragma_does_not_allow_modes,
             Pieces = [words("Warning: the"), pragma_decl(PragmaName),
                 words("declaration for"), unqual_sym_name_arity(SNA),
                 words("does not say whether it refers"),
@@ -2019,15 +2038,29 @@ maybe_warn_about_pfu_unknown(ModuleInfo, PragmaName, PFUSNA, Context,
                 words("(You can specify this information"),
                 words("by wrapping up"), unqual_sym_name_arity(SNA),
                 words("inside"), quote("pred(...)"), words("or"),
-                quote("func(...)"), suffix(".)"), nl],
-            Spec = simplest_spec($pred, severity_warning,
-                phase_parse_tree_to_hlds, Context, Pieces),
-            !:Specs = [Spec | !.Specs]
-        else
-            true
-        )
+                quote("func(...)"), suffix(".)"), nl]
+        ;
+            PragmaAllowsModes = pragma_allows_modes,
+            Pieces = [words("Warning: the"), pragma_decl(PragmaName),
+                words("declaration for"), unqual_sym_name_arity(SNA),
+                words("does not say whether it refers"),
+                words("to a predicate or to a function."), nl,
+                words("(You can specify this information"),
+                words("either by wrapping up"), unqual_sym_name_arity(SNA),
+                words("inside"), quote("pred(...)"), words("or"),
+                quote("func(...)"), suffix(","),
+                words("or by specifying its argument modes.)"), nl]
+        ),
+        Spec = simplest_spec($pred, severity_warning,
+            phase_parse_tree_to_hlds, Context, Pieces),
+        Specs = [Spec]
+    else
+        Specs = []
     ).
 
+    % This predicate is not used in add_pragma.m, but it is used by
+    % its submodules add_pragma_tabling.m and add_pragma_type_spec.m.
+    %
 :- pred maybe_warn_about_pfumm_unknown(module_info::in, string::in,
     pred_func_or_unknown_maybe_modes::in, sym_name::in, prog_context::in,
     list(error_spec)::in, list(error_spec)::out) is det.
@@ -2039,65 +2072,136 @@ maybe_warn_about_pfumm_unknown(ModuleInfo, PragmaName, PFUMM, SymName, Context,
         ; PFUMM = pfumm_function(_)
         )
     ;
-        PFUMM = pfumm_unknown(user_arity(UserArityInt)),
-        module_info_get_globals(ModuleInfo, Globals),
-        module_info_get_name(ModuleInfo, ModuleName),
-        globals.lookup_bool_option(Globals,
-            warn_potentially_ambiguous_pragma, Warn),
-        globals.get_op_mode(Globals, OpMode),
-        ( if
-            Warn = yes,
-            OpMode = opm_top_args(opma_augment(opmau_generate_code(_))),
-            SymName = qualified(ModuleName, _)
-        then
-            SNA = sym_name_arity(SymName, UserArityInt),
-            Pieces = [words("Warning: the"), pragma_decl(PragmaName),
-                words("declaration for"), unqual_sym_name_arity(SNA),
-                words("does not say whether it refers"),
-                words("to a predicate or to a function."), nl,
-                words("(You can specify this information"),
-                words("either by wrapping up"), unqual_sym_name_arity(SNA),
-                words("inside"), quote("pred(...)"), words("or"),
-                quote("func(...)"), suffix(","),
-                words("or by specifying its argument modes.)"), nl],
-            Spec = simplest_spec($pred, severity_warning,
-                phase_parse_tree_to_hlds, Context, Pieces),
-            !:Specs = [Spec | !.Specs]
-        else
-            true
-        )
+        PFUMM = pfumm_unknown(UserArity),
+        warn_about_pfu_unknown(ModuleInfo, PragmaName, pragma_allows_modes,
+            SymName, UserArity, Context, WarnSpecs),
+        !:Specs = WarnSpecs ++ !.Specs
     ).
 
 %---------------------%
 
-:- pred pragma_status_error(string::in, sym_name::in, user_arity::in,
-    prog_context::in, string::in,
+    % Symnames in pragmas always include a module name. Usually,
+    % the pragma will give the name of a predicate (or function) without
+    % module qualifying it, in which case the parser implicitly qualifies it
+    % with the name of the module the pragma was read from. If the pragma
+    % does include a (possibly partial) module qualification, the parser
+    % will check whether this matches what would have been the implicit
+    % qualification. Therefore module name mismatches between pragmas
+    % and the predicates they apply to are impossible.
+    %
+    % If the pragma (and thus the predicate) occurs outside the current module,
+    % then we do not generate any error or warning message for it, even if
+    % it would otherwise merit one. This is because the error is in the other
+    % module, and should be reported when *that* module is compiled.
+    %
+    % If the pragma and the predicate occur inside the current module,
+    % there are four possibilities:
+    %
+    % 1: pred is not exported, pragma is not exported
+    % 2: pred is not exported, pragma is exported
+    % 3: pred is exported, pragma is not exported
+    % 4: pred is exported, pragma is exported
+    %
+    % Case 1 is always OK.
+    %
+    % Case 2 is always an error.
+    %
+    % Case 3 is normal for impl pragmas, since such pragmas are effectively
+    % part of the implementation of the predicate, which is always private.
+    % For decl pragmas, it merits a warning, since it causes some caller
+    % of the predicate (the ones outside this module) to know less about
+    % this predicate than they could.
+    %
+    % Case 4 is normal for decl pragmas, but is an error for impl pragmas.
+    % (Note that an impl pragma in the implementation section of module A
+    % may still reach another module B if its predicate is opt_exported.)
+    %
+:- type pragma_status_class
+    --->    psc_decl
+    ;       psc_impl.
+
+:- pred check_pragma_status(string::in, pragma_status_class::in,
+    item_mercury_status::in, prog_context::in, pred_info::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-pragma_status_error(PorFStr, SymName, UserArity, Context, PragmaName,
-        !Specs) :-
-    UserArity = user_arity(UserArityInt),
-    SNA = sym_name_arity(SymName, UserArityInt),
-    Pieces = [words("Error:"), pragma_decl(PragmaName), words("declaration"),
-        words("for exported"), words(PorFStr), unqual_sym_name_arity(SNA),
-        words("must also be exported."), nl],
-    Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
-
-:- func pfu_to_string(pred_func_or_unknown) = string.
-
-pfu_to_string(PFU) = Str :-
-    ( PFU = pfu_unknown,   Str = "predicate or function"
-    ; PFU = pfu_predicate, Str = "predicate"
-    ; PFU = pfu_function,  Str = "function"
-    ).
-
-:- func pf_to_string(pred_or_func) = string.
-
-pf_to_string(PredOrFunc) = Str :-
-    ( PredOrFunc = pf_predicate, Str = "predicate"
-    ; PredOrFunc = pf_function,  Str = "function"
+check_pragma_status(PragmaName, StatusClass, PragmaStatus, Context,
+        PredInfo, !Specs) :-
+    (
+        PragmaStatus = item_defined_in_other_module(_)
+    ;
+        PragmaStatus = item_defined_in_this_module(PragmaExport),
+        (
+            ( PragmaExport = item_export_nowhere
+            ; PragmaExport = item_export_only_submodules
+            ),
+            PragmaExported = no
+        ;
+            PragmaExport = item_export_anywhere,
+            PragmaExported = yes
+        ),
+        pred_info_get_status(PredInfo, PredStatus),
+        PredExported = pred_status_is_exported_to_non_submodules(PredStatus),
+        (
+            PredExported = no,
+            (
+                PragmaExported = no
+                % Case 1: ok.
+            ;
+                PragmaExported = yes,
+                % Case 2: error regardless of pragma status class.
+                PredNamePieces = describe_one_pred_info_name(
+                    should_not_module_qualify, PredInfo),
+                Pieces = [words("Error: since the")] ++
+                    PredNamePieces ++ [words("is not exported, the"),
+                    pragma_decl(PragmaName), words("declaration for it"),
+                    words("may not be exported either."), nl],
+                Spec = simplest_spec($pred, severity_error,
+                    phase_parse_tree_to_hlds, Context, Pieces),
+                !:Specs = [Spec | !.Specs]
+            )
+        ;
+            PredExported = yes,
+            (
+                PragmaExported = no,
+                % Case 3: ok for impl pragmas, warning for decl pragmas.
+                (
+                    StatusClass = psc_decl,
+                    PredNamePieces = describe_one_pred_info_name(
+                        should_not_module_qualify, PredInfo),
+                    Pieces = [words("Warning: since the")] ++
+                        PredNamePieces ++ [words("is exported, the"),
+                        pragma_decl(PragmaName), words("declaration for it"),
+                        words("should also be exported."), nl],
+                    Spec = simplest_spec($pred, severity_warning,
+                        phase_parse_tree_to_hlds, Context, Pieces),
+                    !:Specs = [Spec | !.Specs]
+                ;
+                    StatusClass = psc_impl
+                )
+            ;
+                PragmaExported = yes,
+                % Case 4: ok for decl pragmas, error for impl pragmas.
+                (
+                    StatusClass = psc_decl
+                ;
+                    StatusClass = psc_impl,
+                    % NOTE We never generate this error message, because
+                    % the parser generates an error message for any impl
+                    % pragmas in interfaces, and declines to add them
+                    % to the parse tree. Indeed, the parse_tree_module_src
+                    % type, which represents the parse trees of source modules,
+                    % cannot represent impl pragmas in interface sections.
+                    Pieces = [words("Error: a"),
+                        pragma_decl(PragmaName), words("declaration"),
+                        words("may not be exported, even if"),
+                        words("the predicate or function it refers to"),
+                        words("is exported."), nl],
+                    Spec = simplest_spec($pred, severity_error,
+                        phase_parse_tree_to_hlds, Context, Pieces),
+                    !:Specs = [Spec | !.Specs]
+                )
+            )
+        )
     ).
 
 %---------------------------------------------------------------------------%

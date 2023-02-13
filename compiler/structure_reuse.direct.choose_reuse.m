@@ -100,8 +100,8 @@
 
 :- import_module hlds.
 :- import_module hlds.hlds_goal.
-:- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_module.
+:- import_module hlds.hlds_pred.
 :- import_module transform_hlds.ctgc.structure_reuse.domain.
 
 %---------------------------------------------------------------------------%
@@ -117,10 +117,10 @@
 :- import_module check_hlds.
 :- import_module check_hlds.type_util.
 :- import_module hlds.hlds_data.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_pragma.
+:- import_module parse_tree.var_table.
 
 :- import_module float.
 :- import_module int.
@@ -160,15 +160,15 @@ determine_reuse(ModuleInfo, ProcInfo, DeadCellTable, !Goal, ReuseAs) :-
                 back_strategy       :: reuse_strategy,
                 back_module_info    :: module_info,
                 back_proc_info      :: proc_info,
-                back_vartypes       :: vartypes
+                back_var_table      :: var_table
             ).
 
 :- func background_info_init(reuse_strategy, module_info, proc_info) =
     background_info.
 
 background_info_init(Strategy, ModuleInfo, ProcInfo) = Background :-
-    proc_info_get_vartypes(ProcInfo, VarTypes),
-    Background = background(Strategy, ModuleInfo, ProcInfo, VarTypes).
+    proc_info_get_var_table(ProcInfo, VarTable),
+    Background = background(Strategy, ModuleInfo, ProcInfo, VarTable).
 
 %---------------------------------------------------------------------------%
 % Some types and predicates for the administration of the deconstructions,
@@ -828,7 +828,7 @@ find_match_in_goal_2(Background, Goal, !Match) :-
         GoalExpr = unify(_, _, _, Unification, _),
         (
             Unification = construct(Var, Cons, Args, _, _, _, _),
-            lookup_var_type(Background ^ back_vartypes, Var, VarType),
+            lookup_var_type(Background ^ back_var_table, Var, VarType),
             ( if
                 top_cell_may_be_reusable(Background ^ back_module_info,
                     VarType),
@@ -853,11 +853,10 @@ find_match_in_goal_2(Background, Goal, !Match) :-
             unexpected($pred, "complicated unify")
         )
     ;
-        GoalExpr = plain_call(_, _, _, _, _, _)
-    ;
-        GoalExpr = generic_call( _, _, _, _, _)
-    ;
-        GoalExpr = call_foreign_proc(_, _, _, _, _, _, _)
+        ( GoalExpr = plain_call(_, _, _, _, _, _)
+        ; GoalExpr = generic_call( _, _, _, _, _)
+        ; GoalExpr = call_foreign_proc(_, _, _, _, _, _, _)
+        )
     ;
         GoalExpr = conj(_, Goals),
         find_best_match_in_conjunction(Background, Goals, !Match)
@@ -1195,15 +1194,10 @@ annotate_reuses_in_goal(Background, Match, !Goal) :-
         annotate_reuse_for_unification(Background, Match, Unification,
             GoalInfo0, GoalInfo)
     ;
-        GoalExpr0 = plain_call(_, _, _, _, _, _),
-        GoalExpr = GoalExpr0,
-        GoalInfo = GoalInfo0
-    ;
-        GoalExpr0 = generic_call( _, _, _, _, _),
-        GoalExpr = GoalExpr0,
-        GoalInfo = GoalInfo0
-    ;
-        GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _),
+        ( GoalExpr0 = plain_call(_, _, _, _, _, _)
+        ; GoalExpr0 = generic_call( _, _, _, _, _)
+        ; GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _)
+        ),
         GoalExpr = GoalExpr0,
         GoalInfo = GoalInfo0
     ;
@@ -1353,7 +1347,7 @@ line_length = 79.
 dump_line(Stream, Msg, !IO) :-
     Prefix = "%---",
     Start = string.append(Prefix, Msg),
-    Remainder = line_length - string.count_codepoints(Start) - 1,
+    Remainder = line_length - string.count_code_points(Start) - 1,
     Line = Start ++ string.duplicate_char('-', Remainder),
     io.write_string(Stream, Line, !IO),
     io.write_string(Stream, "%\n", !IO).
@@ -1455,15 +1449,10 @@ check_for_cell_caching_2(DeadCellTable, !Goal) :-
             Unification0, Unification, GoalInfo0, GoalInfo),
         GoalExpr = unify(A, B, C, Unification, D)
     ;
-        GoalExpr0 = plain_call(_, _, _, _, _, _),
-        GoalExpr = GoalExpr0,
-        GoalInfo = GoalInfo0
-    ;
-        GoalExpr0 = generic_call( _, _, _, _, _),
-        GoalExpr = GoalExpr0,
-        GoalInfo = GoalInfo0
-    ;
-        GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _),
+        ( GoalExpr0 = plain_call(_, _, _, _, _, _)
+        ; GoalExpr0 = generic_call( _, _, _, _, _)
+        ; GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _)
+        ),
         GoalExpr = GoalExpr0,
         GoalInfo = GoalInfo0
     ;

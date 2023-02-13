@@ -17,11 +17,13 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
+:- import_module io.
 :- import_module list.
 
-:- pred check_promises_in_module(module_info::in, module_info::out,
+:- pred check_promises_in_module(io.text_output_stream::in,
+    module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 %---------------------------------------------------------------------------%
@@ -38,34 +40,34 @@
 :- import_module hlds.hlds_promise.
 :- import_module hlds.passes_aux.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_type.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module require.
 
 %---------------------------------------------------------------------------%
 
-check_promises_in_module(!ModuleInfo, !Specs) :-
+check_promises_in_module(ProgressStream, !ModuleInfo, !Specs) :-
     module_info_get_valid_pred_ids(!.ModuleInfo, ValidPredIds0),
-    check_promises_in_preds(ValidPredIds0, [], ToInvalidatePredIds,
-        !ModuleInfo, !Specs),
+    check_promises_in_preds(ProgressStream, ValidPredIds0,
+        [], ToInvalidatePredIds, !ModuleInfo, !Specs),
     module_info_make_pred_ids_invalid(ToInvalidatePredIds, !ModuleInfo).
 
-:- pred check_promises_in_preds(list(pred_id)::in,
+:- pred check_promises_in_preds(io.text_output_stream::in, list(pred_id)::in,
     list(pred_id)::in, list(pred_id)::out,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-check_promises_in_preds([], !ToInvalidatePredIds, !ModuleInfo, !Specs).
-check_promises_in_preds([PredId | PredIds],
+check_promises_in_preds(_, [], !ToInvalidatePredIds, !ModuleInfo, !Specs).
+check_promises_in_preds(ProgressStream, [PredId | PredIds],
         !ToInvalidatePredIds, !ModuleInfo, !Specs) :-
-    check_promises_in_pred(PredId,
+    check_promises_in_pred(ProgressStream, PredId,
         !ToInvalidatePredIds, !ModuleInfo, !Specs),
-    check_promises_in_preds(PredIds,
+    check_promises_in_preds(ProgressStream, PredIds,
         !ToInvalidatePredIds, !ModuleInfo, !Specs).
 
     % If the given predicate is a promise, this predicate records that promise
@@ -76,12 +78,13 @@ check_promises_in_preds([PredId | PredIds],
     % If the assertion is in the interface, we check that it doesn't refer
     % to any symbols which are local to that module.
     %
-:- pred check_promises_in_pred(pred_id::in,
+:- pred check_promises_in_pred(io.text_output_stream::in, pred_id::in,
     list(pred_id)::in, list(pred_id)::out,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-check_promises_in_pred(PredId, !ToInvalidatePredIds, !ModuleInfo, !Specs) :-
+check_promises_in_pred(ProgressStream, PredId, !ToInvalidatePredIds,
+        !ModuleInfo, !Specs) :-
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
     pred_info_get_goal_type(PredInfo, GoalType),
     (
@@ -93,7 +96,7 @@ check_promises_in_pred(PredId, !ToInvalidatePredIds, !ModuleInfo, !Specs) :-
             true
         else
             trace [io(!IO)] (
-                write_pred_progress_message(!.ModuleInfo,
+                maybe_write_pred_progress_message(ProgressStream, !.ModuleInfo,
                     "Checking promises in", PredId, !IO)
             ),
 
@@ -244,9 +247,10 @@ check_in_interface_promise_call(ModuleInfo, PredId, GoalInfo, !Specs) :-
             Context = goal_info_get_context(GoalInfo),
             PredOrFunc = pred_info_is_pred_or_func(PredInfo),
             PredSymName = qualified(PredModuleName, PredName),
-            Arity = pred_info_orig_arity(PredInfo),
+            Arity = pred_info_pred_form_arity(PredInfo),
             PFSymNameArity = pf_sym_name_arity(PredOrFunc, PredSymName, Arity),
-            PredNamePieces = [qual_pf_sym_name_orig_arity(PFSymNameArity)],
+            PredNamePieces =
+                [qual_pf_sym_name_pred_form_arity(PFSymNameArity)],
             report_assertion_interface_error(ModuleName, Context,
                 PredNamePieces, !Specs)
         ;
@@ -256,9 +260,9 @@ check_in_interface_promise_call(ModuleInfo, PredId, GoalInfo, !Specs) :-
         Context = goal_info_get_context(GoalInfo),
         PredOrFunc = pred_info_is_pred_or_func(PredInfo),
         PredSymName = qualified(PredModuleName, PredName),
-        Arity = pred_info_orig_arity(PredInfo),
+        Arity = pred_info_pred_form_arity(PredInfo),
         PFSymNameArity = pf_sym_name_arity(PredOrFunc, PredSymName, Arity),
-        PredNamePieces = [qual_pf_sym_name_orig_arity(PFSymNameArity)],
+        PredNamePieces = [qual_pf_sym_name_pred_form_arity(PFSymNameArity)],
         report_assertion_module_error(ModuleName, Context, PredModuleName,
             PredNamePieces, !Specs)
     ).
@@ -274,8 +278,8 @@ check_in_interface_promise_unify_rhs(ModuleInfo, PredInfo, Var, RHS, Context,
     ;
         RHS = rhs_functor(ConsId, _, _),
         pred_info_get_clauses_info(PredInfo, ClausesInfo),
-        clauses_info_get_vartypes(ClausesInfo, VarTypes),
-        lookup_var_type(VarTypes, Var, Type),
+        clauses_info_get_var_table(ClausesInfo, VarTable),
+        lookup_var_type(VarTable, Var, Type),
         type_to_ctor_det(Type, TypeCtor),
         module_info_get_type_table(ModuleInfo, TypeTable),
         lookup_type_ctor_defn(TypeTable, TypeCtor, TypeDefn),
@@ -326,7 +330,7 @@ check_in_interface_promise_goals(ModuleInfo, PredInfo, [Goal0 | Goal0s],
 %---------------------%
 
 :- pred report_assertion_interface_error(module_name::in, prog_context::in,
-    list(format_component)::in, list(error_spec)::in, list(error_spec)::out)
+    list(format_piece)::in, list(error_spec)::in, list(error_spec)::out)
     is det.
 
 report_assertion_interface_error(ModuleName, Context, IdPieces, !Specs) :-
@@ -346,7 +350,7 @@ report_assertion_interface_error(ModuleName, Context, IdPieces, !Specs) :-
     !:Specs = [Spec | !.Specs].
 
 :- pred report_assertion_module_error(module_name::in, prog_context::in,
-    module_name::in, list(format_component)::in,
+    module_name::in, list(format_piece)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 report_assertion_module_error(ModuleName, Context, PredModuleName,

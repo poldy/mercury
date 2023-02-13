@@ -50,25 +50,25 @@
 :- import_module hlds.make_goal.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.
 :- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.prog_type.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 :- import_module maybe.
 :- import_module require.
 :- import_module term.
-:- import_module varset.
 
 %-----------------------------------------------------------------------------%
 
     % As we traverse the goal, we add new variables to hold the saved values
-    % of the heap pointer. So we need the varset and the vartypes map to record
-    % the names and types of the new variables.
+    % of the heap pointer. So we need the var_table to record the names
+    % and types of the new variables.
     %
     % We also keep the module_info around, so that we can use the predicate
     % table that it contains to lookup the pred_ids for the builtin procedures
@@ -77,26 +77,23 @@
     %
 :- type heap_ops_info
     --->    heap_ops_info(
-                heap_varset         :: prog_varset,
-                heap_var_types      :: vartypes,
-                heap_module_info    :: module_info
+                heap_module_info    :: module_info,
+                heap_var_table      :: var_table
             ).
 
-add_heap_ops(ModuleInfo0, !Proc) :-
-    proc_info_get_goal(!.Proc, Goal0),
-    proc_info_get_varset(!.Proc, VarSet0),
-    proc_info_get_vartypes(!.Proc, VarTypes0),
-    TrailOpsInfo0 = heap_ops_info(VarSet0, VarTypes0, ModuleInfo0),
+add_heap_ops(ModuleInfo0, !ProcInfo) :-
+    proc_info_get_goal(!.ProcInfo, Goal0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
+    TrailOpsInfo0 = heap_ops_info(ModuleInfo0, VarTable0),
     goal_add_heap_ops(Goal0, Goal, TrailOpsInfo0, TrailOpsInfo),
-    TrailOpsInfo = heap_ops_info(VarSet, VarTypes, _),
-    proc_info_set_goal(Goal, !Proc),
-    proc_info_set_varset(VarSet, !Proc),
-    proc_info_set_vartypes(VarTypes, !Proc),
+    TrailOpsInfo = heap_ops_info(_, VarTable),
+    proc_info_set_goal(Goal, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     % The code below does not maintain the non-local variables,
     % so we need to requantify.
     % XXX it would be more efficient to maintain them rather than recomputing
     % them every time.
-    requantify_proc_general(ordinary_nonlocals_no_lambda, !Proc).
+    requantify_proc_general(ord_nl_no_lambda, !ProcInfo).
 
 :- pred goal_add_heap_ops(hlds_goal::in, hlds_goal::out,
     heap_ops_info::in, heap_ops_info::out) is det.
@@ -171,7 +168,6 @@ goal_expr_add_heap_ops(GoalExpr0, GoalInfo0, Goal, !Info) :-
         determinism_components(Determinism, _CanFail, NumSolns),
         True = true_goal_with_context(Context),
         Fail = fail_goal_with_context(Context),
-        ModuleInfo = !.Info ^ heap_module_info,
         (
             NumSolns = at_most_zero,
             % The "then" part of the if-then-else will be unreachable, but to
@@ -179,8 +175,8 @@ goal_expr_add_heap_ops(GoalExpr0, GoalInfo0, Goal, !Info) :-
             % need to make sure that it can't fail. So we use a call to
             % `private_builtin.unused' (which will call error/1) rather than
             % `fail' for the "then" part.
-            heap_generate_call("unused", detism_det, purity_pure, [],
-                instmap_delta_bind_no_var, ModuleInfo, Context, ThenGoal)
+            heap_generate_call(!.Info, "unused", [], instmap_delta_bind_no_var,
+                detism_det, purity_pure, Context, ThenGoal)
         ;
             ( NumSolns = at_most_one
             ; NumSolns = at_most_many
@@ -327,17 +323,17 @@ cases_add_heap_ops([Case0 | Cases0], [Case | Cases], !Info) :-
     heap_ops_info::in, heap_ops_info::out) is det.
 
 gen_mark_hp(SavedHeapPointerVar, Context, MarkHeapPointerGoal, !Info) :-
-    heap_generate_call("mark_hp", detism_det, purity_impure,
+    heap_generate_call(!.Info, "mark_hp",
         [SavedHeapPointerVar], instmap_delta_bind_var(SavedHeapPointerVar),
-        !.Info ^ heap_module_info, Context, MarkHeapPointerGoal).
+        detism_det, purity_impure, Context, MarkHeapPointerGoal).
 
 :- pred gen_restore_hp(prog_var::in, prog_context::in, hlds_goal::out,
     heap_ops_info::in, heap_ops_info::out) is det.
 
 gen_restore_hp(SavedHeapPointerVar, Context, RestoreHeapPointerGoal, !Info) :-
-    heap_generate_call("restore_hp", detism_det, purity_impure,
+    heap_generate_call(!.Info, "restore_hp",
         [SavedHeapPointerVar], instmap_delta_bind_no_var,
-        !.Info ^ heap_module_info, Context, RestoreHeapPointerGoal).
+        detism_det, purity_impure, Context, RestoreHeapPointerGoal).
 
 %-----------------------------------------------------------------------------%
 
@@ -345,30 +341,30 @@ gen_restore_hp(SavedHeapPointerVar, Context, RestoreHeapPointerGoal, !Info) :-
     heap_ops_info::in, heap_ops_info::out) is det.
 
 new_saved_hp_var(Var, !Info) :-
-    new_var("HeapPointer", heap_pointer_type, Var, !Info).
+    new_var("HeapPointer", heap_pointer_type, is_not_dummy_type, Var, !Info).
 
-:- pred new_var(string::in, mer_type::in, prog_var::out,
+:- pred new_var(string::in, mer_type::in, is_dummy_type::in, prog_var::out,
     heap_ops_info::in, heap_ops_info::out) is det.
 
-new_var(Name, Type, Var, !Info) :-
-    VarSet0 = !.Info ^ heap_varset,
-    VarTypes0 = !.Info ^ heap_var_types,
-    varset.new_named_var(Name, Var, VarSet0, VarSet),
-    add_var_type(Var, Type, VarTypes0, VarTypes),
-    !Info ^ heap_varset := VarSet,
-    !Info ^ heap_var_types := VarTypes.
+new_var(Name, Type, IsDummy, Var, !Info) :-
+    VarTable0 = !.Info ^ heap_var_table,
+    Entry = vte(Name, Type, IsDummy),
+    add_var_entry(Entry, Var, VarTable0, VarTable),
+    !Info ^ heap_var_table := VarTable.
 
 %-----------------------------------------------------------------------------%
 
-:- pred heap_generate_call(string::in, determinism::in, purity::in,
-    list(prog_var)::in, instmap_delta::in, module_info::in,
+:- pred heap_generate_call(heap_ops_info::in, string::in,
+    list(prog_var)::in, instmap_delta::in, determinism::in, purity::in,
     term.context::in, hlds_goal::out) is det.
 
-heap_generate_call(PredName, Detism, Purity, Args, InstMapDelta, ModuleInfo,
+heap_generate_call(Info, PredName, ArgVars, InstMapDelta, Detism, Purity, 
         Context, CallGoal) :-
-    generate_simple_call(ModuleInfo, mercury_private_builtin_module,
-        PredName, pf_predicate, only_mode, Detism, Purity, Args, [],
-        InstMapDelta, Context, CallGoal).
+    ModuleInfo = Info ^ heap_module_info,
+    generate_plain_call(ModuleInfo, pf_predicate,
+        mercury_private_builtin_module, PredName,
+        [], ArgVars, InstMapDelta, only_mode,
+        Detism, Purity, [], Context, CallGoal).
 
 %-----------------------------------------------------------------------------%
 :- end_module ml_backend.add_heap_ops.

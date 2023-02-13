@@ -22,11 +22,11 @@
 :- import_module hlds.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.instmap.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 
@@ -41,7 +41,7 @@
     % a goal that binds the output variables of the call to their statically
     % known values. If the attempt fails, fail.
     %
-:- pred evaluate_call(globals::in, vartypes::in, instmap::in,
+:- pred evaluate_call(globals::in, var_table::in, instmap::in,
     string::in, string::in, int::in, list(prog_var)::in,
     hlds_goal_expr::out, hlds_goal_info::in, hlds_goal_info::out) is semidet.
 
@@ -58,19 +58,19 @@
 :- import_module bool.
 :- import_module float.
 :- import_module int.
-:- import_module int8.
 :- import_module int16.
 :- import_module int32.
 :- import_module int64.
+:- import_module int8.
 :- import_module maybe.
 :- import_module pair.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module uint.
-:- import_module uint8.
 :- import_module uint16.
 :- import_module uint32.
 :- import_module uint64.
+:- import_module uint8.
 
 %---------------------------------------------------------------------------%
 
@@ -84,12 +84,12 @@
                 arg_inst    :: mer_inst
             ).
 
-evaluate_call(Globals, VarTypes, InstMap,
+evaluate_call(Globals, VarTable, InstMap,
         ModuleName, ProcName, ModeNum, Args, GoalExpr, !GoalInfo) :-
     LookupArgs =
         ( func(Var) = arg_hlds_info(Var, Type, Inst) :-
-            instmap_lookup_var(InstMap, Var, Inst),
-            lookup_var_type(VarTypes, Var, Type)
+            lookup_var_type(VarTable, Var, Type),
+            instmap_lookup_var(InstMap, Var, Inst)
         ),
     ArgHldsInfos = list.map(LookupArgs, Args),
     evaluate_call_2(Globals, ModuleName, ProcName, ModeNum, ArgHldsInfos,
@@ -353,11 +353,13 @@ evaluate_det_call_float_2(_Globals, ProcName, ModeNum, X, Y,
 
 evaluate_det_call_string_2(_Globals, ProcName, ModeNum, X, Y,
         OutputArg, OutputArgVal) :-
-    ProcName = "count_codepoints",
+    ( ProcName = "count_codepoints"
+    ; ProcName = "count_code_points"
+    ),
     ModeNum = 0,
     X ^ arg_inst = bound(_, _, [bound_functor(string_const(XVal), [])]),
     OutputArg = Y,
-    CodePointCountX = string.count_codepoints(XVal),
+    CodePointCountX = string.count_code_points(XVal),
     OutputArgVal = some_int_const(int_const(CodePointCountX)).
 
 %---------------------%
@@ -371,96 +373,84 @@ evaluate_det_call_int_3_mode_0(Globals, ProcName, X, Y, Z,
     X ^ arg_inst = bound(_, _, [bound_functor(FunctorX, [])]),
     Y ^ arg_inst = bound(_, _, [bound_functor(FunctorY, [])]),
     FunctorX = some_int_const(int_const(XVal)),
-    FunctorY = some_int_const(int_const(YVal)),
+    % Note that we optimize calls to the checked and unchecked versions
+    % of operations such as // and << under the same conditions: when
+    % the checked version's checks would succeed.
+    %
+    % For the checked operations, we do this because we don't want
+    % this optimization to replace a check failure leading to a runtime abort
+    % with silently returning a nonsense result *without* an abort.
+    %
+    % For the unchecked operations, we do this because there is no point
+    % in trying to optimize operations that *will* return a nonsense result,
+    % thus creating a landmine that will go off sometime later in the
+    % program's execution (unless if user is unlucky, and he/she just
+    % silently gets nonsense output).
     (
-        ProcName = "plus",
+        FunctorY = some_int_const(int_const(YVal)),
+        (
+            ( ProcName = "+"    ; ProcName = "plus"
+            ; ProcName = "-"    ; ProcName = "minus"
+            ; ProcName = "*"    ; ProcName = "times"
+            ; ProcName = "//"   ; ProcName = "/"
+            ; ProcName = "unchecked_quotient"
+            ; ProcName = "mod"
+            ; ProcName = "rem"  ; ProcName = "unchecked_rem"
+            ; ProcName = "<<"   ; ProcName = "unchecked_left_shift"
+            ; ProcName = ">>"   ; ProcName = "unchecked_right_shift"
+            ),
+            globals.lookup_bool_option(Globals, pregenerated_dist, no),
+            int_emu.target_bits_per_int(Globals, BitsPerInt),
+            require_complete_switch [ProcName]
+            (
+                ( ProcName = "+" ; ProcName = "plus" ),
+                int_emu.plus(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "-" ; ProcName = "minus" ),
+                int_emu.minus(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "*" ; ProcName = "times" ),
+                int_emu.times(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "//"
+                ; ProcName = "/"
+                ; ProcName = "unchecked_quotient"
+                ),
+                int_emu.quotient(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ProcName = "mod",
+                int_emu.mod(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "rem" ; ProcName = "unchecked_rem" ),
+                int_emu.rem(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "<<" ; ProcName = "unchecked_left_shift" ),
+                int_emu.left_shift(BitsPerInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = ">>" ; ProcName = "unchecked_right_shift" ),
+                int_emu.right_shift(BitsPerInt, XVal, YVal, OutputArgVal)
+            )
+        ;
+            ProcName = "/\\",
+            OutputArgVal = XVal /\ YVal
+        ;
+            ProcName = "\\/",
+            OutputArgVal = XVal \/ YVal
+        ;
+            ProcName = "xor",
+            OutputArgVal = xor(XVal, YVal)
+        )
+    ;
+        FunctorY = some_int_const(uint_const(YVal)),
         globals.lookup_bool_option(Globals, pregenerated_dist, no),
         int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.plus(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "+",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.plus(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "minus",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.minus(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "-",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.minus(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "times",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.times(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "*",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.times(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "unchecked_quotient",
-        YVal \= 0,
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.unchecked_quotient(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "//",
-        YVal \= 0,
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.quotient(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "mod",
-        YVal \= 0,
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.mod(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "rem",
-        YVal \= 0,
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.rem(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "unchecked_rem",
-        YVal \= 0,
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.unchecked_rem(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "unchecked_left_shift",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.unchecked_left_shift(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "<<",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.left_shift(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "unchecked_right_shift",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.unchecked_right_shift(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = ">>",
-        globals.lookup_bool_option(Globals, pregenerated_dist, no),
-        int_emu.target_bits_per_int(Globals, BitsPerInt),
-        int_emu.right_shift(BitsPerInt, XVal, YVal, OutputArgVal)
-    ;
-        ProcName = "/\\",
-        OutputArgVal = XVal /\ YVal
-    ;
-        ProcName = "\\/",
-        OutputArgVal = XVal \/ YVal
-    ;
-        ProcName = "xor",
-        OutputArgVal = xor(XVal, YVal)
+        (
+            ( ProcName = "<<u" ; ProcName = "unchecked_left_ushift" ),
+            int_emu.left_ushift(BitsPerInt, XVal, YVal, OutputArgVal)
+        ;
+            ( ProcName = ">>u" ; ProcName = "unchecked_right_ushift" ),
+            int_emu.right_ushift(BitsPerInt, XVal, YVal, OutputArgVal)
+        )
     ),
     OutputArg = Z.
 
@@ -550,47 +540,55 @@ evaluate_det_call_uint_3_mode_0(Globals, ProcName, X, Y, Z,
     Y ^ arg_inst = bound(_, _, [bound_functor(FunctorY, [])]),
     FunctorX = some_int_const(uint_const(XVal)),
     FunctorY = some_int_const(ConstY),
+    % Note that we optimize calls to the checked and unchecked versions
+    % of operations such as // and << under the same conditions: when
+    % the checked version's checks would succeed.
+    %
+    % See the comment in evaluate_det_call_int_3_mode_0 for the reason.
     (
         ConstY = uint_const(YVal),
         (
-            ProcName = "+",
+            ( ProcName = "+"    ; ProcName = "plus"
+            ; ProcName = "-"    ; ProcName = "minus"
+            ; ProcName = "*"    ; ProcName = "times"
+            ; ProcName = "//"   ; ProcName = "/"
+            ; ProcName = "unchecked_quotient"
+            ; ProcName = "mod"
+            ; ProcName = "rem"  ; ProcName = "unchecked_rem"
+            ; ProcName = "<<u"  ; ProcName = "unchecked_left_ushift"
+            ; ProcName = ">>u"  ; ProcName = "unchecked_right_ushift"
+            ),
             globals.lookup_bool_option(Globals, pregenerated_dist, no),
             uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.plus(BitsPerUInt, XVal, YVal, OutputArgVal)
-        ;
-            ProcName = "-",
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.minus(BitsPerUInt, XVal, YVal, OutputArgVal)
-        ;
-            ProcName = "*",
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.times(BitsPerUInt, XVal, YVal, OutputArgVal)
-        ;
-            ProcName = "//",
-            YVal \= 0u,
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.quotient(BitsPerUInt, XVal, YVal, OutputArgVal)
-        ;
-            ProcName = "mod",
-            YVal \= 0u,
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.mod(BitsPerUInt, XVal, YVal, OutputArgVal)
-        ;
-            ProcName = "rem",
-            YVal \= 0u,
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.rem(BitsPerUInt, XVal, YVal, OutputArgVal)
-        ;
-            ProcName = "unchecked_rem",
-            YVal \= 0u,
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.unchecked_rem(BitsPerUInt, XVal, YVal, OutputArgVal)
+            require_complete_switch [ProcName]
+            (
+                ( ProcName = "+" ; ProcName = "plus" ),
+                uint_emu.plus(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "-" ; ProcName = "minus" ),
+                uint_emu.minus(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "*" ; ProcName = "times" ),
+                uint_emu.times(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "//"
+                ; ProcName = "/"
+                ; ProcName = "unchecked_quotient"
+                ),
+                uint_emu.quotient(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ProcName = "mod",
+                uint_emu.mod(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "rem" ; ProcName = "unchecked_rem" ),
+                uint_emu.rem(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = "<<u" ; ProcName = "unchecked_left_ushift" ),
+                uint_emu.left_ushift(BitsPerUInt, XVal, YVal, OutputArgVal)
+            ;
+                ( ProcName = ">>u" ; ProcName = "unchecked_right_ushift" ),
+                uint_emu.right_ushift(BitsPerUInt, XVal, YVal, OutputArgVal)
+            )
         ;
             ProcName = "/\\",
             OutputArgVal = XVal /\ YVal
@@ -603,27 +601,13 @@ evaluate_det_call_uint_3_mode_0(Globals, ProcName, X, Y, Z,
         )
     ;
         ConstY = int_const(YVal),
+        globals.lookup_bool_option(Globals, pregenerated_dist, no),
+        uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
         (
-            ProcName = "unchecked_left_shift",
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.unchecked_left_shift(BitsPerUInt, XVal, YVal,
-                OutputArgVal)
-        ;
-            ProcName = "<<",
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
+            ( ProcName = "<<" ; ProcName = "unchecked_left_shift" ),
             uint_emu.left_shift(BitsPerUInt, XVal, YVal, OutputArgVal)
         ;
-            ProcName = "unchecked_right_shift",
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
-            uint_emu.unchecked_right_shift(BitsPerUInt, XVal, YVal,
-                OutputArgVal)
-        ;
-            ProcName = ">>",
-            globals.lookup_bool_option(Globals, pregenerated_dist, no),
-            uint_emu.target_bits_per_uint(Globals, BitsPerUInt),
+            ( ProcName = ">>" ; ProcName = "unchecked_right_shift" ),
             uint_emu.right_shift(BitsPerUInt, XVal, YVal, OutputArgVal)
         )
     ),
@@ -1306,7 +1290,7 @@ make_construction_goal_expr(Arg, ConsId, GoalExpr) :-
     % We ignore the generic goal info returned by make_const_construction;
     % our caller will construct a goal_info that is specialized to the
     % call being replaced.
-    make_const_construction(term.context_init, Arg ^ arg_var, ConsId, Goal),
+    make_const_construction(dummy_context, Arg ^ arg_var, ConsId, Goal),
     Goal = hlds_goal(GoalExpr, _).
 
 %---------------------------------------------------------------------------%

@@ -16,7 +16,7 @@
 :- import_module libs.globals.
 :- import_module libs.options.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
@@ -176,14 +176,8 @@ check_grade_component_compatibility(Globals, Target, GC_Method, !Specs) :-
     % Trailing is only supported by the C back-ends.
     %
     globals.lookup_bool_option(Globals, use_trail,  UseTrail),
-    globals.lookup_bool_option(Globals, trail_segments, TrailSegments),
-    ( if
-        % NOTE: We haven't yet implicitly enabled use_trail segments
-        % if trail_segments are enabled, so we must check both here.
-        ( UseTrail = yes
-        ; TrailSegments = yes
-        )
-    then
+    (
+        UseTrail = yes,
         (
             ( Target = target_java
             ; Target = target_csharp
@@ -195,8 +189,8 @@ check_grade_component_compatibility(Globals, Target, GC_Method, !Specs) :-
         ;
             Target = target_c
         )
-    else
-        true
+    ;
+        UseTrail = no
     ),
 
     % Stack segments are only supported by the low level C back-end.
@@ -309,9 +303,9 @@ string_to_grade_component(FilterDesc, Comp, !Comps, !Specs) :-
     % Emits an error if `GradeString' cannot be converted into a list
     % of grade component strings.
     %
-:- pred filter_grade(pred(list(string), list(string))
-    ::in(pred(in, in) is semidet), list(string)::in,
-    string::in, list(string)::in, list(string)::out,
+:- pred filter_grade(
+    pred(list(string), list(string))::in(pred(in, in) is semidet),
+    list(string)::in, string::in, list(string)::in, list(string)::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 filter_grade(FilterPred, CondComponents, GradeString, !Grades, !Specs) :-
@@ -354,9 +348,10 @@ must_not_contain(OmitComponents, GradeComponents) :-
 grade_string_to_comp_strings(GradeString, MaybeGrade, !Specs) :-
     ( if
         split_grade_string(GradeString, ComponentStrs),
-        StrToComp = ( pred(Str::in, Str::out) is semidet :-
-            grade_component_table(Str, _, _, _, _)
-        ),
+        StrToComp =
+            ( pred(Str::in, Str::out) is semidet :-
+                grade_component_table(Str, _, _, _, _)
+            ),
         list.map(StrToComp, ComponentStrs, Components0)
     then
         list.sort_and_remove_dups(Components0, Components),
@@ -633,11 +628,7 @@ grade_component_table("tsc", comp_term_size,
 
     % Trailing components.
 grade_component_table("tr", comp_trail,
-    [use_trail - bool(yes), trail_segments - bool(yes)], no, yes).
-    % NOTE: we do no include `.trseg' in grades strings because it
-    % it is just a synonym for `.tr'.
-grade_component_table("trseg", comp_trail,
-    [use_trail - bool(yes), trail_segments - bool(yes)], no, no).
+    [use_trail - bool(yes)], no, yes).
 
     % Minimal model tabling components.
     % NOTE: we do not include `.mm' and `.dmm' in grade strings
@@ -683,9 +674,9 @@ grade_component_table("debug", comp_trace,
 grade_component_table("ssdebug", comp_trace,
     [source_to_source_debug - bool(yes)], no, yes).
 
-    % Low (target) level debugging components.
-grade_component_table("ll_debug", comp_lowlevel,
-    [low_level_debug - bool(yes), target_debug - bool(yes)], no, yes).
+    % Target level debugging components.
+grade_component_table("c_debug", comp_lowlevel,
+    [c_debug_grade - bool(yes)], no, yes).
 
     % Stack extension components.
 grade_component_table("exts", comp_stack_extend,
@@ -736,7 +727,6 @@ grade_start_values(profile_time - bool(no)).
 grade_start_values(profile_calls - bool(no)).
 grade_start_values(profile_memory - bool(no)).
 grade_start_values(use_trail - bool(no)).
-grade_start_values(trail_segments - bool(no)).
 grade_start_values(use_minimal_model_stack_copy - bool(no)).
 grade_start_values(use_minimal_model_own_stacks - bool(no)).
 grade_start_values(minimal_model_debug - bool(no)).
@@ -750,7 +740,7 @@ grade_start_values(stack_segments - bool(no)).
 grade_start_values(use_regions - bool(no)).
 grade_start_values(use_regions_debug - bool(no)).
 grade_start_values(use_regions_profiling - bool(no)).
-grade_start_values(low_level_debug - bool(no)).
+grade_start_values(c_debug_grade - bool(no)).
 
 :- pred split_grade_string(string::in, list(string)::out) is semidet.
 

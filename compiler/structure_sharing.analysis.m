@@ -70,7 +70,6 @@
 :- import_module hlds.hlds_pred.
 :- import_module hlds.passes_aux.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.file_util.
@@ -87,6 +86,7 @@
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_type.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.ctgc.fixpoint_table.
 :- import_module transform_hlds.ctgc.structure_sharing.domain.
 :- import_module transform_hlds.ctgc.util.
@@ -103,6 +103,7 @@
 :- import_module set.
 :- import_module string.
 :- import_module term.
+:- import_module term_context.
 :- import_module term_conversion.
 
 %---------------------------------------------------------------------------%
@@ -160,13 +161,9 @@ process_imported_sharing(!ModuleInfo):-
     module_info::out) is det.
 
 process_imported_sharing_in_pred(PredId, !ModuleInfo) :-
-    some [!PredTable] (
-        module_info_get_preds(!.ModuleInfo, !:PredTable),
-        PredInfo0 = !.PredTable ^ det_elem(PredId),
-        process_imported_sharing_in_procs(PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, !PredTable),
-        module_info_set_preds(!.PredTable, !ModuleInfo)
-    ).
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    process_imported_sharing_in_procs(PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 :- pred process_imported_sharing_in_procs(pred_info::in,
     pred_info::out) is det.
@@ -185,7 +182,7 @@ process_imported_sharing_in_procs(!PredInfo) :-
 
 process_imported_sharing_in_proc(PredInfo, ProcId, !ProcTable) :-
     some [!ProcInfo] (
-        !:ProcInfo = !.ProcTable ^ det_elem(ProcId),
+        map.lookup(!.ProcTable, ProcId, !:ProcInfo),
         ( if
             proc_info_get_imported_structure_sharing(!.ProcInfo,
                 ImpHeadVars, ImpTypes, ImpSharing)
@@ -235,18 +232,14 @@ process_intermod_analysis_imported_sharing(!ModuleInfo):-
     module_info::in, module_info::out) is det.
 
 process_intermod_analysis_imported_sharing_in_pred(PredId, !ModuleInfo) :-
-    some [!PredTable] (
-        module_info_get_preds(!.ModuleInfo, !:PredTable),
-        map.lookup(!.PredTable, PredId, PredInfo0),
-        ( if pred_info_is_imported_not_external(PredInfo0) then
-            module_info_get_analysis_info(!.ModuleInfo, AnalysisInfo),
-            process_intermod_analysis_imported_sharing_in_procs(!.ModuleInfo,
-                AnalysisInfo, PredId, PredInfo0, PredInfo),
-            map.det_update(PredId, PredInfo, !PredTable),
-            module_info_set_preds(!.PredTable, !ModuleInfo)
-        else
-            true
-        )
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    ( if pred_info_is_imported_not_external(PredInfo0) then
+        module_info_get_analysis_info(!.ModuleInfo, AnalysisInfo),
+        process_intermod_analysis_imported_sharing_in_procs(!.ModuleInfo,
+            AnalysisInfo, PredId, PredInfo0, PredInfo),
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
+    else
+        true
     ).
 
 :- pred process_intermod_analysis_imported_sharing_in_procs(module_info::in,
@@ -272,8 +265,7 @@ process_intermod_analysis_imported_sharing_in_proc(ModuleInfo, AnalysisInfo,
         PredId, PredInfo, ProcId, !ProcTable) :-
     PPId = proc(PredId, ProcId),
     some [!ProcInfo] (
-        !:ProcInfo = !.ProcTable ^ det_elem(ProcId),
-
+        map.lookup(!.ProcTable, ProcId, !:ProcInfo),
         module_name_func_id(ModuleInfo, PPId, ModuleName, FuncId),
         FuncInfo = structure_sharing_func_info(ModuleInfo, !.ProcInfo),
         lookup_best_result(AnalysisInfo, ModuleName, FuncId, FuncInfo,
@@ -352,7 +344,9 @@ simplify_and_detect_liveness_proc(PredProcId, !ProcInfo, !ModuleInfo) :-
     module_info_get_globals(!.ModuleInfo, Globals),
     SimplifyTasks = list_to_simplify_tasks(Globals, []),
     PredProcId = proc(PredId, ProcId),
-    simplify_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo, !ProcInfo),
+    MaybeProgressStream = maybe.no,
+    simplify_proc(MaybeProgressStream, SimplifyTasks, PredId, ProcId,
+        !ModuleInfo, !ProcInfo),
     detect_liveness_proc(!.ModuleInfo, PredProcId, !ProcInfo).
 
 %---------------------------------------------------------------------------%
@@ -411,9 +405,9 @@ analyse_scc(ModuleInfo, SCC, !SharingTable, !DepProcs) :-
         % We update the sharing table otherwise procedures which call it will
         % not be able to find a result, and therefore conclude that the
         % analysis is suboptimal.
-        ProcsStrings = list.map(pred_proc_id_to_string(ModuleInfo), SCCProcs),
-        ProcsString = string.join_list(", ", ProcsStrings),
-        Msg = "SCC cannot be analysed: " ++ ProcsString,
+        ProcsStrs = list.map(pred_proc_id_to_dev_string(ModuleInfo), SCCProcs),
+        ProcsStr = string.join_list(", ", ProcsStrs),
+        Msg = "SCC cannot be analysed: " ++ ProcsStr,
         SharingAs = sharing_as_top_sharing(top_cannot_improve(Msg)),
         SharingAndStatus = sharing_as_and_status(SharingAs, optimal),
         set.foldl(
@@ -482,7 +476,7 @@ analyse_pred_proc(ModuleInfo, SharingTable, PPId, !FixpointTable, !DepProcs) :-
     TabledAsDescr = ss_fixpoint_table_get_short_description(PPId,
         !.FixpointTable),
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
+        maybe_write_proc_progress_message(ModuleInfo,
             "Sharing analysis (run " ++ string.int_to_string(Run) ++ ")",
             PPId, !IO)
     ),
@@ -513,7 +507,8 @@ analyse_pred_proc(ModuleInfo, SharingTable, PPId, !FixpointTable, !DepProcs) :-
             sharing_as_project(HeadVars, !Sharing),
             ProjAsDescr = sharing_as_short_description(!.Sharing),
 
-            domain.apply_widening(ModuleInfo, ProcInfo, WideningLimit,
+            proc_info_get_var_table(ProcInfo, VarTable),
+            domain.apply_widening(ModuleInfo, VarTable, WideningLimit,
                 WideningDone, !Sharing),
             (
                 WideningDone = yes,
@@ -594,8 +589,8 @@ analyse_goal(ModuleInfo, PredInfo, ProcInfo, SharingTable, Verbose, Goal,
         ),
 
         % Rename
-        proc_info_get_vartypes(ProcInfo, CallerVarTypes),
-        lookup_var_types(CallerVarTypes, CallArgs, ActualTypes),
+        proc_info_get_var_table(ProcInfo, CallerVarTable),
+        lookup_var_types(CallerVarTable, CallArgs, ActualTypes),
         pred_info_get_typevarset(PredInfo, CallerTypeVarSet),
         pred_info_get_univ_quant_tvars(PredInfo, CallerHeadParams),
         sharing_as_rename_using_module_info(ModuleInfo, CalleePPId, CallArgs,
@@ -763,8 +758,8 @@ analyse_generic_call(ModuleInfo, ProcInfo, GenDetails, CallArgs, Modes,
         ( GenDetails = higher_order(_, _, _, _)
         ; GenDetails = class_method(_, _, _, _)
         ),
-        proc_info_get_vartypes(ProcInfo, CallerVarTypes),
-        lookup_var_types(CallerVarTypes, CallArgs, ActualTypes),
+        proc_info_get_var_table(ProcInfo, CallerVarTable),
+        lookup_var_types(CallerVarTable, CallArgs, ActualTypes),
         ( if
             bottom_sharing_is_safe_approximation_by_args(ModuleInfo, Modes,
                 ActualTypes)
@@ -923,7 +918,9 @@ wrapped_init(_Id) = sharing_as_and_status(sharing_as_init, optimal).
     --->    structure_sharing_answer_bottom
     ;       structure_sharing_answer_top
     ;       structure_sharing_answer_real(
-                ssar_vars       :: prog_vars,
+                % XXX The next two fields should be a list of pairs,
+                % not a pair of lists.
+                ssar_vars       :: list(prog_var),
                 ssar_types      :: list(mer_type),
                 ssar_sharing    :: structure_sharing
                 % We cannot keep this as a sharing_as. When the analysis
@@ -972,7 +969,7 @@ analysis_name = "structure_sharing".
 
 :- instance to_term(structure_sharing_call) where [
     ( to_term(structure_sharing_call) = Term :-
-        Term = term.functor(atom("any"), [], context_init)
+        Term = term.functor(atom("any"), [], dummy_context)
     ),
     ( from_term(Term, structure_sharing_call) :-
         Term = term.functor(atom("any"), [], _)
@@ -990,8 +987,8 @@ analysis_name = "structure_sharing".
 
         FuncInfo = structure_sharing_func_info(ModuleInfo, ProcInfo),
         proc_info_get_headvars(ProcInfo, HeadVars),
-        proc_info_get_vartypes(ProcInfo, VarTypes),
-        lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        lookup_var_types(VarTable, HeadVars, HeadVarTypes),
         structure_sharing_answer_to_domain(no, HeadVarTypes, ProcInfo,
             Answer1, Sharing1),
         structure_sharing_answer_to_domain(no, HeadVarTypes, ProcInfo,
@@ -1011,8 +1008,8 @@ analysis_name = "structure_sharing".
         ;
             FuncInfo = structure_sharing_func_info(ModuleInfo, ProcInfo),
             proc_info_get_headvars(ProcInfo, HeadVars),
-            proc_info_get_vartypes(ProcInfo, VarTypes),
-            lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+            proc_info_get_var_table(ProcInfo, VarTable),
+            lookup_var_types(VarTable, HeadVars, HeadVarTypes),
             structure_sharing_answer_to_domain(no, HeadVarTypes, ProcInfo,
                 Answer1, Sharing1),
             structure_sharing_answer_to_domain(no, HeadVarTypes, ProcInfo,
@@ -1037,17 +1034,17 @@ analysis_name = "structure_sharing".
 sharing_answer_to_term(Answer) = Term :-
     (
         Answer = structure_sharing_answer_bottom,
-        Term = term.functor(atom("b"), [], context_init)
+        Term = term.functor(atom("b"), [], dummy_context)
     ;
         Answer = structure_sharing_answer_top,
-        Term = term.functor(atom("t"), [], context_init)
+        Term = term.functor(atom("t"), [], dummy_context)
     ;
         Answer = structure_sharing_answer_real(HeadVars, Types, SharingPairs),
         type_to_term(HeadVars, HeadVarsTerm),
         type_to_term(Types, TypesTerm),
         type_to_term(SharingPairs, SharingPairsTerm),
         Term = term.functor(atom("sharing"),
-            [HeadVarsTerm, TypesTerm, SharingPairsTerm], context_init)
+            [HeadVarsTerm, TypesTerm, SharingPairsTerm], dummy_context)
     ).
 
 :- pred sharing_answer_from_term(term::in, structure_sharing_answer::out)
@@ -1149,8 +1146,8 @@ maybe_record_sharing_analysis_result_2(ModuleInfo, SharingAsTable, PredId,
         ;
             Sharing = structure_sharing_real(SharingPairs),
             proc_info_get_headvars(ProcInfo, HeadVars),
-            proc_info_get_vartypes(ProcInfo, VarTypes),
-            lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+            proc_info_get_var_table(ProcInfo, VarTable),
+            lookup_var_types(VarTable, HeadVars, HeadVarTypes),
             Answer = structure_sharing_answer_real(HeadVars, HeadVarTypes,
                 SharingPairs),
             Status = Status0
@@ -1199,12 +1196,12 @@ write_top_feedback(Stream, ModuleInfo, Reason, !IO) :-
     (
         Reason = top_failed_lookup(ShroudedPPId),
         PPId = unshroud_pred_proc_id(ShroudedPPId),
-        PPIdStr = pred_proc_id_to_string(ModuleInfo, PPId),
+        PPIdStr = pred_proc_id_to_dev_string(ModuleInfo, PPId),
         io.format(Stream, "failed_lookup: %s\n", [s(PPIdStr)], !IO)
     ;
         Reason = top_from_lookup(ShroudedPPId),
         PPId = unshroud_pred_proc_id(ShroudedPPId),
-        PPIdStr = pred_proc_id_to_string(ModuleInfo, PPId),
+        PPIdStr = pred_proc_id_to_dev_string(ModuleInfo, PPId),
         io.format(Stream, "from_lookup: %s\n", [s(PPIdStr)], !IO)
     ;
         Reason = top_cannot_improve(String),

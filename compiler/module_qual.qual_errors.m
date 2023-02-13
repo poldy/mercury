@@ -25,8 +25,7 @@
 :- type mq_constraint_error_context
     --->    mqcec_class_defn(prog_context,
                 % The name of the type class beging defined, and its arity.
-                class_name,
-                int
+                class_id
             )
     ;       mqcec_class_method(prog_context,
                 % The identity of the class method the constraint is on:
@@ -51,12 +50,8 @@
             )
     ;       mqcec_pred_decl(prog_context,
                 % The identity of the entity the constraint is on:
-                % whether it is predicate or function, and its name.
-                % Its arity would be nice, but it is tricky to calculate
-                % in the presence of with_type.
-                pred_or_func,
-                sym_name,
-                int
+                % whether it is predicate or function, its name, and its arity.
+                pf_sym_name_arity
             ).
 
 :- type mq_error_context
@@ -144,14 +139,14 @@
     % Report an undefined type, inst or mode.
     %
 :- pred report_undefined_mq_id(mq_info::in, mq_error_context::in,
-    mq_id::in, id_type::in, module_name::in,
+    mq_id::in, qual_id_kind::in, module_name::in,
     list(module_name)::in, list(module_name)::in, set(int)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
     % Report an error where a type, inst, mode or typeclass had
     % multiple possible matches.
     %
-:- pred report_ambiguous_match(mq_error_context::in, mq_id::in, id_type::in,
+:- pred report_ambiguous_match(mq_error_context::in, mq_id::in, qual_id_kind::in,
     list(module_name)::in, list(module_name)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
@@ -188,7 +183,7 @@ report_undefined_mq_id(Info, ErrorContext, Id, IdType, ThisModuleName,
         ErrorContextPieces),
     InPieces = [words("In")] ++ ErrorContextPieces ++ [suffix(":"), nl,
         words("error:")],
-    id_type_to_string(IdType, IdTypeStr),
+    qual_id_kind_to_string(IdType, IdTypeStr),
     Id = mq_id(IdSymName, IdArity),
     IdBaseName = unqualify_name(IdSymName),
     list.sort_and_remove_dups(IntMismatches0, IntMismatches),
@@ -285,7 +280,7 @@ report_undefined_mq_id(Info, ErrorContext, Id, IdType, ThisModuleName,
         QualPieces = [],
         NonImportedPieces = []
     then
-        id_types_to_string(IdType, IdTypesStr),
+        qual_id_kinds_to_string(IdType, IdTypesStr),
         IsAre = choose_number(PossibleArities, "is a", "are"),
         KindKinds = choose_number(PossibleArities, IdTypeStr, IdTypesStr),
         ArityArities = choose_number(PossibleArities, "arity", "arities"),
@@ -319,7 +314,7 @@ report_ambiguous_match(ErrorContext, Id, IdType,
         UsableModuleNames, UnusableModuleNames, !Specs) :-
     mq_error_context_to_pieces(ErrorContext, Context, _ShouldUnqualId,
         ErrorContextPieces),
-    id_type_to_string(IdType, IdTypeStr),
+    qual_id_kind_to_string(IdType, IdTypeStr),
     UsableModuleSymNames = list.map(wrap_module_name, UsableModuleNames),
     MainPieces = [words("In")] ++ ErrorContextPieces ++ [suffix(":"), nl,
         words("ambiguity error: multiple possible matches for"),
@@ -399,49 +394,41 @@ warn_redundant_import_context(ImportedModuleName, Context, Msg) :-
 %---------------------------------------------------------------------------%
 
 :- pred mq_constraint_error_context_to_pieces(mq_constraint_error_context::in,
-    prog_context::out, string::out, list(format_component)::out) is det.
+    prog_context::out, string::out, list(format_piece)::out) is det.
 
 mq_constraint_error_context_to_pieces(ConstraintErrorContext,
         Context, Start, Pieces) :-
     (
-        ConstraintErrorContext = mqcec_class_defn(Context, ClassName, Arity),
+        ConstraintErrorContext = mqcec_class_defn(Context, ClassId),
         Start = "in",
-        Pieces = [words("definition of type class"),
-            qual_sym_name_arity(sym_name_arity(ClassName, Arity))]
+        Pieces = [words("definition of type class"), qual_class_id(ClassId)]
     ;
         ConstraintErrorContext = mqcec_class_method(Context,
             PredOrFunc, MethodName),
         Start = "on",
-        Pieces = [words("class method"),
-            p_or_f(PredOrFunc), quote(MethodName)]
+        Pieces = [words("class method"), p_or_f(PredOrFunc), quote(MethodName)]
     ;
         ConstraintErrorContext = mqcec_instance_defn(Context,
             ClassName, ArgTypes),
         Start = "on",
         list.length(ArgTypes, NumArgTypes),
         Pieces = [words("instance definition for"),
-            qual_sym_name_arity(sym_name_arity(ClassName, NumArgTypes))]
+            qual_class_id(class_id(ClassName, NumArgTypes))]
     ;
         ConstraintErrorContext = mqcec_type_defn_constructor(Context,
             TypeCtor, FunctionSymbol),
         Start = "on",
-        TypeCtor = type_ctor(TypeCtorSymName, TypeCtorArity),
         Pieces = [words("function symbol"), quote(FunctionSymbol),
-            words("for type constructor"),
-            unqual_sym_name_arity(
-                sym_name_arity(TypeCtorSymName, TypeCtorArity))]
+            words("for type constructor"), unqual_type_ctor(TypeCtor)]
     ;
-        ConstraintErrorContext = mqcec_pred_decl(Context,
-            PredOrFunc, SymName, OrigArity),
+        ConstraintErrorContext = mqcec_pred_decl(Context, PFSymNameArity),
         Start = "on",
-        adjust_func_arity(PredOrFunc, OrigArity, Arity),
-        Pieces = [words("declaration of "),
-            fixed(pred_or_func_to_full_str(PredOrFunc)),
-            unqual_sym_name_arity(sym_name_arity(SymName, Arity))]
+        Pieces = [words("declaration of"),
+            unqual_pf_sym_name_pred_form_arity(PFSymNameArity)]
     ).
 
 :- pred mq_error_context_to_pieces(mq_error_context::in,
-    prog_context::out, bool::out, list(format_component)::out) is det.
+    prog_context::out, bool::out, list(format_piece)::out) is det.
 
 mq_error_context_to_pieces(ErrorContext, Context, ShouldUnqualId, Pieces) :-
     (
@@ -484,7 +471,7 @@ mq_error_context_to_pieces(ErrorContext, Context, ShouldUnqualId, Pieces) :-
         ShouldUnqualId = no,
         mq_constraint_error_context_to_pieces(ConstraintErrorContext,
             Context, Start, ConstraintErrorContextPieces),
-        Pieces = [words("type class constraint for "),
+        Pieces = [words("type class constraint for"),
             unqual_sym_name_arity(sym_name_arity(ClassName, Arity)),
             words(Start) | ConstraintErrorContextPieces]
     ;
@@ -492,7 +479,7 @@ mq_error_context_to_pieces(ErrorContext, Context, ShouldUnqualId, Pieces) :-
         ShouldUnqualId = no,
         Id = mq_id(SymName, OrigArity),
         adjust_func_arity(PredOrFunc, OrigArity, Arity),
-        Pieces = [words("declaration of "),
+        Pieces = [words("declaration of"),
             fixed(pred_or_func_to_full_str(PredOrFunc)),
             unqual_sym_name_arity(sym_name_arity(SymName, Arity))]
     ;
@@ -550,7 +537,7 @@ mq_error_context_to_pieces(ErrorContext, Context, ShouldUnqualId, Pieces) :-
     ;
         ErrorContext = mqec_mutable(Context, Name),
         ShouldUnqualId = no,
-        Pieces = [words("declaration for mutable "), quote(Name)]
+        Pieces = [words("declaration for mutable"), quote(Name)]
     ;
         ErrorContext = mqec_type_repn(Context, TypeCtor),
         ShouldUnqualId = no,
@@ -563,27 +550,27 @@ mq_error_context_to_pieces(ErrorContext, Context, ShouldUnqualId, Pieces) :-
             words("for"), quote(EventName)]
     ).
 
-:- pred id_type_to_string(id_type::in, string::out) is det.
+:- pred qual_id_kind_to_string(qual_id_kind::in, string::out) is det.
 
-id_type_to_string(type_id, "type").
-id_type_to_string(mode_id, "mode").
-id_type_to_string(inst_id, "inst").
-id_type_to_string(class_id, "typeclass").
+qual_id_kind_to_string(qual_id_type, "type").
+qual_id_kind_to_string(qual_id_mode, "mode").
+qual_id_kind_to_string(qual_id_inst, "inst").
+qual_id_kind_to_string(qual_id_class, "typeclass").
 
-:- pred id_types_to_string(id_type::in, string::out) is det.
+:- pred qual_id_kinds_to_string(qual_id_kind::in, string::out) is det.
 
-id_types_to_string(type_id, "types").
-id_types_to_string(mode_id, "modes").
-id_types_to_string(inst_id, "insts").
-id_types_to_string(class_id, "typeclasses").
+qual_id_kinds_to_string(qual_id_type, "types").
+qual_id_kinds_to_string(qual_id_mode, "modes").
+qual_id_kinds_to_string(qual_id_inst, "insts").
+qual_id_kinds_to_string(qual_id_class, "typeclasses").
 
 %---------------------------------------------------------------------------%
 
-:- func wrap_module_name(module_name) = format_component.
+:- func wrap_module_name(module_name) = format_piece.
 
 wrap_module_name(SymName) = qual_sym_name(SymName).
 
-:- func wrap_qual_id(mq_id) = format_component.
+:- func wrap_qual_id(mq_id) = format_piece.
 
 wrap_qual_id(mq_id(SymName, Arity)) =
     qual_sym_name_arity(sym_name_arity(SymName, Arity)).

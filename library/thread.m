@@ -3,7 +3,7 @@
 %---------------------------------------------------------------------------%
 % Copyright (C) 2000-2001, 2003-2004, 2006-2008, 2010-2011 The University
 % of Melbourne.
-% Copyright (C) 2014-2021 The Mercury Team.
+% Copyright (C) 2014-2022 The Mercury Team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -48,9 +48,9 @@
     %
 :- pred can_spawn_native is semidet.
 
-    % spawn(Closure, IO0, IO) is true iff `IO0' denotes a list of I/O
-    % transactions that is an interleaving of those performed by `Closure'
-    % and those contained in `IO' - the list of transactions performed by
+    % spawn(Closure, IO0, IO) is true iff IO0 denotes a list of I/O
+    % transactions that is an interleaving of those performed by Closure
+    % and those contained in IO - the list of transactions performed by
     % the continuation of spawn/3.
     %
     % Operationally, spawn/3 is like spawn/4 except that Closure does not

@@ -48,7 +48,10 @@ PROGS = \
 	errors1 \
 	errors2 \
 	external \
+	external_in_interface \
+	fact_table_in_interface \
 	foreign_enum_import \
+	foreign_proc_in_interface \
 	func_errors \
 	funcs_as_preds \
 	fundeps_unbound_in_ctor \
@@ -118,7 +121,7 @@ ifeq ($(MMAKE_USE_MMC_MAKE),yes)
 # error messages, once while making interface files, then the module proper.
 # The second time the command is run, only one set of error messages
 # should appear.
-$(addsuffix .err,$(PROGS)):
+$(PROGS:%=%.err):
 	-$(MCM) $@
 	if $(MCM) -r $@ > /dev/null 2>&1 ; \
 	then false; \
@@ -127,7 +130,7 @@ $(addsuffix .err,$(PROGS)):
 
 else
 
-%.err: %.m
+$(PROGS:%=%.err): %.err: %.m
 	if $(MC) --errorcheck-only $(ALL_GRADEFLAGS) $(ALL_MCFLAGS) $* \
 		> $*.err 2>&1; \
 	then false; \

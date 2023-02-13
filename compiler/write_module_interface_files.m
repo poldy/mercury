@@ -113,24 +113,26 @@
 
 :- import_module libs.options.
 :- import_module parse_tree.comp_unit_interface.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.error_util.
 :- import_module parse_tree.file_kind.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.grab_modules.           % undesirable dependency
+:- import_module parse_tree.module_baggage.
 :- import_module parse_tree.module_cmds.
-:- import_module parse_tree.module_imports.
 :- import_module parse_tree.module_qual.
+:- import_module parse_tree.parse_error.
 :- import_module parse_tree.parse_tree_out.
+:- import_module parse_tree.write_error_spec.
 :- import_module recompilation.
 :- import_module recompilation.version.
 
 :- import_module bool.
-:- import_module list.
 :- import_module getopt.
+:- import_module io.file.
+:- import_module list.
 :- import_module require.
-:- import_module set.
 :- import_module string.
-:- import_module term.
 
 %---------------------------------------------------------------------------%
 %
@@ -143,7 +145,7 @@ write_short_interface_file_int3(ProgressStream, ErrorStream, Globals,
     % in the current module and writes out the .int3 file.
     generate_short_interface_int3(Globals, ParseTreeModuleSrc, ParseTreeInt3,
         [], Specs0),
-    filter_interface_generation_specs(Globals, Specs0, Specs, !IO),
+    filter_interface_generation_specs(Globals, Specs0, Specs),
     EffectivelyErrors =
         contains_errors_or_warnings_treated_as_errors(Globals, Specs),
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
@@ -170,18 +172,18 @@ write_private_interface_file_int0(ProgressStream, ErrorStream, Globals,
         SourceFileName, SourceFileModuleName, MaybeTimestamp,
         ParseTreeModuleSrc0, Succeeded, !HaveReadModuleMaps, !IO) :-
     ModuleName = ParseTreeModuleSrc0 ^ ptms_module_name,
-    grab_unqual_imported_modules_make_int(Globals, SourceFileName,
-        SourceFileModuleName, ParseTreeModuleSrc0, Baggage, AugMakeIntUnit1,
-        !HaveReadModuleMaps, !IO),
+    grab_unqual_imported_modules_make_int(ProgressStream, Globals,
+        SourceFileName, SourceFileModuleName, ParseTreeModuleSrc0,
+        Baggage, AugMakeIntUnit1, !HaveReadModuleMaps, !IO),
 
     % Check whether we succeeded.
-    GetSpecs = Baggage ^ mb_specs,
     GetErrors = Baggage ^ mb_errors,
+    GetSpecs = get_read_module_specs(GetErrors),
     GetSpecsEffectivelyErrors =
         contains_errors_or_warnings_treated_as_errors(Globals, GetSpecs),
     ( if
         GetSpecsEffectivelyErrors = no,
-        set.is_empty(GetErrors)
+        there_are_no_errors(GetErrors)
     then
         % Module-qualify all items.
         % XXX ITEM_LIST We don't need grab_unqual_imported_modules
@@ -192,14 +194,14 @@ write_private_interface_file_int0(ProgressStream, ErrorStream, Globals,
         module_qualify_aug_make_int_unit(Globals,
             AugMakeIntUnit1, AugMakeIntUnit, [], QualSpecs),
         filter_interface_generation_specs(Globals,
-            GetSpecs ++ QualSpecs, EffectiveGetQualSpecs, !IO),
+            GetSpecs ++ QualSpecs, EffectiveGetQualSpecs),
         (
             EffectiveGetQualSpecs = [],
             % Construct the `.int0' file.
             generate_private_interface_int0(AugMakeIntUnit, ParseTreeInt0,
                 [], GenerateSpecs),
             filter_interface_generation_specs(Globals,
-                EffectiveGetQualSpecs ++ GenerateSpecs, Specs, !IO),
+                EffectiveGetQualSpecs ++ GenerateSpecs, Specs),
             write_error_specs(ErrorStream, Globals, Specs, !IO),
             % Write out the `.int0' file.
             actually_write_interface_file0(ProgressStream, ErrorStream,
@@ -239,18 +241,18 @@ write_interface_file_int1_int2(ProgressStream, ErrorStream, Globals,
         IntParseTreeModuleSrc),
 
     % Get the .int3 files for imported modules.
-    grab_unqual_imported_modules_make_int(Globals, SourceFileName,
-        SourceFileModuleName, IntParseTreeModuleSrc, Baggage, AugMakeIntUnit1,
-        !HaveReadModuleMaps, !IO),
+    grab_unqual_imported_modules_make_int(ProgressStream, Globals,
+        SourceFileName, SourceFileModuleName, IntParseTreeModuleSrc,
+        Baggage, AugMakeIntUnit1, !HaveReadModuleMaps, !IO),
 
     % Check whether we succeeded.
-    GetSpecs = Baggage ^ mb_specs,
     GetErrors = Baggage ^ mb_errors,
+    GetSpecs = get_read_module_specs(GetErrors),
     GetSpecsEffectivelyErrors =
         contains_errors_or_warnings_treated_as_errors(Globals, GetSpecs),
     ( if
         GetSpecsEffectivelyErrors = no,
-        set.is_empty(GetErrors)
+        there_are_no_errors(GetErrors)
     then
         % Module-qualify the aug_make_int_unit.
         %
@@ -268,14 +270,14 @@ write_interface_file_int1_int2(ProgressStream, ErrorStream, Globals,
         module_qualify_aug_make_int_unit(Globals,
             AugMakeIntUnit1, AugMakeIntUnit, [], QualSpecs),
         filter_interface_generation_specs(Globals,
-            GetSpecs ++ QualSpecs, EffectiveGetQualSpecs, !IO),
+            GetSpecs ++ QualSpecs, EffectiveGetQualSpecs),
         (
             EffectiveGetQualSpecs = [],
             % Construct the `.int' and `.int2' files.
             generate_interfaces_int1_int2(Globals, AugMakeIntUnit,
                 ParseTreeInt1, ParseTreeInt2, [], GenerateSpecs),
             filter_interface_generation_specs(Globals,
-                EffectiveGetQualSpecs ++ GenerateSpecs, Specs, !IO),
+                EffectiveGetQualSpecs ++ GenerateSpecs, Specs),
             write_error_specs(ErrorStream, Globals, Specs, !IO),
             % Write out the `.int' and `.int2' files.
             actually_write_interface_file1(ProgressStream, ErrorStream,
@@ -430,15 +432,22 @@ maybe_read_old_int0_and_compare_for_smart_recomp(NoLineNumGlobals,
         % Find the timestamp of the current module.
         insist_on_timestamp(MaybeTimestamp, Timestamp),
         % Read in the previous version of the file.
-        read_module_int0(NoLineNumGlobals, rrm_old(ModuleName),
-            ignore_errors, do_search, ModuleName, _OldIntFileName,
-            always_read_module(dont_return_timestamp), _OldTimestamp,
-            OldParseTreeInt0, _OldSpecs, OldErrors, !IO),
-        ( if set.is_empty(OldErrors) then
-            MaybeOldParseTreeInt0 = yes(OldParseTreeInt0)
-        else
-            % If we can't read in the old file, the timestamps will
-            % all be set to the modification time of the source file.
+        MaybeProgressStream = maybe.no,
+        read_module_int0(MaybeProgressStream, NoLineNumGlobals,
+            rrm_old(ModuleName), ignore_errors, do_search, ModuleName,
+            always_read_module(dont_return_timestamp), HaveReadInt0, !IO),
+        (
+            HaveReadInt0 = have_read_module(_FN, _MTS,
+                OldParseTreeInt0, OldModuleErrors),
+            ( if there_are_no_errors(OldModuleErrors) then
+                MaybeOldParseTreeInt0 = yes(OldParseTreeInt0)
+            else
+                % If we can't read in the old file, the timestamps will
+                % all be set to the modification time of the source file.
+                MaybeOldParseTreeInt0 = no
+            )
+        ;
+            HaveReadInt0 = have_not_read_module(_, _),
             MaybeOldParseTreeInt0 = no
         ),
         recompilation.version.compute_version_numbers_int0(
@@ -463,15 +472,22 @@ maybe_read_old_int1_and_compare_for_smart_recomp(NoLineNumGlobals,
         % Find the timestamp of the current module.
         insist_on_timestamp(MaybeTimestamp, Timestamp),
         % Read in the previous version of the file.
-        read_module_int1(NoLineNumGlobals, rrm_old(ModuleName),
-            ignore_errors, do_search, ModuleName, _OldIntFileName,
-            always_read_module(dont_return_timestamp), _OldTimestamp,
-            OldParseTreeInt1, _OldSpecs, OldErrors, !IO),
-        ( if set.is_empty(OldErrors) then
-            MaybeOldParseTreeInt1 = yes(OldParseTreeInt1)
-        else
-            % If we can't read in the old file, the timestamps will
-            % all be set to the modification time of the source file.
+        MaybeProgressStream = maybe.no,
+        read_module_int1(MaybeProgressStream, NoLineNumGlobals,
+            rrm_old(ModuleName), ignore_errors, do_search, ModuleName,
+            always_read_module(dont_return_timestamp), HaveReadInt1, !IO),
+        (
+            HaveReadInt1 = have_read_module(_FN, _MTS,
+                OldParseTreeInt1, OldModuleErrors),
+            ( if there_are_no_errors(OldModuleErrors) then
+                MaybeOldParseTreeInt1 = yes(OldParseTreeInt1)
+            else
+                % If we can't read in the old file, the timestamps will
+                % all be set to the modification time of the source file.
+                MaybeOldParseTreeInt1 = no
+            )
+        ;
+            HaveReadInt1 = have_not_read_module(_, _),
             MaybeOldParseTreeInt1 = no
         ),
         recompilation.version.compute_version_numbers_int1(
@@ -496,15 +512,22 @@ maybe_read_old_int2_and_compare_for_smart_recomp(NoLineNumGlobals,
         % Find the timestamp of the current module.
         insist_on_timestamp(MaybeTimestamp, Timestamp),
         % Read in the previous version of the file.
-        read_module_int2(NoLineNumGlobals, rrm_old(ModuleName),
-            ignore_errors, do_search, ModuleName, _OldIntFileName,
-            always_read_module(dont_return_timestamp), _OldTimestamp,
-            OldParseTreeInt2, _OldSpecs, OldErrors, !IO),
-        ( if set.is_empty(OldErrors) then
-            MaybeOldParseTreeInt2 = yes(OldParseTreeInt2)
-        else
-            % If we can't read in the old file, the timestamps will
-            % all be set to the modification time of the source file.
+        MaybeProgressStream = maybe.no,
+        read_module_int2(MaybeProgressStream, NoLineNumGlobals,
+            rrm_old(ModuleName), ignore_errors, do_search, ModuleName,
+            always_read_module(dont_return_timestamp), HaveReadInt2, !IO),
+        (
+            HaveReadInt2 = have_read_module(_FN, _MTS,
+                OldParseTreeInt2, OldModuleErrors),
+            ( if there_are_no_errors(OldModuleErrors) then
+                MaybeOldParseTreeInt2 = yes(OldParseTreeInt2)
+            else
+                % If we can't read in the old file, the timestamps will
+                % all be set to the modification time of the source file.
+                MaybeOldParseTreeInt2 = no
+            )
+        ;
+            HaveReadInt2 = have_not_read_module(_, _),
             MaybeOldParseTreeInt2 = no
         ),
         recompilation.version.compute_version_numbers_int2(
@@ -551,7 +574,7 @@ insist_on_timestamp(MaybeTimestamp, Timestamp) :-
 %---------------------------------------------------------------------------%
 
 :- pred report_file_not_written(io.text_output_stream::in, globals::in, 
-    list(error_spec)::in, list(format_component)::in, module_name::in,
+    list(error_spec)::in, list(format_piece)::in, module_name::in,
     other_ext::in, maybe(other_ext)::in, other_ext::in, io::di, io::uo) is det.
 
 report_file_not_written(ErrorStream, Globals, Specs, PrefixPieces,
@@ -586,7 +609,8 @@ report_file_not_written(ErrorStream, Globals, Specs, PrefixPieces,
     % out-of-date. If we did not do this, compilations that read in the
     % now-obsolete interface files could generate error messages about
     % errors that do not now exist in the source files at all.
-    list.map_foldl(io.remove_file, ToRemoveFileNames, _RemoveResults, !IO).
+    list.map_foldl(io.file.remove_file,
+        ToRemoveFileNames, _RemoveResults, !IO).
 
 %---------------------------------------------------------------------------%
 :- end_module parse_tree.write_module_interface_files.

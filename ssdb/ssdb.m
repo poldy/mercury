@@ -150,6 +150,8 @@
 :- import_module char.
 :- import_module dir.
 :- import_module int.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module map.
 :- import_module maybe.
 :- import_module pair.
@@ -362,8 +364,8 @@ init_list_params = list_params(new_list_path, 2).
 :- pred init_debugger_state(io::di, io::uo) is det.
 
 init_debugger_state(!IO) :-
-    io.get_environment_var("SSDB", MaybeEnv, !IO),
-    io.get_environment_var("SSDB_TTY", MaybeTTY, !IO),
+    io.environment.get_environment_var("SSDB", MaybeEnv, !IO),
+    io.environment.get_environment_var("SSDB_TTY", MaybeTTY, !IO),
     ( if
         ( MaybeEnv = yes(_)
         ; MaybeTTY = yes(_)
@@ -405,7 +407,7 @@ init_debugger_state(!IO) :-
 :- pred add_source_commands(io::di, io::uo) is det.
 
 add_source_commands(!IO) :-
-    io.get_environment_var("HOME", MaybeHome, !IO),
+    io.environment.get_environment_var("HOME", MaybeHome, !IO),
     (
         MaybeHome = yes(Home),
         maybe_add_source_commands(Home / ".ssdbrc", !IO)
@@ -417,7 +419,7 @@ add_source_commands(!IO) :-
 :- pred maybe_add_source_commands(string::in, io::di, io::uo) is det.
 
 maybe_add_source_commands(FileName, !IO) :-
-    io.check_file_accessibility(FileName, [read], Res, !IO),
+    io.file.check_file_accessibility(FileName, [read], Res, !IO),
     (
         Res = ok,
         Command = "source " ++ FileName,
@@ -437,12 +439,11 @@ get_debugger_state_safer(DebuggerState, !IO) :-
     get_debugger_state_safer(DebuggerState::out, _IO0::di, _IO::uo),
     [will_not_call_mercury, promise_pure, thread_safe, tabled_for_io],
 "
-    /*
-    ** Cope with non-standard ways of entering Mercury code.
-    ** If init_debugger_state was called in a thread that is not a parent of
-    ** the current thread, the current thread would inherit a value of null
-    ** in thread-local mutable debugger_state.
-    */
+    // Cope with non-standard ways of entering Mercury code.
+    // If init_debugger_state was called in a thread that is not a parent of
+    // the current thread, the current thread would inherit a value of null
+    // in thread-local mutable debugger_state.
+
     java.lang.Object X = ssdb__mutable_variable_debugger_state.get();
     if (X == null) {
         DebuggerState = ssdb.DEBUGGER_OFF;

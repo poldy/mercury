@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1993-2000,2002-2007, 2009-2011 The University of Melbourne.
-% Copyright (C) 2014-2018 The Mercury team.
+% Copyright (C) 2014-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -314,6 +314,11 @@
 
 :- func num_allocated(varset(T)) = int.
 
+:- pred get_var_names(varset(T)::in, map(var(T), string)::out) is det.
+
+:- pred construct_varset(int::in, map(var(T), string)::in,
+    varset(T)::out) is det.
+
 %---------------------------------------------------------------------------%
 
 :- implementation.
@@ -322,6 +327,7 @@
 :- import_module pair.
 :- import_module require.
 :- import_module string.
+:- import_module term_subst.
 
 :- type varset(T)
     --->    varset(
@@ -775,11 +781,11 @@ fast_merge_renaming_without_names_loop(CurVarNumB, NumAllocatedB,
 
 merge(VarSetA, VarSetB, TermList0, VarSet, TermList) :-
     varset.merge_renaming(VarSetA, VarSetB, VarSet, Renaming),
-    term.apply_renaming_in_terms(Renaming, TermList0, TermList).
+    term_subst.apply_renaming_in_terms(Renaming, TermList0, TermList).
 
 merge_without_names(VarSetA, VarSetB, TermList0, VarSet, TermList) :-
     varset.merge_renaming_without_names(VarSetA, VarSetB, VarSet, Renaming),
-    term.apply_renaming_in_terms(Renaming, TermList0, TermList).
+    term_subst.apply_renaming_in_terms(Renaming, TermList0, TermList).
 
 %---------------------------------------------------------------------------%
 
@@ -931,6 +937,14 @@ max_var(varset(VarSupply, _, _)) = term.var_supply_max_var(VarSupply).
 
 num_allocated(varset(VarSupply, _, _)) =
     term.var_supply_num_allocated(VarSupply).
+
+get_var_names(VarSet, VarNameMap) :-
+    VarSet = varset(_, VarNameMap, _).
+
+construct_varset(N, VarNameMap, VarSet) :-
+    VarSupply = force_construct_var_supply(N),
+    map.init(VarValueMap),
+    VarSet = varset(VarSupply, VarNameMap, VarValueMap).
 
 %---------------------------------------------------------------------------%
 :- end_module varset.

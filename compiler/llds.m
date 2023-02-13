@@ -22,8 +22,6 @@
 :- import_module backend_libs.
 :- import_module backend_libs.builtin_ops.
 :- import_module backend_libs.rtti.
-:- import_module check_hlds.
-:- import_module check_hlds.type_util.
 :- import_module hlds.
 :- import_module hlds.code_model.
 :- import_module hlds.hlds_data.
@@ -31,6 +29,8 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module ll_backend.layout.
+:- import_module libs.
+:- import_module libs.trace_params.
 :- import_module mdbcomp.
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.prim_data.
@@ -41,15 +41,16 @@
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_foreign.
+:- import_module parse_tree.prog_type.
 
+:- import_module assoc_list.
 :- import_module bool.
 :- import_module cord.
+:- import_module counter.
 :- import_module list.
-:- import_module assoc_list.
 :- import_module map.
 :- import_module maybe.
 :- import_module set.
-:- import_module counter.
 :- import_module term.
 
 %-----------------------------------------------------------------------------%
@@ -225,6 +226,8 @@
 
                 % The code model of the procedure.
                 cproc_code_model        :: code_model,
+
+                cproc_eff_trace_level   :: eff_trace_level,
 
                 % The code for this procedure.
                 cproc_code              :: list(instruction),
@@ -1100,7 +1103,8 @@
             % Two consecutive stack slots for storing a double-precision float.
             % The number is the offset relative to one of the stack pointers
             % and represents the lower-numbered of two consecutive slots.
-            % As our stacks grow downward, the higher-number slot has the
+            % As our stacks grow upward, they are addressed relative to the
+            % stack pointer at the top, so the higher-numbered slot has the
             % lower address, and must be aligned for the target architecture.
             %
             % - stackvar(Slot), stackvar(Slot + 1)

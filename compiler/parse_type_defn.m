@@ -19,7 +19,7 @@
 
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.parse_types.
 :- import_module parse_tree.prog_data.
@@ -39,17 +39,14 @@
     % type-specific equality and comparison predicates for subtypes.
     % In such cases, we return a message about the error, but, by ignoring
     % the unexpected component, we can still return a meaningful type
-    % definition item. This is why we return both a maybe1(item_or_marker)
-    % and an updated list of error specs.
+    % definition item. We can return both using iom_item_and_specs.
     %
 :- pred parse_solver_type_defn_item(module_name::in, varset::in,
     list(term)::in, prog_context::in, item_seq_num::in,
-    maybe1(item_or_marker)::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
+    maybe1(item_or_marker)::out) is det.
 :- pred parse_type_defn_item(module_name::in, varset::in,
     list(term)::in, prog_context::in, item_seq_num::in, is_solver_type::in,
-    maybe1(item_or_marker)::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
+    maybe1(item_or_marker)::out) is det.
 
     % Parses the attributes in a "where" clause. It looks for and processes
     % only the attributes that can occur on foreign_type pragmas. This includes
@@ -68,7 +65,7 @@
     %
     % Exported to parse_pragma.m for use when parsing foreign type pragmas.
     %
-:- pred parse_type_defn_head(cord(format_component)::in,
+:- pred parse_type_defn_head(cord(format_piece)::in,
     module_name::in, varset::in, term::in,
     maybe2(sym_name, list(type_param))::out) is det.
 
@@ -93,19 +90,21 @@
 :- import_module one_or_more.
 :- import_module require.
 :- import_module set.
+:- import_module term_context.
+:- import_module term_int.
 :- import_module uint32.
 :- import_module unit.
 
 %---------------------------------------------------------------------------%
 
 parse_solver_type_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
-        MaybeIOM, !Specs) :-
+        MaybeIOM) :-
     ( if
         ArgTerms = [ArgTerm],
         ArgTerm = term.functor(term.atom("type"), SubArgTerms, SubContext)
     then
         parse_type_defn_item(ModuleName, VarSet, SubArgTerms,
-            SubContext, SeqNum, solver_type, MaybeIOM, !Specs)
+            SubContext, SeqNum, solver_type, MaybeIOM)
     else
         Pieces = [words("Error: the"), decl("solver"), words("keyword"),
             words("should be followed by a type definition."), nl],
@@ -115,7 +114,7 @@ parse_solver_type_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
     ).
 
 parse_type_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
-        IsSolverType, MaybeIOM, !Specs) :-
+        IsSolverType, MaybeIOM) :-
     ( if ArgTerms = [TypeDefnTerm] then
         ( if
             TypeDefnTerm = term.functor(term.atom(Name), TypeDefnArgTerms, _),
@@ -128,7 +127,7 @@ parse_type_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
             (
                 Name = "--->",
                 parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm,
-                    Context, SeqNum, IsSolverType, MaybeIOM, !Specs)
+                    Context, SeqNum, IsSolverType, MaybeIOM)
             ;
                 Name = "==",
                 parse_eqv_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm,
@@ -161,11 +160,10 @@ parse_type_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
     %
 :- pred parse_du_type_defn(module_name::in, varset::in, term::in, term::in,
     prog_context::in, item_seq_num::in, is_solver_type::in,
-    maybe1(item_or_marker)::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
+    maybe1(item_or_marker)::out) is det.
 
 parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
-        IsSolverType, MaybeIOM, !Specs) :-
+        IsSolverType, MaybeIOM) :-
     % XXX We should consider which errors should prevent us from returning
     % a type definition item, and which should not.
     (
@@ -199,7 +197,7 @@ parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
         parse_type_defn_head(ContextPieces, ModuleName, VarSet, HeadTerm,
             MaybeTypeCtorAndArgs),
         MaybeSuperType0 = ok1(not_a_subtype),
-        SuperTypeContext = term.dummy_context_init
+        SuperTypeContext = dummy_context
     ),
     du_type_rhs_ctors_and_where_terms(BodyTerm, CtorsTerm, MaybeWhereTerm),
     parse_maybe_exist_quant_constructors(ModuleName, VarSet, CtorsTerm,
@@ -241,7 +239,8 @@ parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
             % messages about TypeSymName being undefined. This is the case
             % e.g. with tests/invalid/subtype_user_compare.m.
             (
-                MaybeCanonical = canon
+                MaybeCanonical = canon,
+                RecoverableSpecs0 = []
             ;
                 MaybeCanonical = noncanon(_),
                 CanonTypeCtor = type_ctor(TypeSymName, list.length(Params)),
@@ -254,10 +253,11 @@ parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
                     words("from its supertype."), nl],
                 CanonSpec = simplest_spec($pred, severity_error,
                     phase_parse_tree_to_hlds, Context, CanonPieces),
-                !:Specs = [CanonSpec | !.Specs]
+                RecoverableSpecs0 = [CanonSpec]
             ),
             (
-                MaybeDirectArgIs = no
+                MaybeDirectArgIs = no,
+                RecoverableSpecs = RecoverableSpecs0
             ;
                 MaybeDirectArgIs = yes(_),
                 DirectArgTypeCtor =
@@ -270,7 +270,7 @@ parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
                     words("from its supertype."), nl],
                 DirectArgSpec = simplest_spec($pred, severity_error,
                     phase_parse_tree_to_hlds, Context, DirectArgPieces),
-                !:Specs = [DirectArgSpec | !.Specs]
+                RecoverableSpecs = [DirectArgSpec | RecoverableSpecs0]
             )
         ;
             MaybeSuperType = not_a_subtype,
@@ -284,7 +284,8 @@ parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
             ;
                 MaybeDirectArgIs = no,
                 ErrorSpecs = ErrorSpecs0
-            )
+            ),
+            RecoverableSpecs = []
         ),
         (
             ErrorSpecs = [],
@@ -292,7 +293,14 @@ parse_du_type_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
             ItemTypeDefn = item_type_defn_info(TypeSymName, Params, TypeDefn,
                 TypeVarSet, Context, SeqNum),
             Item = item_type_defn(ItemTypeDefn),
-            MaybeIOM = ok1(iom_item(Item))
+            (
+                RecoverableSpecs = [],
+                IOM = iom_item(Item)
+            ;
+                RecoverableSpecs = [_ | _],
+                IOM = iom_item_and_error_specs(Item, RecoverableSpecs)
+            ),
+            MaybeIOM = ok1(IOM)
         ;
             ErrorSpecs = [_ | _],
             MaybeIOM = error1(ErrorSpecs)
@@ -431,8 +439,8 @@ parse_constructor(ModuleName, VarSet, Ordinal, ExistQVars, Term,
             list.condense(ConstrainedTypeLists, ConstrainedTypes),
             % We compute ConstrainedQVars in this roundabout way to give it
             % the same ordering as ExistQVars. Also, the list returned
-            % by type_vars_list may contain duplicates.
-            type_vars_list(ConstrainedTypes, ConstrainedQVars0),
+            % by type_vars_in_types may contain duplicates.
+            type_vars_in_types(ConstrainedTypes, ConstrainedQVars0),
             list.delete_elems(ExistQVars, ConstrainedQVars0,
                 UnconstrainedQVars),
             list.delete_elems(ExistQVars, UnconstrainedQVars,
@@ -456,8 +464,8 @@ parse_constructor(ModuleName, VarSet, Ordinal, ExistQVars, Term,
             MainTerm = BeforeConstraintsTerm
         ),
         ContextPieces = cord.singleton(words("In constructor definition:")),
-        parse_implicitly_qualified_sym_name_and_args(ModuleName, MainTerm,
-            VarSet, ContextPieces, MaybeFunctorAndArgTerms),
+        parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+            ContextPieces, MainTerm, MaybeFunctorAndArgTerms),
         (
             MaybeFunctorAndArgTerms = error2(FAASpecs),
             Functor = unqualified(""),  % won't be used due to the other errors
@@ -520,8 +528,8 @@ convert_constructor_arg_list(ModuleName, VarSet, [Term | Terms])
         = MaybeConstructorArgs :-
     ( if Term = term.functor(term.atom("::"), [NameTerm, TypeTerm], _) then
         ContextPieces = cord.singleton(words("In field name:")),
-        parse_implicitly_qualified_sym_name_and_args(ModuleName, NameTerm,
-            VarSet, ContextPieces, MaybeSymNameAndArgs),
+        parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+            ContextPieces, NameTerm, MaybeSymNameAndArgs),
         (
             MaybeSymNameAndArgs = error2(Specs),
             MaybeConstructorArgs = error1(Specs)
@@ -580,7 +588,7 @@ convert_constructor_arg_list_2(ModuleName, VarSet, MaybeCtorFieldName,
     prog_context::in, list(error_spec)::in, list(error_spec)::out) is det.
 
 check_supertype_vars(Params, VarSet, SuperType, Context, !Specs) :-
-    type_vars(SuperType, VarsInSuperType0),
+    type_vars_in_type(SuperType, VarsInSuperType0),
     list.sort_and_remove_dups(VarsInSuperType0, VarsInSuperType),
     list.delete_elems(VarsInSuperType, Params, FreeVars),
     (
@@ -588,7 +596,7 @@ check_supertype_vars(Params, VarSet, SuperType, Context, !Specs) :-
     ;
         FreeVars = [_ | _],
         varset.coerce(VarSet, GenericVarSet),
-        FreeVarsStr = mercury_vars_to_name_only(GenericVarSet, FreeVars),
+        FreeVarsStr = mercury_vars_to_name_only_vs(GenericVarSet, FreeVars),
         Pieces = [words("Error: free type"),
             words(choose_number(FreeVars, "parameter", "parameters")),
             words(FreeVarsStr),
@@ -619,7 +627,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
         % existentially quantified, or occur in the head of the type.
 
         CtorArgTypes = list.map(func(C) = C ^ arg_type, CtorArgs),
-        type_vars_list(CtorArgTypes, VarsInCtorArgTypes0),
+        type_vars_in_types(CtorArgTypes, VarsInCtorArgTypes0),
         list.sort_and_remove_dups(VarsInCtorArgTypes0, VarsInCtorArgTypes),
         ExistQVarsParams = ExistQVars ++ Params,
         list.filter(list.contains(ExistQVarsParams), VarsInCtorArgTypes,
@@ -629,7 +637,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
         % There should be no duplicate names to remove.
         varset.coerce(VarSet, GenericVarSet),
         NotExistQOrParamVarsStr =
-            mercury_vars_to_name_only(GenericVarSet, NotExistQOrParamVars),
+            mercury_vars_to_name_only_vs(GenericVarSet, NotExistQOrParamVars),
         Pieces = [words("Error: free type"),
             words(choose_number(NotExistQOrParamVars,
                 "parameter", "parameters")),
@@ -652,7 +660,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
         set.to_sorted_list(ExistQParamsSet, ExistQParams),
         varset.coerce(VarSet, GenericVarSet),
         ExistQParamVarsStrs =
-            list.map(mercury_var_to_name_only(GenericVarSet), ExistQParams),
+            list.map(mercury_var_to_name_only_vs(GenericVarSet), ExistQParams),
         Pieces = [words("Error:"),
             words(choose_number(ExistQParams,
                 "type variable", "type variables"))] ++
@@ -678,7 +686,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
         % of the typeclasses mentioned in the constraints.
 
         CtorArgTypes = list.map(func(C) = C ^ arg_type, CtorArgs),
-        type_vars_list(CtorArgTypes, VarsInCtorArgTypes0),
+        type_vars_in_types(CtorArgTypes, VarsInCtorArgTypes0),
         list.sort_and_remove_dups(VarsInCtorArgTypes0, VarsInCtorArgTypes),
         constraint_list_get_tvars(Constraints, ConstraintTVars),
         list.filter(list.contains(VarsInCtorArgTypes ++ ConstraintTVars),
@@ -688,7 +696,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
         % There should be no duplicate names to remove.
         varset.coerce(VarSet, GenericVarSet),
         NotOccursExistQVarStrs =
-            list.map(mercury_var_to_name_only(GenericVarSet),
+            list.map(mercury_var_to_name_only_vs(GenericVarSet),
             NotOccursExistQVars),
         Pieces = [words("Error: the existentially quantified"),
             words(choose_number(NotOccursExistQVars,
@@ -708,7 +716,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
         ConstraintArgTypeLists =
             list.map(prog_constraint_get_arg_types, Constraints),
         list.condense(ConstraintArgTypeLists, ConstraintArgTypes),
-        type_vars_list(ConstraintArgTypes, VarsInCtorArgTypes0),
+        type_vars_in_types(ConstraintArgTypes, VarsInCtorArgTypes0),
         list.sort_and_remove_dups(VarsInCtorArgTypes0, VarsInCtorArgTypes),
         list.filter(list.contains(ExistQVars), VarsInCtorArgTypes,
             _ExistQArgTypes, NotExistQArgTypes),
@@ -716,7 +724,7 @@ process_du_ctors(Params, VarSet, BodyTerm, [Ctor | Ctors], !Specs) :-
     then
         varset.coerce(VarSet, GenericVarSet),
         NotExistQArgTypeStrs = list.map(
-            mercury_var_to_name_only(GenericVarSet), NotExistQArgTypes),
+            mercury_var_to_name_only_vs(GenericVarSet), NotExistQArgTypes),
         Pieces = [words("Error: the"),
             words(choose_number(NotExistQArgTypes,
                 "type variable", "type variables"))]
@@ -912,7 +920,7 @@ parse_where_type_is_abstract(ModuleName, VarSet, HeadTerm, BodyTerm,
         )
     then
         ( if Args = [Arg] then
-            ( if decimal_term_to_int(Arg, NumBits) then
+            ( if term_int.decimal_term_to_int(Arg, NumBits) then
                 TypeDefn0 = parse_tree_abstract_type(
                     abstract_type_fits_in_n_bits(NumBits)),
                 MaybeTypeDefn = ok1(TypeDefn0)
@@ -935,7 +943,7 @@ parse_where_type_is_abstract(ModuleName, VarSet, HeadTerm, BodyTerm,
         AttrName = "type_is_abstract_subtype"
     then
         ( if Args = [Arg] then
-            ( if parse_unqualified_name_and_arity(Arg, SymName, Arity) then
+            ( if parse_sym_name_and_arity(Arg, SymName, Arity) then
                 TypeCtor = type_ctor(SymName, Arity),
                 TypeDefn0 = parse_tree_abstract_type(
                     abstract_subtype(TypeCtor)),
@@ -1286,7 +1294,7 @@ parse_where_pred_is(ModuleName, VarSet, Term) = MaybeSymName :-
     parse_implicitly_qualified_symbol_name(ModuleName, VarSet, Term,
         MaybeSymName).
 
-:- func parse_where_inst_is(module_name, varset, cord(format_component), term)
+:- func parse_where_inst_is(module_name, varset, cord(format_piece), term)
     = maybe1(mer_inst).
 
 parse_where_inst_is(_ModuleName, VarSet, ContextPieces, Term) = MaybeInst :-
@@ -1382,11 +1390,15 @@ parse_where_direct_arg_is(ModuleName, VarSet, Term) = MaybeDirectArgCtors :-
     maybe1(sym_name_arity)::out) is det.
 
 parse_direct_arg_functor(ModuleName, VarSet, Term, MaybeFunctor) :-
-    ( if
-        parse_implicitly_qualified_name_and_arity(ModuleName, Term,
-            Name, Arity)
-    then
-        MaybeFunctor = ok1(sym_name_arity(Name, Arity))
+    ( if parse_sym_name_and_arity(Term, SymName0, Arity) then
+        implicitly_qualify_sym_name(ModuleName, Term, SymName0, MaybeSymName),
+        (
+            MaybeSymName = ok1(SymName),
+            MaybeFunctor = ok1(sym_name_arity(SymName, Arity))
+        ;
+            MaybeSymName = error1(Specs),
+            MaybeFunctor = error1(Specs)
+        )
     else
         TermStr = describe_error_term(VarSet, Term),
         Pieces = [words("Error: expected functor name/arity for"),
@@ -1602,8 +1614,8 @@ parse_type_defn_head(ContextPieces, ModuleName, VarSet, Term,
         MaybeTypeCtorAndArgs = error2([Spec])
     ;
         Term = term.functor(_Functor, _ArgTerms, Context),
-        parse_implicitly_qualified_sym_name_and_args(ModuleName, Term, VarSet,
-            ContextPieces, MaybeSymNameArgs),
+        parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+            ContextPieces, Term, MaybeSymNameArgs),
         (
             MaybeSymNameArgs = error2(Specs),
             MaybeTypeCtorAndArgs = error2(Specs)
@@ -1640,7 +1652,7 @@ parse_type_defn_head(ContextPieces, ModuleName, VarSet, Term,
                     ;
                         DupParamVars = [_ | _],
                         DupParamVarNames = list.map(
-                            mercury_var_to_name_only(VarSet), DupParamVars),
+                            mercury_var_to_name_only_vs(VarSet), DupParamVars),
                         Params = choose_number(DupParamVars,
                             "the parameter", "the parameters"),
                         IsOrAre = is_or_are(DupParamVars),
@@ -1723,9 +1735,8 @@ check_user_type_name(SymName, Context, NameSpecs) :-
 
 check_no_free_body_vars(TVarSet, ParamTVars, BodyType, BodyContext, Specs) :-
     % Check that all the variables in the body occur in the head.
-    type_vars(BodyType, BodyTVars),
+    set_of_type_vars_in_type(BodyType, BodyTVarSet),
     set.list_to_set(ParamTVars, ParamTVarSet),
-    set.list_to_set(BodyTVars, BodyTVarSet),
     set.difference(BodyTVarSet, ParamTVarSet, OnlyBodyTVarSet),
     set.to_sorted_list(OnlyBodyTVarSet, OnlyBodyTVars),
     (
@@ -1733,7 +1744,7 @@ check_no_free_body_vars(TVarSet, ParamTVars, BodyType, BodyContext, Specs) :-
         Specs = []
     ;
         OnlyBodyTVars = [_ | _],
-        OnlyBodyTVarNames = list.map(mercury_var_to_name_only(TVarSet),
+        OnlyBodyTVarNames = list.map(mercury_var_to_name_only_vs(TVarSet),
             OnlyBodyTVars),
         VarWord = choose_number(OnlyBodyTVars,
             "the type variable", "the type variables"),
@@ -1750,7 +1761,7 @@ check_no_free_body_vars(TVarSet, ParamTVars, BodyType, BodyContext, Specs) :-
 
 %-----------------------------------------------------------------------------e
 
-:- pred parse_supertype(varset::in, cord(format_component)::in, term::in,
+:- pred parse_supertype(varset::in, cord(format_piece)::in, term::in,
     maybe1(maybe_subtype)::out) is det.
 
 parse_supertype(VarSet, ContextPieces, Term, Result) :-

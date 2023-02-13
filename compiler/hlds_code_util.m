@@ -18,8 +18,8 @@
 
 :- import_module hlds.hlds_class.
 :- import_module hlds.hlds_data.
-:- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_module.
+:- import_module hlds.hlds_pred.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 
@@ -33,12 +33,6 @@
     %
 :- func cons_id_to_tag(module_info, cons_id) = cons_tag.
 
-    % Given a list of types, mangle the names so into a string which
-    % identifies them. The types must all have their top level functor
-    % bound, with any arguments free variables.
-    %
-:- pred make_instance_string(list(mer_type)::in, string::out) is det.
-
     % Given a type_ctor, return the cons_id that represents its type_ctor_info.
     %
 :- func type_ctor_info_cons_id(type_ctor) = cons_id.
@@ -46,14 +40,14 @@
     % Given a type_ctor, return the cons_id that represents its type_ctor_info.
     %
 :- func base_typeclass_info_cons_id(instance_table,
-    prog_constraint, int, list(mer_type)) = cons_id.
+    prog_constraint, instance_id, list(mer_type)) = cons_id.
 
 %-----------------------------------------------------------------------------%
 
     % Find the procedure with argmodes which match the ones we want.
     %
-:- pred get_procedure_matching_argmodes(assoc_list(proc_id, proc_info)::in,
-    list(mer_mode)::in, module_info::in, proc_id::out) is semidet.
+:- pred get_procedure_matching_argmodes(module_info::in, proc_table::in,
+    list(mer_mode)::in, proc_id::out, proc_info::out) is semidet.
 
     % Find the procedure with declared argmodes which match the ones we want.
     % If there was no mode declaration, then use the inferred argmodes.
@@ -70,12 +64,12 @@
 :- import_module check_hlds.
 :- import_module check_hlds.mode_util.
 :- import_module check_hlds.type_util.
+:- import_module hlds.pred_name.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.prog_mode.
-:- import_module parse_tree.prog_type.
 
 :- import_module char.
 :- import_module map.
@@ -83,7 +77,6 @@
 :- import_module pair.
 :- import_module require.
 :- import_module set.
-:- import_module string.
 
 %-----------------------------------------------------------------------------%
 
@@ -202,33 +195,16 @@ cons_id_to_tag(ModuleInfo, ConsId) = ConsTag:-
 
 %-----------------------------------------------------------------------------%
 
-make_instance_string(InstanceTypes, InstanceString) :-
-    % Note that for historical reasons, builtin types are treated as being
-    % unqualified (`int') rather than being qualified (`builtin.int')
-    % at this point.
-    list.map(instance_type_ctor_to_string, InstanceTypes, InstanceStrings),
-    string.append_list(InstanceStrings, InstanceString).
-
-:- pred instance_type_ctor_to_string(mer_type::in, string::out) is det.
-
-instance_type_ctor_to_string(Type, String) :-
-    type_to_ctor_det(Type, TypeCtor),
-    TypeCtor = type_ctor(TypeName, TypeArity),
-    TypeNameString = sym_name_to_string_sep(TypeName, "__"),
-    string.int_to_string(TypeArity, TypeArityString),
-    String = TypeNameString ++ "__arity" ++ TypeArityString ++ "__".
-
-%-----------------------------------------------------------------------------%
-
 type_ctor_info_cons_id(TypeCtor) = ConsId :-
     type_ctor_module_name_arity(TypeCtor, ModuleName, Name, Arity),
     ConsId = type_ctor_info_const(ModuleName, Name, Arity).
 
-base_typeclass_info_cons_id(InstanceTable, Constraint, InstanceNum,
+base_typeclass_info_cons_id(InstanceTable, Constraint, InstanceId,
         InstanceTypes) = ConsId :-
     Constraint = constraint(ClassName, ConstraintArgTypes),
     ClassId = class_id(ClassName, list.length(ConstraintArgTypes)),
     map.lookup(InstanceTable, ClassId, InstanceList),
+    InstanceId = instance_id(InstanceNum),
     list.det_index1(InstanceList, InstanceNum, InstanceDefn),
     InstanceModuleName = InstanceDefn ^ instdefn_module,
     make_instance_string(InstanceTypes, InstanceString),
@@ -237,33 +213,40 @@ base_typeclass_info_cons_id(InstanceTable, Constraint, InstanceNum,
 
 %----------------------------------------------------------------------------%
 
-get_procedure_matching_argmodes(Procs, Modes0, ModuleInfo, ProcId) :-
+get_procedure_matching_argmodes(ModuleInfo, ProcTable, Modes0,
+        MatchingProcId, MatchingProcInfo) :-
     list.map(constrain_inst_vars_in_mode, Modes0, Modes),
-    get_procedure_matching_argmodes_2(Procs, Modes, ModuleInfo, ProcId).
+    map.to_assoc_list(ProcTable, ProcPairs),
+    get_procedure_matching_argmodes_loop(ModuleInfo, Modes, ProcPairs,
+        MatchingProcId, MatchingProcInfo).
 
-:- pred get_procedure_matching_argmodes_2(assoc_list(proc_id, proc_info)::in,
-    list(mer_mode)::in, module_info::in, proc_id::out) is semidet.
+:- pred get_procedure_matching_argmodes_loop(module_info::in,
+    list(mer_mode)::in, assoc_list(proc_id, proc_info)::in,
+    proc_id::out, proc_info::out) is semidet.
 
-get_procedure_matching_argmodes_2([P | Procs], Modes, ModuleInfo, OurProcId) :-
-    P = ProcId - ProcInfo,
+get_procedure_matching_argmodes_loop(ModuleInfo, Modes, [ProcPair | ProcPairs],
+        MatchingProcId, MatchingProcInfo) :-
+    ProcPair = ProcId - ProcInfo,
     proc_info_get_argmodes(ProcInfo, ArgModes),
-    ( if mode_list_matches(Modes, ArgModes, ModuleInfo) then
-        OurProcId = ProcId
+    ( if mode_list_matches(ModuleInfo, Modes, ArgModes) then
+        MatchingProcId = ProcId,
+        MatchingProcInfo = ProcInfo
     else
-        get_procedure_matching_argmodes_2(Procs, Modes, ModuleInfo, OurProcId)
+        get_procedure_matching_argmodes_loop(ModuleInfo, Modes, ProcPairs,
+            MatchingProcId, MatchingProcInfo)
     ).
 
-:- pred mode_list_matches(list(mer_mode)::in, list(mer_mode)::in,
-    module_info::in) is semidet.
+:- pred mode_list_matches(module_info::in,
+    list(mer_mode)::in, list(mer_mode)::in) is semidet.
 
-mode_list_matches([], [], _).
-mode_list_matches([Mode1 | Modes1], [Mode2 | Modes2], ModuleInfo) :-
+mode_list_matches(_, [], []).
+mode_list_matches(ModuleInfo, [Mode1 | Modes1], [Mode2 | Modes2]) :-
     % Use mode_get_insts_semidet instead of mode_get_insts to avoid
     % aborting if there are undefined modes.
     % XXX
     mode_get_insts_semidet(ModuleInfo, Mode1, Inst1, Inst2),
     mode_get_insts_semidet(ModuleInfo, Mode2, Inst1, Inst2),
-    mode_list_matches(Modes1, Modes2, ModuleInfo).
+    mode_list_matches(ModuleInfo, Modes1, Modes2).
 
 %----------------------------------------------------------------------------%
 %----------------------------------------------------------------------------%

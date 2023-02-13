@@ -17,8 +17,8 @@
 :- module ml_backend.ml_accurate_gc.
 :- interface.
 
-:- import_module ml_backend.mlds.
 :- import_module ml_backend.ml_gen_info.
+:- import_module ml_backend.mlds.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 
@@ -78,7 +78,6 @@
 
 :- implementation.
 
-:- import_module backend_libs.
 :- import_module check_hlds.
 :- import_module check_hlds.polymorphism_type_info.
 :- import_module hlds.
@@ -88,7 +87,6 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module mdbcomp.
@@ -101,6 +99,7 @@
 :- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module cord.
@@ -324,7 +323,7 @@ ml_gen_gc_trace_code(VarName, DeclType, ActualType, Context, GC_TraceCode,
         MLDS_TypeInfoStmt0, MLDS_TypeInfoStmt, NewObjLocalVarDefns),
 
     % Build MLDS code to trace the variable.
-    ml_gen_var(!.Info, TypeInfoVar, TypeInfoLval),
+    ml_gen_var_direct(!.Info, TypeInfoVar, TypeInfoLval),
     ml_gen_trace_var(!.Info, VarName, DeclType, ml_lval(TypeInfoLval), Context,
         MLDS_TraceStmt),
 
@@ -336,12 +335,12 @@ ml_gen_gc_trace_code(VarName, DeclType, ActualType, Context, GC_TraceCode,
     % get put in the GC frame, rather than these declarations, which will get
     % ignored.
     % XXX This is not a very robust way of doing things...
-    ml_gen_info_get_varset(!.Info, VarSet),
-    ml_gen_info_get_var_types(!.Info, VarTypes),
+    ml_gen_info_get_var_table(!.Info, VarTable),
     GenLocalVarDecl =
         ( func(Var) = VarDefn :-
-            LocalVarName = ml_gen_local_var_name(VarSet, Var),
-            lookup_var_type(VarTypes, Var, LocalVarType),
+            lookup_var_entry(VarTable, Var, Entry),
+            LocalVarName = ml_gen_local_var_name(Var, Entry),
+            LocalVarType = Entry ^ vte_type,
             VarDefn = ml_gen_mlds_var_decl(LocalVarName,
                 mercury_type_to_mlds_type(ModuleInfo, LocalVarType),
                 gc_no_stmt, Context)
@@ -370,8 +369,8 @@ ml_gen_trace_var(Info, VarName, Type, TypeInfoRval, Context, TraceStmt) :-
 
     % Generate the address of `private_builtin.gc_trace/1#0'.
     PredName = "gc_trace",
-    PredOrigArity = 1,
-    PredLabel = mlds_user_pred_label(pf_predicate, no, PredName, PredOrigArity,
+    PredFormArity = pred_form_arity(1),
+    PredLabel = mlds_user_pred_label(pf_predicate, no, PredName, PredFormArity,
         model_det, no),
     ProcId = hlds_pred.initial_proc_id,
     PredModule = mercury_private_builtin_module,
@@ -403,17 +402,15 @@ ml_gen_make_type_info_var(Type, Context, TypeInfoVar, TypeInfoGoals, !Info) :-
     ml_gen_info_get_pred_proc_id(!.Info, PredProcId),
     module_info_pred_proc_info(ModuleInfo0, PredProcId, PredInfo0, ProcInfo0),
     % Generate the HLDS code to create the type_infos.
-    polymorphism_make_type_info_var_raw(Type, Context,
+    polymorphism_make_type_info_var_mi(Type, Context,
         TypeInfoVar, TypeInfoGoals, ModuleInfo0, ModuleInfo1,
         PredInfo0, PredInfo, ProcInfo0, ProcInfo),
     module_info_set_pred_proc_info(PredProcId, PredInfo, ProcInfo,
         ModuleInfo1, ModuleInfo),
     % Save the new information back in the ml_gen_info.
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     ml_gen_info_set_module_info(ModuleInfo, !Info),
-    ml_gen_info_set_varset(VarSet, !Info),
-    ml_gen_info_set_var_types(VarTypes, !Info).
+    ml_gen_info_set_var_table(VarTable, !Info).
 
 %---------------------------------------------------------------------------%
 

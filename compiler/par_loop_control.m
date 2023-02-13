@@ -1,11 +1,11 @@
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % Copyright (C) 2011-2012 The University of Melbourne.
 % Copyright (C) 2015, 2017 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % File: par_loop_control.m.
 % Author: pbone.
@@ -80,7 +80,7 @@
 % 4. Multiple parallel conjunctions may exist within the body, but due to rule
 %    3, only one of them may contain a recursive call.
 %
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- module transform_hlds.par_loop_control.
 :- interface.
@@ -88,16 +88,18 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred maybe_par_loop_control_module(module_info::in, module_info::out)
     is det.
 
-%----------------------------------------------------------------------------%
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- implementation.
 
+:- import_module check_hlds.
+:- import_module check_hlds.type_util.
 :- import_module hlds.goal_path.
 :- import_module hlds.goal_util.
 :- import_module hlds.hlds_dependency_graph.
@@ -106,21 +108,24 @@
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.instmap.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
 :- import_module libs.options.
 :- import_module mdbcomp.
+:- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
+:- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.prog_data.
-:- import_module parse_tree.prog_util.
+:- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module digraph.
@@ -133,7 +138,7 @@
 :- import_module string.
 :- import_module varset.
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 maybe_par_loop_control_module(!ModuleInfo) :-
     module_info_rebuild_dependency_info(!ModuleInfo, DepInfo),
@@ -150,8 +155,8 @@ maybe_par_loop_control_proc(DepInfo, PredProcId, !ProcInfo, !ModuleInfo) :-
         proc_info_get_goal(!.ProcInfo, Body0),
 
         % Re-calculate goal ids.
-        proc_info_get_vartypes(!.ProcInfo, VarTypes),
-        fill_goal_id_slots_in_proc_body(!.ModuleInfo, VarTypes,
+        proc_info_get_var_table(!.ProcInfo, VarTable),
+        fill_goal_id_slots_in_proc_body(!.ModuleInfo, VarTable,
             ContainingGoalMap, Body0, Body),
         proc_info_set_goal(Body, !ProcInfo),
         goal_get_loop_control_par_conjs(Body, PredProcId,
@@ -175,7 +180,7 @@ maybe_par_loop_control_proc(DepInfo, PredProcId, !ProcInfo, !ModuleInfo) :-
         true
     ).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Loop control is applicable if the procedure contains a parallel
     % conjunction with exactly two conjuncts whose right conjunct contains a
@@ -214,7 +219,7 @@ proc_is_self_recursive(DepInfo, PredProcId) :-
     digraph.tc(DepGraphWOSelfEdge, TCDepGraphWOSelfEdge),
     not digraph.is_edge(TCDepGraphWOSelfEdge, SelfKey, SelfKey).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- type seen_usable_recursion
     --->    have_not_seen_recursive_call
@@ -564,34 +569,33 @@ merge_loop_control_par_conjs_between_branches(
         Seen = seen_usable_recursion_in_par_conj(GoalIds)
     ).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred create_inner_proc(list(goal_id)::in, pred_proc_id::in, proc_info::in,
     containing_goal_map::in, pred_proc_id::out, sym_name::out,
     module_info::in, module_info::out) is det.
 
 create_inner_proc(RecParConjIds, OldPredProcId, OldProcInfo,
-        ContainingGoalMap, PredProcId, PredSym, !ModuleInfo) :-
+        ContainingGoalMap, PredProcId, TransformedSymName, !ModuleInfo) :-
     proc(OldPredId, OldProcId) = OldPredProcId,
     module_info_pred_info(!.ModuleInfo, OldPredId, OldPredInfo),
 
     % Gather data to build the new pred/proc.
     module_info_get_name(!.ModuleInfo, ModuleName),
     PredOrFunc = pred_info_is_pred_or_func(OldPredInfo),
-    make_pred_name(ModuleName, "LoopControl", yes(PredOrFunc),
-        pred_info_name(OldPredInfo), newpred_parallel_loop_control, PredSym0),
+    Transform = tn_par_loop_control(PredOrFunc, proc_id_to_int(OldProcId)),
+    make_transformed_pred_name(pred_info_name(OldPredInfo), Transform,
+        TransformedName),
     % The mode number is included because we want to avoid the creation of
     % more than one predicate with the same name if more than one mode of
     % a predicate is parallelised. Since the names of e.g. deep profiling
     % proc_static structures are derived from the names of predicates,
     % duplicate predicate names lead to duplicate global variable names
     % and hence to link errors.
-    proc_id_to_int(OldProcId, OldProcInt),
-    add_sym_name_suffix(PredSym0, "_" ++ int_to_string(OldProcInt), PredSym),
     pred_info_get_context(OldPredInfo, Context),
     pred_info_get_origin(OldPredInfo, OldOrigin),
-    Origin = origin_transformed(transform_parallel_loop_control, OldOrigin,
-        OldPredId),
+    Origin = origin_proc_transform(proc_transform_par_loop_ctrl, OldOrigin,
+        OldPredId, OldProcId),
     some [!Markers] (
         init_markers(!:Markers),
         add_marker(marker_is_impure, !Markers),
@@ -603,12 +607,12 @@ create_inner_proc(RecParConjIds, OldPredProcId, OldProcInfo,
     pred_info_get_class_context(OldPredInfo, ClassConstraints),
     pred_info_get_arg_types(OldPredInfo, ArgTypes0),
 
-    some [!PredInfo, !Body, !VarSet, !VarTypes] (
+    some [!PredInfo, !Body, !VarTable] (
         % Construct the pred info structure. We initially construct it with
         % the old proc info which will be replaced below.
         GoalType = goal_not_for_promise(np_goal_type_none),
-        pred_info_create(ModuleName, PredSym, PredOrFunc, Context, Origin,
-            pred_status(status_local), Markers, ArgTypes0, TypeVarSet,
+        pred_info_create(PredOrFunc, ModuleName, TransformedName, Context,
+            Origin, pred_status(status_local), Markers, ArgTypes0, TypeVarSet,
             ExistQVars, ClassConstraints, set.init, map.init, GoalType,
             OldProcInfo, ProcId, !:PredInfo),
 
@@ -625,22 +629,22 @@ create_inner_proc(RecParConjIds, OldPredProcId, OldProcInfo,
         % in the body.
         proc_info_get_argmodes(OldProcInfo, ArgModes0),
         proc_info_get_headvars(OldProcInfo, HeadVars0),
-        proc_info_get_varset(OldProcInfo, !:VarSet),
-        proc_info_get_vartypes(OldProcInfo, !:VarTypes),
+        proc_info_get_var_table(OldProcInfo, !:VarTable),
         proc_info_get_goal(OldProcInfo, !:Body),
 
-        varset.new_named_var("LC", LCVar, !VarSet),
-        add_var_type(LCVar, loop_control_var_type, !VarTypes),
+        LCVarEntry = vte("LC", loop_control_var_type, is_not_dummy_type),
+        add_var_entry(LCVarEntry, LCVar, !VarTable),
         should_preserve_tail_recursion(!.ModuleInfo, PreserveTailRecursion),
         get_lc_wait_free_slot_proc(!.ModuleInfo, WaitFreeSlotProc),
         get_lc_join_and_terminate_proc(!.ModuleInfo, JoinAndTerminateProc),
 
+        TransformedSymName = qualified(ModuleName, TransformedName),
         Info = loop_control_info(!.ModuleInfo, LCVar, OldPredProcId,
-            PredProcId, PredSym, PreserveTailRecursion, WaitFreeSlotProc,
-            lc_wait_free_slot_name, JoinAndTerminateProc,
-            lc_join_and_terminate_name),
+            PredProcId, TransformedSymName, PreserveTailRecursion,
+            WaitFreeSlotProc, lc_wait_free_slot_sym_name,
+            JoinAndTerminateProc, lc_join_and_terminate_sym_name),
         goal_loop_control_all_recursive_paths(Info, RecParConjIds,
-            ContainingGoalMap, !Body, !VarSet, !VarTypes),
+            ContainingGoalMap, !Body, !VarTable),
 
         % Fixup the remaining recursive calls, and add barriers in the base
         % cases.
@@ -657,7 +661,7 @@ create_inner_proc(RecParConjIds, OldPredProcId, OldProcInfo,
         proc_info_get_inst_varset(OldProcInfo, InstVarSet),
         proc_info_get_rtti_varmaps(OldProcInfo, RttiVarMaps),
         proc_info_get_inferred_determinism(OldProcInfo, Detism),
-        proc_info_create(Context, SeqNum, !.VarSet, !.VarTypes, HeadVars,
+        proc_info_create(Context, SeqNum, !.VarTable, HeadVars,
             InstVarSet, ArgModes, detism_decl_none, Detism, !.Body,
             RttiVarMaps, address_is_not_taken, has_parallel_conj, map.init,
             ProcInfo),
@@ -711,26 +715,25 @@ should_preserve_tail_recursion(ModuleInfo, PreserveTailRecursion) :-
 
 :- pred goal_loop_control_all_recursive_paths(loop_control_info::in,
     list(goal_id)::in, containing_goal_map::in, hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 goal_loop_control_all_recursive_paths(Info, GoalIds, ContainingGoalMap, !Goal,
-        !VarSet, !VarTypes) :-
+        !VarTable) :-
     GoalPaths = list.map(goal_id_to_forward_path(ContainingGoalMap), GoalIds),
-    list.foldl3(goal_loop_control_one_recursive_path(Info,
+    list.foldl2(goal_loop_control_one_recursive_path(Info,
             goal_is_last_goal_on_path),
-        GoalPaths, !Goal, !VarSet, !VarTypes).
+        GoalPaths, !Goal, !VarTable).
 
 :- pred goal_loop_control_one_recursive_path(loop_control_info::in,
     goal_is_last_goal_on_path::in, forward_goal_path::in,
-    hlds_goal::in, hlds_goal::out, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out) is det.
+    hlds_goal::in, hlds_goal::out, var_table::in, var_table::out) is det.
 
-goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
-        !VarSet, !VarTypes) :-
+goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0,
+        !Goal, !VarTable) :-
     !.Goal = hlds_goal(GoalExpr0, GoalInfo),
     ( if goal_path_remove_first(GoalPath0, GoalPath, Step) then
-        format("Couldn't follow goal path step: \"%s\"", [s(string(Step))],
-            ErrorString),
+        string.format("Couldn't follow goal path step: \"%s\"",
+            [s(string(Step))], ErrorString),
         (
             Step = step_conj(N),
             ( if
@@ -749,7 +752,7 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
                     IsLastGoalConj = IsLastGoal
                 ),
                 goal_loop_control_one_recursive_path(Info, IsLastGoalConj,
-                    GoalPath, Conj0, Conj, !VarSet, !VarTypes),
+                    GoalPath, Conj0, Conj, !VarTable),
                 det_replace_nth(Conjs0, N, Conj, Conjs),
                 GoalExpr = conj(plain_conj, Conjs)
             else
@@ -763,7 +766,7 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
             then
                 Goal0 = Case0 ^ case_goal,
                 goal_loop_control_one_recursive_path(Info, IsLastGoal,
-                    GoalPath, Goal0, Goal, !VarSet, !VarTypes),
+                    GoalPath, Goal0, Goal, !VarTable),
                 Case = Case0 ^ case_goal := Goal,
                 det_replace_nth(Cases0, N, Case, Cases),
                 GoalExpr = switch(Var, CanFail, Cases)
@@ -774,7 +777,7 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
             Step = step_ite_then,
             ( if GoalExpr0 = if_then_else(Vars, Cond, Then0, Else) then
                 goal_loop_control_one_recursive_path(Info, IsLastGoal,
-                    GoalPath, Then0, Then, !VarSet, !VarTypes),
+                    GoalPath, Then0, Then, !VarTable),
                 GoalExpr = if_then_else(Vars, Cond, Then, Else)
             else
                 unexpected($pred, ErrorString)
@@ -783,7 +786,7 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
             Step = step_ite_else,
             ( if GoalExpr0 = if_then_else(Vars, Cond, Then, Else0) then
                 goal_loop_control_one_recursive_path(Info, IsLastGoal,
-                    GoalPath, Else0, Else, !VarSet, !VarTypes),
+                    GoalPath, Else0, Else, !VarTable),
                 GoalExpr = if_then_else(Vars, Cond, Then, Else)
             else
                 unexpected($pred, ErrorString)
@@ -792,7 +795,7 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
             Step = step_scope(_),
             ( if GoalExpr0 = scope(Reason, SubGoal0) then
                 goal_loop_control_one_recursive_path(Info, IsLastGoal,
-                    GoalPath, SubGoal0, SubGoal, !VarSet, !VarTypes),
+                    GoalPath, SubGoal0, SubGoal, !VarTable),
                 GoalExpr = scope(Reason, SubGoal)
             else
                 unexpected($pred, ErrorString)
@@ -814,8 +817,8 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
         fixup_goal_info(Info, !Goal)
     else
         ( if GoalExpr0 = conj(parallel_conj, Conjs) then
-            par_conj_loop_control(Info, Conjs, IsLastGoal, GoalInfo, !:Goal,
-                !VarSet, !VarTypes)
+            par_conj_loop_control(Info, Conjs, IsLastGoal, GoalInfo,
+                !:Goal, !VarTable)
         else
             unexpected($pred, "expected parallel conjunction")
         )
@@ -823,10 +826,10 @@ goal_loop_control_one_recursive_path(Info, IsLastGoal, GoalPath0, !Goal,
 
 :- pred par_conj_loop_control(loop_control_info::in, list(hlds_goal)::in,
     goal_is_last_goal_on_path::in, hlds_goal_info::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
-par_conj_loop_control(Info, Conjuncts0, IsLastGoal, GoalInfo, Goal, !VarSet,
-        !VarTypes) :-
+par_conj_loop_control(Info, Conjuncts0, IsLastGoal, GoalInfo, Goal,
+        !VarTable) :-
     list.det_split_last(Conjuncts0, EarlierConjuncts0, LastConjunct0),
     % Re-write the recursive call in the last conjunct.
     goal_rewrite_recursive_call(Info, IsLastGoal, LastConjunct0, LastConjunct,
@@ -835,7 +838,7 @@ par_conj_loop_control(Info, Conjuncts0, IsLastGoal, GoalInfo, Goal, !VarSet,
 
     % Process the remaining conjuncts.
     rewrite_nonrecursive_par_conjuncts(Info, UseParentStack,
-        EarlierConjuncts0, EarlierConjuncts, !VarSet, !VarTypes),
+        EarlierConjuncts0, EarlierConjuncts, !VarTable),
     Conjuncts = EarlierConjuncts ++ LastConjGoals,
     % XXX The point of calling create_conj_from_list is that it sets up
     % the goal_info of Goal0 appropriately. Why call it if we then immediately
@@ -848,14 +851,13 @@ par_conj_loop_control(Info, Conjuncts0, IsLastGoal, GoalInfo, Goal, !VarSet,
     %
 :- pred rewrite_nonrecursive_par_conjuncts(loop_control_info::in,
     lc_use_parent_stack::in, list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
-rewrite_nonrecursive_par_conjuncts(_, _, [], [], !VarSet, !VarTypes).
+rewrite_nonrecursive_par_conjuncts(_, _, [], [], !VarTable).
 rewrite_nonrecursive_par_conjuncts(Info, UseParentStack,
-        [Conjunct0 | Conjuncts0], Goals, !VarSet, !VarTypes) :-
+        [Conjunct0 | Conjuncts0], Goals, !VarTable) :-
     % Create the "get free slot" call.
-    create_get_free_slot_goal(Info, LCSVar, GetFreeSlotGoal,
-        !VarSet, !VarTypes),
+    create_get_free_slot_goal(Info, LCSVar, GetFreeSlotGoal, !VarTable),
 
     % Add a join_and_terminate goal to the end of Conjunct0 forming Conjunct.
     create_join_and_terminate_goal(Info, LCVar, LCSVar, JoinAndTerminateGoal),
@@ -879,7 +881,7 @@ rewrite_nonrecursive_par_conjuncts(Info, UseParentStack,
     ScopeGoal = hlds_goal(ScopeGoalExpr, ScopeGoalInfo),
 
     rewrite_nonrecursive_par_conjuncts(Info, UseParentStack, Conjuncts0,
-        TailGoals, !VarSet, !VarTypes),
+        TailGoals, !VarTable),
     Goals = [GetFreeSlotGoal, ScopeGoal | TailGoals].
 
     % Rewrite any recursive calls in this goal.
@@ -1067,7 +1069,7 @@ combine_use_parent_stack(lc_create_frame_on_child_stack,
 combine_use_parent_stack(lc_create_frame_on_child_stack,
     lc_create_frame_on_child_stack, lc_create_frame_on_child_stack).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % This predicate does two things:
     %
@@ -1244,15 +1246,14 @@ case_update_non_loop_control_paths(Info, RecParConjIds, !Case,
         !Case ^ case_goal := !.Goal
     ).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred create_get_free_slot_goal(loop_control_info::in, prog_var::out,
-    hlds_goal::out, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out) is det.
+    hlds_goal::out, var_table::in, var_table::out) is det.
 
-create_get_free_slot_goal(Info, LCSVar, Goal, !VarSet, !VarTypes) :-
-    varset.new_named_var("LCS", LCSVar, !VarSet),
-    add_var_type(LCSVar, loop_control_slot_var_type, !VarTypes),
+create_get_free_slot_goal(Info, LCSVar, Goal, !VarTable) :-
+    LCSVarEntry = vte("LCS", loop_control_slot_var_type, is_not_dummy_type),
+    add_var_entry(LCSVarEntry, LCSVar, !VarTable),
     LCVar = Info ^ lci_lc_var,
     proc(PredId, ProcId) = Info ^ lci_wait_free_slot_proc,
     SymName = Info ^ lci_wait_free_slot_proc_name,
@@ -1264,24 +1265,23 @@ create_get_free_slot_goal(Info, LCSVar, Goal, !VarSet, !VarTypes) :-
     GoalInfo = impure_init_goal_info(NonLocals, InstmapDelta, detism_det),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred create_create_loop_control_goal(module_info::in, prog_var::in,
-    prog_var::out, hlds_goal::out, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out) is det.
+    prog_var::out, hlds_goal::out, var_table::in, var_table::out) is det.
 
 create_create_loop_control_goal(ModuleInfo, NumContextsVar, LCVar, Goal,
-        !VarSet, !VarTypes) :-
-    varset.new_named_var("LC", LCVar, !VarSet),
-    add_var_type(LCVar, loop_control_var_type, !VarTypes),
+        !VarTable) :-
+    LCVarEntry = vte("LC", loop_control_var_type, is_not_dummy_type),
+    add_var_entry(LCVarEntry, LCVar, !VarTable),
     get_lc_create_proc(ModuleInfo, LCCreatePredId, LCCreateProcId),
     GoalExpr = plain_call(LCCreatePredId, LCCreateProcId,
-        [NumContextsVar, LCVar], not_builtin, no, lc_create_name),
+        [NumContextsVar, LCVar], not_builtin, no, lc_create_sym_name),
     goal_info_init(set_of_var.list_to_set([NumContextsVar, LCVar]),
         instmap_delta_bind_var(LCVar), detism_det, purity_pure, GoalInfo),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred create_join_and_terminate_goal(loop_control_info::in, prog_var::in,
     prog_var::in, hlds_goal::out) is det.
@@ -1297,7 +1297,7 @@ create_join_and_terminate_goal(Info, LCVar, LCSVar, Goal) :-
     GoalInfo = impure_init_goal_info(NonLocals, InstmapDelta, detism_det),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred create_finish_loop_control_goal(loop_control_info::in, hlds_goal::out)
     is det.
@@ -1307,13 +1307,13 @@ create_finish_loop_control_goal(Info, Goal) :-
     LCVar = Info ^ lci_lc_var,
 
     GoalExpr = plain_call(PredId, ProcId, [LCVar], not_builtin, maybe.no,
-        lc_finish_loop_control_name),
+        lc_finish_loop_control_sym_name),
     NonLocals = set_of_var.list_to_set([LCVar]),
     instmap_delta_init_reachable(InstmapDelta),
     GoalInfo = impure_init_goal_info(NonLocals, InstmapDelta, detism_det),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- type fixup_goal_info
     --->    fixup_goal_info
@@ -1338,7 +1338,7 @@ fixup_goal_info(Info, Goal0, Goal) :-
         Goal = hlds_goal(GoalExpr, !.GoalInfo)
     ).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- pred update_outer_proc(pred_proc_id::in, pred_proc_id::in, sym_name::in,
     module_info::in, proc_info::in, proc_info::out) is det.
@@ -1352,13 +1352,12 @@ update_outer_proc(PredProcId, InnerPredProcId, InnerPredName, ModuleInfo,
     proc_info_get_inferred_determinism(!.ProcInfo, Detism),
     proc_info_get_goal(!.ProcInfo, OrigGoal),
     OrigInstmapDelta = goal_info_get_instmap_delta(OrigGoal ^ hg_info),
-    some [!VarSet, !VarTypes] (
+    some [!VarTable] (
         % Re-build the variables in the procedure with smaller sets.
-        varset.init(!:VarSet),
-        init_vartypes(!:VarTypes),
-        proc_info_get_varset(!.ProcInfo, OldVarSet),
-        list.foldl3_corresponding(add_old_var_to_sets(OldVarSet), HeadVars0,
-            HeadVarTypes, !VarSet, !VarTypes, map.init, Remap),
+        init_var_table(!:VarTable),
+        proc_info_get_var_table(!.ProcInfo, OldVarTable),
+        list.foldl2_corresponding(add_old_var_to_sets(ModuleInfo, OldVarTable),
+            HeadVars0, HeadVarTypes, !VarTable, map.init, Remap),
         list.map(map.lookup(Remap), HeadVars0, HeadVars),
         proc_info_set_headvars(HeadVars, !ProcInfo),
 
@@ -1372,22 +1371,22 @@ update_outer_proc(PredProcId, InnerPredProcId, InnerPredName, ModuleInfo,
         % in the compiler so that it can be adjusted using profiler feedback
         % (for auto-parallelisation), but for now we just set it using
         % a runtime call so that it can be tuned.
-        varset.new_named_var("NumContexts", NumContextsVar, !VarSet),
-        add_var_type(NumContextsVar,
-            builtin_type(builtin_type_int(int_type_int)), !VarTypes),
+        NumContextsEntry = vte("NumContexts", int_type, is_not_dummy_type),
+        add_var_entry(NumContextsEntry, NumContextsVar, !VarTable),
         get_lc_default_num_contexts_proc(ModuleInfo,
             LCDefaultNumContextsPredId, LCDefaultNumContextsProcId),
         goal_info_init(set_of_var.list_to_set([NumContextsVar]),
             instmap_delta_bind_var(NumContextsVar),
             detism_det, purity_pure, GetNumContextsGoalInfo),
-        GetNumContextsGoal = hlds_goal(plain_call(LCDefaultNumContextsPredId,
-                LCDefaultNumContextsProcId, [NumContextsVar],
-                not_builtin, no, lc_default_num_contexts_name),
-            GetNumContextsGoalInfo),
+        GetNumContextsGoalExpr = plain_call(LCDefaultNumContextsPredId,
+            LCDefaultNumContextsProcId, [NumContextsVar],
+            not_builtin, no, lc_default_num_contexts_sym_name),
+        GetNumContextsGoal =
+            hlds_goal(GetNumContextsGoalExpr, GetNumContextsGoalInfo),
 
         % Create the call to lc_create
         create_create_loop_control_goal(ModuleInfo, NumContextsVar, LCVar,
-            LCCreateGoal, !VarSet, !VarTypes),
+            LCCreateGoal, !VarTable),
 
         % Create the inner call.
         InnerCallArgs = [LCVar | HeadVars],
@@ -1426,22 +1425,20 @@ update_outer_proc(PredProcId, InnerPredProcId, InnerPredName, ModuleInfo,
         ),
 
         proc_info_set_goal(Body, !ProcInfo),
-        proc_info_set_varset(!.VarSet, !ProcInfo),
-        proc_info_set_vartypes(!.VarTypes, !ProcInfo)
+        proc_info_set_var_table(!.VarTable, !ProcInfo)
     ).
 
-:- pred add_old_var_to_sets(prog_varset::in, prog_var::in, mer_type::in,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
+:- pred add_old_var_to_sets(module_info::in, var_table::in,
+    prog_var::in, mer_type::in, var_table::in, var_table::out,
     prog_var_renaming::in, prog_var_renaming::out) is det.
 
-add_old_var_to_sets(OldVarSet, OldVar, VarType, !VarSet, !VarTypes,
-        !Remap) :-
-    ( if varset.search_name(OldVarSet, OldVar, Name) then
-        varset.new_named_var(Name, Var, !VarSet)
-    else
-        varset.new_var(Var, !VarSet)
-    ),
-    add_var_type(Var, VarType, !VarTypes),
+add_old_var_to_sets(ModuleInfo, OldVarTable, OldVar, VarType,
+        !VarTable, !Remap) :-
+    lookup_var_entry(OldVarTable, OldVar, OldVarEntry),
+    OldVarEntry = vte(OldName, _, _),
+    VarTypeIsDummy = is_type_a_dummy(ModuleInfo, VarType),
+    Entry = vte(OldName, VarType, VarTypeIsDummy),
+    add_var_entry(Entry, Var, !VarTable),
     map.det_insert(OldVar, Var, !Remap).
 
 :- pred remap_instmap(map(prog_var, prog_var)::in,
@@ -1451,118 +1448,119 @@ remap_instmap(Remap, OldInstmapDelta, !:InstmapDelta) :-
     instmap_delta_to_assoc_list(OldInstmapDelta, VarInsts),
     instmap_delta_init_reachable(!:InstmapDelta),
     list.foldl(
-        (pred((OldVar - Inst)::in, IMD0::in, IMD::out) is det :-
+        ( pred((OldVar - Inst)::in, IMD0::in, IMD::out) is det :-
             map.lookup(Remap, OldVar, Var),
             instmap_delta_set_var(Var, Inst, IMD0, IMD)
         ), VarInsts, !InstmapDelta).
 
-%--------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- func loop_control_var_type = mer_type.
 
 loop_control_var_type = defined_type(Sym, [], kind_star) :-
-    Sym = qualified(par_builtin_module_sym, "loop_control").
+    Sym = qualified(mercury_par_builtin_module, "loop_control").
 
 :- func loop_control_slot_var_type = mer_type.
 
 loop_control_slot_var_type = builtin_type(builtin_type_int(int_type_int)).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
-:- func lc_wait_free_slot_name = sym_name.
+:- func lc_wait_free_slot_name = string.
 
-lc_wait_free_slot_name =
-    qualified(par_builtin_module_sym, lc_wait_free_slot_name_unqualified).
+lc_wait_free_slot_name = "lc_wait_free_slot".
 
-:- func lc_wait_free_slot_name_unqualified = string.
+:- func lc_wait_free_slot_sym_name = sym_name.
 
-lc_wait_free_slot_name_unqualified = "lc_wait_free_slot".
+lc_wait_free_slot_sym_name =
+    qualified(mercury_par_builtin_module, lc_wait_free_slot_name).
 
 :- pred get_lc_wait_free_slot_proc(module_info::in, pred_proc_id::out) is det.
 
 get_lc_wait_free_slot_proc(ModuleInfo, proc(PredId, ProcId)) :-
-    lookup_lc_pred_proc(ModuleInfo, lc_wait_free_slot_name_unqualified, 2,
+    lookup_lc_pred_proc(ModuleInfo, lc_wait_free_slot_name, 2,
         PredId, ProcId).
 
-:- func lc_default_num_contexts_name_unqualified = string.
+%---------------------%
 
-lc_default_num_contexts_name_unqualified = "lc_default_num_contexts".
+:- func lc_default_num_contexts_name = string.
 
-:- func lc_default_num_contexts_name = sym_name.
+lc_default_num_contexts_name = "lc_default_num_contexts".
 
-lc_default_num_contexts_name =
-    qualified(par_builtin_module_sym,
-        lc_default_num_contexts_name_unqualified).
+:- func lc_default_num_contexts_sym_name = sym_name.
+
+lc_default_num_contexts_sym_name =
+    qualified(mercury_par_builtin_module, lc_default_num_contexts_name).
 
 :- pred get_lc_default_num_contexts_proc(module_info::in, pred_id::out,
     proc_id::out) is det.
 
 get_lc_default_num_contexts_proc(ModuleInfo, PredId, ProcId) :-
-    lookup_lc_pred_proc(ModuleInfo, lc_default_num_contexts_name_unqualified,
-        1, PredId, ProcId).
+    lookup_lc_pred_proc(ModuleInfo, lc_default_num_contexts_name, 1,
+        PredId, ProcId).
 
-:- func lc_create_name_unqualified = string.
+%---------------------%
 
-lc_create_name_unqualified = "lc_create".
+:- func lc_create_name = string.
 
-:- func lc_create_name = sym_name.
+lc_create_name = "lc_create".
 
-lc_create_name =
-    qualified(par_builtin_module_sym, lc_create_name_unqualified).
+:- func lc_create_sym_name = sym_name.
+
+lc_create_sym_name =
+    qualified(mercury_par_builtin_module, lc_create_name).
 
 :- pred get_lc_create_proc(module_info::in, pred_id::out, proc_id::out) is det.
 
 get_lc_create_proc(ModuleInfo, PredId, ProcId) :-
-    lookup_lc_pred_proc(ModuleInfo, lc_create_name_unqualified, 2, PredId,
-        ProcId).
+    lookup_lc_pred_proc(ModuleInfo, lc_create_name, 2,
+        PredId, ProcId).
 
-:- func lc_join_and_terminate_name_unqualified = string.
+%---------------------%
 
-lc_join_and_terminate_name_unqualified = "lc_join_and_terminate".
+:- func lc_join_and_terminate_name = string.
 
-:- func lc_join_and_terminate_name = sym_name.
+lc_join_and_terminate_name = "lc_join_and_terminate".
 
-lc_join_and_terminate_name =
-    qualified(par_builtin_module_sym, lc_join_and_terminate_name_unqualified).
+:- func lc_join_and_terminate_sym_name = sym_name.
+
+lc_join_and_terminate_sym_name =
+    qualified(mercury_par_builtin_module, lc_join_and_terminate_name).
 
 :- pred get_lc_join_and_terminate_proc(module_info::in, pred_proc_id::out)
     is det.
 
 get_lc_join_and_terminate_proc(ModuleInfo, proc(PredId, ProcId)) :-
-    lookup_lc_pred_proc(ModuleInfo, lc_join_and_terminate_name_unqualified, 2,
+    lookup_lc_pred_proc(ModuleInfo, lc_join_and_terminate_name, 2,
         PredId, ProcId).
 
-:- func lc_finish_loop_control_name_unqualified = string.
+%---------------------%
 
-lc_finish_loop_control_name_unqualified = "lc_finish".
+:- func lc_finish_loop_control_name = string.
 
-:- func lc_finish_loop_control_name = sym_name.
+lc_finish_loop_control_name = "lc_finish".
 
-lc_finish_loop_control_name =
-    qualified(par_builtin_module_sym, lc_finish_loop_control_name_unqualified).
+:- func lc_finish_loop_control_sym_name = sym_name.
+
+lc_finish_loop_control_sym_name =
+    qualified(mercury_par_builtin_module, lc_finish_loop_control_name).
 
 :- pred get_lc_finish_loop_control_proc(module_info::in,
     pred_id::out, proc_id::out) is det.
 
 get_lc_finish_loop_control_proc(ModuleInfo, PredId, ProcId) :-
-    lookup_lc_pred_proc(ModuleInfo, lc_finish_loop_control_name_unqualified, 1,
+    lookup_lc_pred_proc(ModuleInfo, lc_finish_loop_control_name, 1,
         PredId, ProcId).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
-:- pred lookup_lc_pred_proc(module_info::in, string::in, arity::in,
+:- pred lookup_lc_pred_proc(module_info::in, string::in, int::in,
     pred_id::out, proc_id::out) is det.
 
-lookup_lc_pred_proc(ModuleInfo, Sym, Arity, PredId, ProcId) :-
-    lookup_builtin_pred_proc_id(ModuleInfo, par_builtin_module_sym,
-        Sym, pf_predicate, Arity, only_mode, PredId, ProcId).
+lookup_lc_pred_proc(ModuleInfo, Name, Arity, PredId, ProcId) :-
+    lookup_builtin_pred_proc_id(ModuleInfo, mercury_par_builtin_module,
+        Name, pf_predicate, user_arity(Arity), only_mode, PredId, ProcId).
 
-%----------------------------------------------------------------------------%
-
-:- func par_builtin_module_sym = sym_name.
-
-par_builtin_module_sym = unqualified("par_builtin").
-
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 :- end_module transform_hlds.par_loop_control.
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%

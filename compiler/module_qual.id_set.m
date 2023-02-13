@@ -15,7 +15,6 @@
 
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
 :- import_module parse_tree.module_qual.qual_errors.
 
 :- import_module list.
@@ -23,11 +22,11 @@
 %---------------------------------------------------------------------------%
 
     % We keep track of these kinds of entities.
-:- type id_type
-    --->    type_id
-    ;       inst_id
-    ;       mode_id
-    ;       class_id.
+:- type qual_id_kind
+    --->    qual_id_type
+    ;       qual_id_inst
+    ;       qual_id_mode
+    ;       qual_id_class.
 
     % This identifies an entity among other entities of the same kind.
 :- type mq_id
@@ -111,7 +110,7 @@
     % class_ids have the same representation.
     %
 :- pred find_unique_match(mq_in_interface::in, mq_error_context::in,
-    id_set::in, id_type::in, mq_id::in, sym_name::out,
+    id_set::in, qual_id_kind::in, mq_id::in, sym_name::out,
     mq_info::in, mq_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
@@ -294,19 +293,19 @@ find_unique_match(InInt, ErrorContext, IdSet, IdType, Id0, SymName,
         SymName = qualified(UniqModuleName, BaseName),
         mq_info_set_module_used(InInt, UniqModuleName, !Info),
         UsedItemType = convert_used_item_type(IdType),
-        ItemName0 = item_name(SymName0, Arity),
-        ItemName = item_name(SymName, Arity),
+        ItemName0 = recomp_item_name(SymName0, Arity),
+        ItemName = recomp_item_name(SymName, Arity),
         update_recompilation_info(
             recompilation.record_used_item(UsedItemType, ItemName0, ItemName),
             !Info)
     ).
 
-:- func convert_used_item_type(id_type) = used_item_type.
+:- func convert_used_item_type(qual_id_kind) = used_item_type.
 
-convert_used_item_type(type_id) = used_type_name.
-convert_used_item_type(inst_id) = used_inst.
-convert_used_item_type(mode_id) = used_mode.
-convert_used_item_type(class_id) = used_typeclass.
+convert_used_item_type(qual_id_type) = used_type_name.
+convert_used_item_type(qual_id_inst) = used_inst.
+convert_used_item_type(qual_id_mode) = used_mode.
+convert_used_item_type(qual_id_class) = used_typeclass.
 
 %---------------------------------------------------------------------------%
 

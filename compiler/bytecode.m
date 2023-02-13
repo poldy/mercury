@@ -1522,8 +1522,10 @@ binop_debug(int_mod(int_type_uint64), "mod(uint64").
 binop_debug(bitwise_and(int_type_uint64), "&(uint64)").
 binop_debug(bitwise_or(int_type_uint64),  "|(uint64)").
 binop_debug(bitwise_xor(int_type_uint64), "^(uint64)").
-binop_debug(unchecked_left_shift(int_type_uint64, shift_by_int), "<<(uint64)").
-binop_debug(unchecked_right_shift(int_type_uint64, shift_by_int), ">>(uint64)").
+binop_debug(unchecked_left_shift(int_type_uint64, shift_by_int),
+    "<<(uint64)").
+binop_debug(unchecked_right_shift(int_type_uint64, shift_by_int),
+    ">>(uint64)").
 binop_debug(unchecked_left_shift(int_type_int, shift_by_uint), "<<u").
 binop_debug(unchecked_right_shift(int_type_int, shift_by_uint), ">>u").
 binop_debug(unchecked_left_shift(int_type_uint, shift_by_uint), "<<u(uint)").
@@ -1631,9 +1633,7 @@ unop_debug(bitwise_complement(int_type_uint64), "bitwise_complement(uint64)").
 
 debug_cstring(Str, !IO) :-
     io.output_stream(Stream, !IO),
-    io.write_char(Stream, '"', !IO),
-    c_util.output_quoted_string(Stream, Str, !IO),
-    io.write_char(Stream, '"', !IO),
+    output_quoted_string_c(Stream, Str, !IO),
     % XXX: We need the trailing space in case something follows
     % the string as a bytecode argument. This is not very elegant.
     io.write_char(Stream, ' ', !IO).

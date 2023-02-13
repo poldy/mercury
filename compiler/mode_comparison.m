@@ -32,16 +32,16 @@
     % Note that mode declarations which only have different final insts
     % do not count as distinguishable.
     %
-:- pred modes_are_indistinguishable(proc_id::in, proc_id::in, pred_info::in,
-    module_info::in) is semidet.
+:- pred modes_are_indistinguishable(module_info::in, pred_info::in,
+    proc_id::in, proc_id::in) is semidet.
 
     % Given two modes of a predicate, figure out whether they are identical,
     % except that one is cc_nondet/cc_multi and the other is nondet/multi.
     % This is used by determinism analysis to substitute a multi mode
     % for a cc_multi one if the call occurs in a non-cc context.
     %
-:- pred modes_are_identical_bar_cc(proc_id::in, proc_id::in, pred_info::in,
-    module_info::in) is semidet.
+:- pred modes_are_identical_bar_cc(module_info::in, pred_info::in,
+    proc_id::in, proc_id::in) is semidet.
 
 %---------------------------------------------------------------------------%
 
@@ -97,8 +97,8 @@
 :- import_module check_hlds.inst_match.
 :- import_module check_hlds.mode_util.
 :- import_module check_hlds.modecheck_util.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.prog_detism.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module map.
@@ -108,10 +108,9 @@
 
 %---------------------------------------------------------------------------%
 
-modes_are_indistinguishable(ProcId, OtherProcId, PredInfo, ModuleInfo) :-
+modes_are_indistinguishable(ModuleInfo, PredInfo, ProcId, OtherProcId) :-
     % The code of this predicate is similar to the code for
     % modes_are_identical/4 and compare_proc/5 below.
-    %
     pred_info_get_proc_table(PredInfo, Procs),
     map.lookup(Procs, ProcId, ProcInfo),
     map.lookup(Procs, OtherProcId, OtherProcInfo),
@@ -145,7 +144,7 @@ modes_are_indistinguishable(ProcId, OtherProcId, PredInfo, ModuleInfo) :-
 
 %---------------------------------------------------------------------------%
 
-modes_are_identical_bar_cc(ProcId, OtherProcId, PredInfo, ModuleInfo) :-
+modes_are_identical_bar_cc(ModuleInfo, PredInfo, ProcId, OtherProcId) :-
     % The code of this predicate is similar to the code for
     % compare_proc/5 below and modes_are_indistinguishable/4 above.
 
@@ -228,8 +227,8 @@ compare_proc(ModeInfo, ProcId, OtherProcId, ArgVars, Procs, Compare) :-
     proc_info_get_argmodes(ProcInfo, ProcArgModes),
     proc_info_get_argmodes(OtherProcInfo, OtherProcArgModes),
     mode_info_get_module_info(ModeInfo, ModuleInfo),
-    mode_info_get_var_types(ModeInfo, VarTypes),
-    lookup_var_types(VarTypes, ArgVars, ArgTypes),
+    mode_info_get_var_table(ModeInfo, VarTable),
+    lookup_var_types(VarTable, ArgVars, ArgTypes),
     mode_list_get_initial_insts(ModuleInfo, ProcArgModes, InitialInsts),
     mode_list_get_initial_insts(ModuleInfo, OtherProcArgModes,
         OtherInitialInsts),

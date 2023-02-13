@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-1997,1999-2000,2002-2012 The University of Melbourne.
-% Copyright (C) 2013-2018 The Mercury team.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -138,14 +138,14 @@
     % If the given key exists in the tree, return it and then delete the pair.
     % Otherwise, fail.
     %
-:- pred remove(K, V, tree234(K, V), tree234(K, V)).
-:- mode remove(in, out, in, out) is semidet.
+:- pred remove(K::in, V::out, tree234(K, V)::in, tree234(K, V)::out)
+    is semidet.
 
     % Remove the smallest key from the tree, and return both it and the value
     % corresponding to it. If the tree is empty, fail.
     %
-:- pred remove_smallest(K, V, tree234(K, V), tree234(K, V)).
-:- mode remove_smallest(out, out, in, out) is semidet.
+:- pred remove_smallest(K::out, V::out,
+    tree234(K, V)::in, tree234(K, V)::out) is semidet.
 
 %---------------------%
 
@@ -168,6 +168,15 @@
     % but not on the values themselves).
     %
 :- pred keys_and_values(tree234(K, V)::in, list(K)::out, list(V)::out) is det.
+
+    % Given a tree234, succeed if and only if the given list is the list
+    % of all the keys in the tree.
+    %
+    % `sorted_keys_match(Tree, List)' is equivalent to the conjunction,
+    % `sorted_keys(Tree, Keys), Keys = List", but it allocates no memory,
+    % and it traverses Tree only up to the first mismatch.
+    %
+:- pred sorted_keys_match(tree234(K, V)::in, list(K)::in) is semidet.
 
 %---------------------%
 
@@ -715,6 +724,7 @@
     % because tree234 values are almost exclusively maps.
     %
 :- func tree234_to_doc(tree234(K, V)) = pretty_printer.doc.
+:- pragma obsolete(func(tree234_to_doc/1), [pretty_printer.tree234_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -772,6 +782,20 @@
 :- mode di_tree234       == uniq_tree234(ground, ground) >> dead.
 :- mode uo_tree234(K, V) == free >> uniq_tree234(K, V).
 :- mode uo_tree234       == free >> uniq_tree234(ground, ground).
+
+%---------------------------------------------------------------------------%
+%
+% Exported to pretty_printer.m.
+%
+
+:- type tree234_lazy_list(K, V)
+    --->    tll_nil
+    ;       tll_lazy_cons(K, V, (func) = tree234_lazy_list(K, V)).
+
+:- func tree234_to_lazy_list(tree234(K, V), tree234_lazy_list(K, V))
+    = tree234_lazy_list(K, V).
+
+%---------------------------------------------------------------------------%
 
     % Return the minimum number of key/value pairs in the tree, given its
     % depth. This is obviously not as accurate as tree234.count, but it
@@ -1768,8 +1792,8 @@ search_insert(K, V, MaybeOldV, Tin, Tout) :-
         )
     ).
 
-:- pred search_insert2(tree234(K, V), K, V, maybe(V), tree234(K, V)).
-:- mode search_insert2(in_two, in, in, out, out) is det.
+:- pred search_insert2(tree234(K, V)::in_two, K::in, V::in,
+    maybe(V)::out, tree234(K, V)::out) is det.
 
 search_insert2(Tin, K, V, MaybeOldV, Tout) :-
     Tin = two(K0, V0, T0, T1),
@@ -1904,8 +1928,8 @@ search_insert2(Tin, K, V, MaybeOldV, Tout) :-
         )
     ).
 
-:- pred search_insert3(tree234(K, V), K, V, maybe(V), tree234(K, V)).
-:- mode search_insert3(in_three, in, in, out, out) is det.
+:- pred search_insert3(tree234(K, V)::in_three, K::in, V::in,
+    maybe(V)::out, tree234(K, V)::out) is det.
 
 search_insert3(Tin, K, V, MaybeOldV, Tout) :-
     Tin = three(K0, V0, K1, V1, T0, T1, T2),
@@ -3509,8 +3533,7 @@ keys(T) = Ks :-
 keys(Tree, Keys) :-
     tree234.keys_acc(Tree, [], Keys).
 
-:- pred keys_acc(tree234(K, V), list(K), list(K)).
-:- mode keys_acc(in, in, out) is det.
+:- pred keys_acc(tree234(K, V)::in, list(K)::in, list(K)::out) is det.
 
 keys_acc(empty, List, List).
 keys_acc(two(K0, _V0, T0, T1), L0, L) :-
@@ -3534,8 +3557,7 @@ values(T) = Vs :-
 values(Tree, Values) :-
     tree234.values_acc(Tree, [], Values).
 
-:- pred values_acc(tree234(K, V), list(V), list(V)).
-:- mode values_acc(in, in, out) is det.
+:- pred values_acc(tree234(K, V)::in, list(V)::in, list(V)::out) is det.
 
 values_acc(empty, List, List).
 values_acc(two(_K0, V0, T0, T1), L0, L) :-
@@ -3586,6 +3608,36 @@ keys_and_values_acc(four(K0, V0, K1, V1, K2, V2, T0, T1, T2, T3),
     !:Keys = [K0 | !.Keys],
     !:Values = [V0 | !.Values],
     tree234.keys_and_values_acc(T0, !Keys, !Values).
+
+%---------------------------------------------------------------------------%
+
+sorted_keys_match(Tree, List) :-
+    sorted_keys_match_in_tree(Tree, List, LeftOver),
+    LeftOver = [].
+
+:- pred sorted_keys_match_in_tree(tree234(K, V)::in,
+    list(K)::in, list(K)::out) is semidet.
+
+sorted_keys_match_in_tree(empty, L, L).
+sorted_keys_match_in_tree(two(K0, _V0, T0, T1), L0, L) :-
+    sorted_keys_match_in_tree(T0, L0, L1),
+    L1 = [K0 | L2],
+    sorted_keys_match_in_tree(T1, L2, L).
+sorted_keys_match_in_tree(three(K0, _V0, K1, _V1, T0, T1, T2), L0, L) :-
+    sorted_keys_match_in_tree(T0, L0, L1),
+    L1 = [K0 | L2],
+    sorted_keys_match_in_tree(T1, L2, L3),
+    L3 = [K1 | L4],
+    sorted_keys_match_in_tree(T2, L4, L).
+sorted_keys_match_in_tree(four(K0, _V0, K1, _V1, K2, _V2, T0, T1, T2, T3),
+        L0, L) :-
+    sorted_keys_match_in_tree(T0, L0, L1),
+    L1 = [K0 | L2],
+    sorted_keys_match_in_tree(T1, L2, L3),
+    L3 = [K1 | L4],
+    sorted_keys_match_in_tree(T2, L4, L5),
+    L5 = [K2 | L6],
+    sorted_keys_match_in_tree(T3, L6, L).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -4675,55 +4727,20 @@ map_values_foldl3(Pred, Tree0, Tree, !A, !B, !C) :-
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-    % The default pretty_printer formatting for key_value_pair will do what
-    % we want.
-    %
-:- type key_value_pair(K, V)
-    --->    (K -> V).
-
-tree234_to_doc(T) =
-    indent([
-        str("map(["),
-        tree234_to_doc_2(tree234_to_lazy_list(T, empty)),
-        str("])")
-    ]).
-
-:- func tree234_to_doc_2(lazy_list(K, V)) = doc.
-
-tree234_to_doc_2(empty) = str("").
-tree234_to_doc_2(lazy_cons(K, V, Susp)) = Doc :-
-    LL = apply(Susp),
-    (
-        LL = empty,
-        Doc = group([nl, format_arg(format((K -> V)))])
-    ;
-        LL = lazy_cons(_, _, _),
-        Doc = docs([
-            group([nl, format_arg(format((K -> V))), str(", ")]),
-            format_susp((func) = tree234_to_doc_2(LL))
-        ])
-    ).
-
-%---------------------------------------------------------------------------%
-
-:- type lazy_list(K, V)
-    --->    empty
-    ;       lazy_cons(K, V, (func) = lazy_list(K, V)).
-
-:- func tree234_to_lazy_list(tree234(K, V), lazy_list(K, V)) = lazy_list(K, V).
+tree234_to_doc(T) = pretty_printer.tree234_to_doc(T).
 
 tree234_to_lazy_list(empty, LL) = LL.
 tree234_to_lazy_list(two(K1, V1, T1, T2), LL) =
     tree234_to_lazy_list(T1,
-        lazy_cons(K1, V1,
+        tll_lazy_cons(K1, V1,
             (func) = tree234_to_lazy_list(T2, LL))).
 tree234_to_lazy_list(three(K1, V1, K2, V2, T1, T2, T3), LL) =
     tree234_to_lazy_list(T1,
-        lazy_cons(K1, V1,
+        tll_lazy_cons(K1, V1,
             (func) = tree234_to_lazy_list(two(K2, V2, T2, T3), LL))).
 tree234_to_lazy_list(four(K1, V1, K2, V2, K3, V3, T1, T2, T3, T4), LL) =
     tree234_to_lazy_list(T1,
-        lazy_cons(K1, V1,
+        tll_lazy_cons(K1, V1,
             (func) = tree234_to_lazy_list(
                 three(K2, V2, K3, V3, T2, T3, T4), LL))).
 

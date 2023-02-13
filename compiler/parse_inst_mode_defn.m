@@ -52,7 +52,7 @@
 
 :- implementation.
 
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_inst_mode_name.
 :- import_module parse_tree.parse_sym_name.
 :- import_module parse_tree.parse_tree_out_term.
@@ -63,6 +63,10 @@
 :- import_module cord.
 :- import_module maybe.
 :- import_module set.
+:- import_module term_subst.
+:- import_module term_vars.
+
+%-----------------------------------------------------------------------------e
 
 parse_inst_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
         MaybeIOM) :-
@@ -112,7 +116,7 @@ parse_inst_defn_eqv(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
     then
         NameTerm = NameTermPrime,
         ( if
-            parse_unqualified_name_and_arity(ForTypeTerm,
+            parse_sym_name_and_arity(ForTypeTerm,
                 TypeSymName, TypeArity)
         then
             MaybeForType = yes(type_ctor(TypeSymName, TypeArity)),
@@ -133,8 +137,8 @@ parse_inst_defn_eqv(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
         MaybeForType = no,
         ForTypeSpecs = []
     ),
-    parse_implicitly_qualified_sym_name_and_args(ModuleName, NameTerm,
-        VarSet, ContextPieces, MaybeSymNameAndArgs),
+    parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+        ContextPieces, NameTerm, MaybeSymNameAndArgs),
     (
         MaybeSymNameAndArgs = error2(SymNameAndArgSpecs),
         Specs = SymNameAndArgSpecs ++ ForTypeSpecs,
@@ -178,8 +182,8 @@ parse_abstract_inst_defn_item(ModuleName, VarSet, HeadTerms, Context, SeqNum,
     (
         HeadTerms = [HeadTerm],
         ContextPieces = cord.singleton(words("In inst definition:")),
-        parse_implicitly_qualified_sym_name_and_args(ModuleName, HeadTerm,
-            VarSet, ContextPieces, MaybeNameAndArgs),
+        parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+            ContextPieces, HeadTerm, MaybeNameAndArgs),
         (
             MaybeNameAndArgs = error2(Specs),
             MaybeIOM = error1(Specs)
@@ -229,8 +233,8 @@ parse_abstract_inst_defn_item(ModuleName, VarSet, HeadTerms, Context, SeqNum,
 parse_mode_defn(ModuleName, VarSet, HeadTerm, BodyTerm, Context, SeqNum,
         MaybeIOM) :-
     ContextPieces = cord.singleton(words("In mode definition:")),
-    parse_implicitly_qualified_sym_name_and_args(ModuleName, HeadTerm,
-        VarSet, ContextPieces, MaybeSymNameAndArgs),
+    parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+        ContextPieces, HeadTerm, MaybeSymNameAndArgs),
     (
         MaybeSymNameAndArgs = error2(Specs),
         MaybeIOM = error1(Specs)
@@ -269,8 +273,8 @@ parse_abstract_mode_defn_item(ModuleName, VarSet, HeadTerms, Context, SeqNum,
     (
         HeadTerms = [HeadTerm],
         ContextPieces = cord.singleton(words("In abstract_mode definition:")),
-        parse_implicitly_qualified_sym_name_and_args(ModuleName, HeadTerm,
-            VarSet, ContextPieces, MaybeSymNameAndArgs),
+        parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+            ContextPieces, HeadTerm, MaybeSymNameAndArgs),
         (
             MaybeSymNameAndArgs = error2(Specs),
             MaybeIOM = error1(Specs)
@@ -349,7 +353,7 @@ check_user_mode_name(SymName, Context, NameSpecs) :-
 check_inst_mode_defn_args(DefnKind, VarSet, HeadTermContext,
         ArgTerms, MaybeBodyTerm, MaybeArgVars) :-
     % Check that all the head arguments are variables.
-    ( if term.term_list_to_var_list(ArgTerms, ArgVars) then
+    ( if term_subst.term_list_to_var_list(ArgTerms, ArgVars) then
         some [!Specs] (
             !:Specs = [],
 
@@ -367,7 +371,7 @@ check_inst_mode_defn_args(DefnKind, VarSet, HeadTermContext,
                 IsAreWord = choose_number(DupArgVars,
                     "is", "are"),
                 DupVarNames =
-                    list.map(mercury_var_to_name_only(VarSet), DupArgVars),
+                    list.map(mercury_var_to_name_only_vs(VarSet), DupArgVars),
                 RepeatPieces = [words("Error: inst"), words(ParamWord)] ++
                     list_to_quoted_pieces(DupVarNames) ++
                     [words(IsAreWord), words("repeated on left hand side of"),
@@ -383,7 +387,7 @@ check_inst_mode_defn_args(DefnKind, VarSet, HeadTermContext,
             % The common case is BodyVars = []; fail fast in that case.
             ( if
                 MaybeBodyTerm = yes(BodyTerm),
-                term.vars(BodyTerm, BodyVars),
+                term_vars.vars_in_term(BodyTerm, BodyVars),
                 BodyVars = [_ | _],
                 set.list_to_set(BodyVars, BodyVarsSet),
                 set.list_to_set(ArgVars, ArgVarsSet),
@@ -392,7 +396,7 @@ check_inst_mode_defn_args(DefnKind, VarSet, HeadTermContext,
                 FreeVars = [_ | _]
             then
                 FreeVarNames =
-                    list.map(mercury_var_to_name_only(VarSet), FreeVars),
+                    list.map(mercury_var_to_name_only_vs(VarSet), FreeVars),
                 FreePieces = [words("Error: free inst"),
                     words(choose_number(FreeVars,
                         "parameter", "parameters"))] ++

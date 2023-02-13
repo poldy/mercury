@@ -1,11 +1,11 @@
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % Copyright (C) 2005-2012 The University of Melbourne.
 % Copyright (C) 2014-2021 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % File: prog_type.m.
 % Main author: fjh.
@@ -14,7 +14,7 @@
 % doing type substitutions are in prog_type_subst.m, while utility predicates
 % for dealing with types in the HLDS are in type_util.m.
 %
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- module parse_tree.prog_type.
 :- interface.
@@ -23,14 +23,16 @@
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.prog_util.
 
 :- import_module bool.
 :- import_module list.
 :- import_module map.
 :- import_module one_or_more.
+:- import_module set.
 :- import_module term.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % Simple tests for certain properties of types. These tests work modulo any
 % kind annotations, so in the early stages of the compiler (i.e., before type
@@ -73,12 +75,21 @@
     %
 :- pred type_is_tuple(mer_type::in, list(mer_type)::out) is semidet.
 
+:- type non_kinded_type =< mer_type
+    --->    type_variable(tvar, kind)
+    ;       defined_type(sym_name, list(mer_type), kind)
+    ;       builtin_type(builtin_type)
+    ;       tuple_type(list(mer_type), kind)
+    ;       higher_order_type(pred_or_func, list(mer_type), ho_inst_info,
+                purity, lambda_eval_method)
+    ;       apply_n_type(tvar, list(mer_type), kind).
+
     % Remove the kind annotation at the top-level if there is one,
     % otherwise return the type unchanged.
     %
-:- func strip_kind_annotation(mer_type) = mer_type.
+:- func strip_kind_annotation(mer_type) = non_kinded_type.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Succeeds iff the given type is ground (that is, contains no type
     % variables).
@@ -158,15 +169,17 @@
 :- pred var_list_to_type_list(tvar_kind_map::in, list(tvar)::in,
     list(mer_type)::out) is det.
 
-    % Return a list of the type variables of a type, in order of their
-    % first occurrence in a depth-first, left-right traversal.
+    % Return a list of the type variables of a type, or a list of types,
+    % in order of their first occurrence in a depth-first, left-right
+    % traversal.
     %
-:- pred type_vars(mer_type::in, list(tvar)::out) is det.
+:- pred type_vars_in_type(mer_type::in, list(tvar)::out) is det.
+:- pred type_vars_in_types(list(mer_type)::in, list(tvar)::out) is det.
 
-    % Return a list of the type variables of a list of types, in order
-    % of their first occurrence in a depth-first, left-right traversal.
+    % Return the set of the type variables of a type, or a list of types.
     %
-:- pred type_vars_list(list(mer_type)::in, list(tvar)::out) is det.
+:- pred set_of_type_vars_in_type(mer_type::in, set(tvar)::out) is det.
+:- pred set_of_type_vars_in_types(list(mer_type)::in, set(tvar)::out) is det.
 
     % Nondeterministically return the variables in a type.
     %
@@ -199,13 +212,14 @@
     list(mer_type)::in, mer_type::in, list(mer_mode)::in, mer_mode::in,
     determinism::in, mer_type::out) is det.
 
-    % Make error messages more readable by removing "builtin."
-    % qualifiers.
+    % Make error messages more readable by removing some or all
+    % module qualifiers from type and mode names contained in the given type
+    % or types, regardless of how deeply they are nested.
     %
-:- pred strip_builtin_qualifiers_from_type(mer_type::in, mer_type::out) is det.
-
-:- pred strip_builtin_qualifiers_from_type_list(list(mer_type)::in,
-    list(mer_type)::out) is det.
+:- pred strip_module_names_from_type(strip_what_module_names::in,
+    mer_type::in, mer_type::out) is det.
+:- pred strip_module_names_from_type_list(strip_what_module_names::in,
+    list(mer_type)::in, list(mer_type)::out) is det.
 
     % Return the list of type variables contained in a list of constraints.
     %
@@ -224,7 +238,11 @@
 :- pred get_unconstrained_tvars(list(tvar)::in, list(prog_constraint)::in,
     list(tvar)::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+
+:- type is_dummy_type
+    --->    is_dummy_type
+    ;       is_not_dummy_type.
 
     % The list of type_ctors which are builtins which do not have a
     % hlds_type_defn.
@@ -233,6 +251,7 @@
 
 :- type is_builtin_dummy_type_ctor
     --->    is_builtin_dummy_type_ctor
+    ;       is_builtin_non_dummy_type_ctor
     ;       is_not_builtin_dummy_type_ctor.
 
     % is_builtin_dummy_type_ctor(type_ctor):
@@ -425,22 +444,22 @@
 :- pred apply_partial_map_to_list(map(T, T)::in, list(T)::in, list(T)::out)
     is det.
 
-%-----------------------------------------------------------------------------%
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- implementation.
 
 :- import_module mdbcomp.builtin_modules.
+:- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_type_subst.
-:- import_module parse_tree.prog_util.
 
 :- import_module int.
 :- import_module maybe.
 :- import_module require.
 :- import_module string.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 type_is_var(Type) :-
     strip_kind_annotation(Type) = type_variable(_, _).
@@ -471,13 +490,21 @@ type_is_tuple(Type, ArgTypes) :-
     strip_kind_annotation(Type) = tuple_type(ArgTypes, _).
 
 strip_kind_annotation(Type0) = Type :-
-    ( if Type0 = kinded_type(Type1, _) then
+    (
+        Type0 = kinded_type(Type1, _),
         Type = strip_kind_annotation(Type1)
-    else
-        Type = Type0
+    ;
+        ( Type0 = type_variable(_, _)
+        ; Type0 = defined_type(_, _, _)
+        ; Type0 = builtin_type(_)
+        ; Type0 = tuple_type(_, _)
+        ; Type0 = higher_order_type(_, _, _, _, _)
+        ; Type0 = apply_n_type(_, _, _)
+        ),
+        Type = coerce(Type0)
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 type_is_ground(Type) :-
     not type_contains_var(Type, _).
@@ -638,39 +665,55 @@ var_list_to_type_list(KindMap, [Var | Vars], [Type | Types]) :-
     var_to_type(KindMap, Var, Type),
     var_list_to_type_list(KindMap, Vars, Types).
 
-type_vars(Type, TVars) :-
-    type_vars_2(Type, [], RevTVars),
+%---------------------%
+
+type_vars_in_type(Type, TVars) :-
+    type_vars_in_type_acc(Type, [], RevTVars),
     list.reverse(RevTVars, TVarsDups),
     list.remove_dups(TVarsDups, TVars).
 
-type_vars_list(Types, TVars) :-
-    type_vars_list_2(Types, [], RevTVars),
+type_vars_in_types(Types, TVars) :-
+    type_vars_in_types_acc(Types, [], RevTVars),
     list.reverse(RevTVars, TVarsDups),
     list.remove_dups(TVarsDups, TVars).
 
-:- pred type_vars_2(mer_type::in, list(tvar)::in, list(tvar)::out) is det.
+:- pred type_vars_in_type_acc(mer_type::in,
+    list(tvar)::in, list(tvar)::out) is det.
 
-type_vars_2(type_variable(Var, _), Vs, [Var | Vs]).
-type_vars_2(defined_type(_, ArgTypes, _), !V) :-
-    type_vars_list_2(ArgTypes, !V).
-type_vars_2(builtin_type(_), !V).
-type_vars_2(higher_order_type(_, ArgTypes, _, _, _), !V) :-
-    type_vars_list_2(ArgTypes, !V).
-type_vars_2(tuple_type(ArgTypes, _), !V) :-
-    type_vars_list_2(ArgTypes, !V).
-type_vars_2(apply_n_type(Var, ArgTypes, _), !V) :-
-    !:V = [Var | !.V],
-    type_vars_list_2(ArgTypes, !V).
-type_vars_2(kinded_type(Type, _), !V) :-
-    type_vars_2(Type, !V).
+type_vars_in_type_acc(type_variable(Var, _), !RevTVars) :-
+    !:RevTVars = [Var | !.RevTVars].
+type_vars_in_type_acc(defined_type(_, ArgTypes, _), !RevTVars) :-
+    type_vars_in_types_acc(ArgTypes, !RevTVars).
+type_vars_in_type_acc(builtin_type(_), !RevTVars).
+type_vars_in_type_acc(higher_order_type(_, ArgTypes, _, _, _), !RevTVars) :-
+    type_vars_in_types_acc(ArgTypes, !RevTVars).
+type_vars_in_type_acc(tuple_type(ArgTypes, _), !RevTVars) :-
+    type_vars_in_types_acc(ArgTypes, !RevTVars).
+type_vars_in_type_acc(apply_n_type(Var, ArgTypes, _), !RevTVars) :-
+    !:RevTVars= [Var | !.RevTVars],
+    type_vars_in_types_acc(ArgTypes, !RevTVars).
+type_vars_in_type_acc(kinded_type(Type, _), !RevTVars) :-
+    type_vars_in_type_acc(Type, !RevTVars).
 
-:- pred type_vars_list_2(list(mer_type)::in, list(tvar)::in, list(tvar)::out)
-    is det.
+:- pred type_vars_in_types_acc(list(mer_type)::in,
+    list(tvar)::in, list(tvar)::out) is det.
 
-type_vars_list_2([], !V).
-type_vars_list_2([Type | Types], !V) :-
-    type_vars_2(Type, !V),
-    type_vars_list_2(Types, !V).
+type_vars_in_types_acc([], !RevTVars).
+type_vars_in_types_acc([Type | Types], !RevTVars) :-
+    type_vars_in_type_acc(Type, !RevTVars),
+    type_vars_in_types_acc(Types, !RevTVars).
+
+%---------------------%
+
+set_of_type_vars_in_type(Type, SetOfTVars) :-
+    type_vars_in_type(Type, TVars),
+    set.list_to_set(TVars, SetOfTVars).
+
+set_of_type_vars_in_types(Types, SetOfTVars) :-
+    type_vars_in_types(Types, TVars),
+    set.list_to_set(TVars, SetOfTVars).
+
+%---------------------%
 
 type_contains_var(type_variable(Var, _), Var).
 type_contains_var(defined_type(_, ArgTypes, _), Var) :-
@@ -746,39 +789,58 @@ construct_higher_order_func_type(Purity, EvalMethod, ArgTypes, RetType,
     Type = higher_order_type(pf_function, ArgTypes ++ [RetType],
         higher_order(PredInstInfo), Purity, EvalMethod).
 
-strip_builtin_qualifiers_from_type(type_variable(Var, Kind),
-        type_variable(Var, Kind)).
-strip_builtin_qualifiers_from_type(defined_type(Name0, ArgTypes0, Kind),
-        defined_type(Name, ArgTypes, Kind)) :-
-    ( if
-        Name0 = qualified(Module, Name1),
-        Module = mercury_public_builtin_module
-    then
-        Name = unqualified(Name1)
-    else
-        Name = Name0
-    ),
-    strip_builtin_qualifiers_from_type_list(ArgTypes0, ArgTypes).
-strip_builtin_qualifiers_from_type(builtin_type(BuiltinType),
-        builtin_type(BuiltinType)).
-strip_builtin_qualifiers_from_type(
-        higher_order_type(PorF, ArgTypes0, HOInstInfo, Purity, EvalMethod),
-        higher_order_type(PorF, ArgTypes, HOInstInfo, Purity, EvalMethod)) :-
-    strip_builtin_qualifiers_from_type_list(ArgTypes0, ArgTypes).
-strip_builtin_qualifiers_from_type(tuple_type(ArgTypes0, Kind),
-        tuple_type(ArgTypes, Kind)) :-
-    strip_builtin_qualifiers_from_type_list(ArgTypes0, ArgTypes).
-strip_builtin_qualifiers_from_type(apply_n_type(Var, ArgTypes0, Kind),
-        apply_n_type(Var, ArgTypes, Kind)) :-
-    strip_builtin_qualifiers_from_type_list(ArgTypes0, ArgTypes).
-strip_builtin_qualifiers_from_type(kinded_type(Type0, Kind),
-        kinded_type(Type, Kind)) :-
-    strip_builtin_qualifiers_from_type(Type0, Type).
+%---------------------%
 
-strip_builtin_qualifiers_from_type_list(Types0, Types) :-
-    list.map(strip_builtin_qualifiers_from_type, Types0, Types).
+strip_module_names_from_type(StripWhat, Type0, Type) :-
+    (
+        ( Type0 = type_variable(_, _)
+        ; Type0 = builtin_type(_)
+        ),
+        Type = Type0
+    ;
+        Type0 = defined_type(SymName0, ArgTypes0, Kind),
+        strip_module_names_from_sym_name(StripWhat, SymName0, SymName),
+        strip_module_names_from_type_list(StripWhat, ArgTypes0, ArgTypes),
+        Type = defined_type(SymName, ArgTypes, Kind)
+    ;
+        Type0 = higher_order_type(PorF, ArgTypes0, HOInstInfo0, Purity, EM),
+        strip_module_names_from_type_list(StripWhat, ArgTypes0, ArgTypes),
+        strip_module_names_from_ho_inst_info(StripWhat,
+            HOInstInfo0, HOInstInfo),
+        Type = higher_order_type(PorF, ArgTypes, HOInstInfo, Purity, EM)
+    ;
+        Type0 = tuple_type(ArgTypes0, Kind),
+        strip_module_names_from_type_list(StripWhat, ArgTypes0, ArgTypes),
+        Type = tuple_type(ArgTypes, Kind)
+    ;
+        Type0 = apply_n_type(Var, ArgTypes0, Kind),
+        strip_module_names_from_type_list(StripWhat, ArgTypes0, ArgTypes),
+        Type = apply_n_type(Var, ArgTypes, Kind)
+    ;
+        Type0 = kinded_type(SubType0, Kind),
+        strip_module_names_from_type(StripWhat, SubType0, SubType),
+        Type = kinded_type(SubType, Kind)
+    ).
 
-%-----------------------------------------------------------------------------%
+strip_module_names_from_type_list(StripWhat, Types0, Types) :-
+    list.map(strip_module_names_from_type(StripWhat), Types0, Types).
+
+:- pred strip_module_names_from_ho_inst_info(strip_what_module_names::in,
+    ho_inst_info::in, ho_inst_info::out) is det.
+
+strip_module_names_from_ho_inst_info(StripWhat, HOInstInfo0, HOInstInfo) :-
+    (
+        HOInstInfo0 = none_or_default_func,
+        HOInstInfo = none_or_default_func
+    ;
+        HOInstInfo0 = higher_order(PredInstInfo0),
+        PredInstInfo0 = pred_inst_info(PorF, Modes0, RegTypes, Detism),
+        strip_module_names_from_mode_list(StripWhat, Modes0, Modes),
+        PredInstInfo = pred_inst_info(PorF, Modes, RegTypes, Detism),
+        HOInstInfo = higher_order(PredInstInfo)
+    ).
+
+%---------------------------------------------------------------------------%
 
 prog_constraints_get_tvars(constraints(Univ, Exist), TVars) :-
     constraint_list_get_tvars(Univ, UnivTVars),
@@ -790,14 +852,14 @@ constraint_list_get_tvars(Constraints, TVars) :-
     list.condense(TVarsList, TVars).
 
 constraint_get_tvars(constraint(_ClassName, ArgTypes), TVars) :-
-    type_vars_list(ArgTypes, TVars).
+    type_vars_in_types(ArgTypes, TVars).
 
 get_unconstrained_tvars(Tvars, Constraints, Unconstrained) :-
     constraint_list_get_tvars(Constraints, ConstrainedTvars),
     list.delete_elems(Tvars, ConstrainedTvars, Unconstrained0),
     list.remove_dups(Unconstrained0, Unconstrained).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Every element of this list must be reflected in the code of
     % builtin_type_ctor in type_ctor_info.m.
@@ -822,23 +884,40 @@ builtin_type_ctors_with_no_hlds_type_defn =
     ].
 
 is_type_ctor_a_builtin_dummy(TypeCtor) = IsBuiltinDummy :-
-    % Please keep this code in sync with classify_type_ctor_if_special.
+    % Please keep the set of type_ctors for which we return
+    % is_builtin_dummy_type_ctor in sync with classify_type_ctor_if_special.
     TypeCtor = type_ctor(CtorSymName, TypeArity),
-    ( if
+    (
         CtorSymName = qualified(ModuleName, TypeName),
-        ModuleName = mercury_io_module,
-        TypeName = "state",
-        TypeArity = 0
-    then
-        IsBuiltinDummy = is_builtin_dummy_type_ctor
-    else if
-        CtorSymName = qualified(ModuleName, TypeName),
-        ModuleName = mercury_std_lib_module_name(unqualified("store")),
-        TypeName = "store",
-        TypeArity = 1
-    then
-        IsBuiltinDummy = is_builtin_dummy_type_ctor
-    else
+        ( if 
+            (
+                TypeName = "state",
+                TypeArity = 0,
+                ModuleName = mercury_io_module
+            ;
+                TypeName = "store",
+                TypeArity = 1,
+                ModuleName = mercury_std_lib_module_name(unqualified("store"))
+            )
+        then
+            IsBuiltinDummy = is_builtin_dummy_type_ctor
+        else if
+            (
+                TypeName = "store_at_ref_type",
+                TypeArity = 1,
+                ModuleName = mercury_private_builtin_module
+            ;
+                TypeName = "comparison_result",
+                TypeArity = 0,
+                ModuleName = mercury_public_builtin_module
+            )
+        then
+            IsBuiltinDummy = is_builtin_non_dummy_type_ctor
+        else
+            IsBuiltinDummy = is_not_builtin_dummy_type_ctor
+        )
+    ;
+        CtorSymName = unqualified(_TypeName),
         IsBuiltinDummy = is_not_builtin_dummy_type_ctor
     ).
 
@@ -882,7 +961,7 @@ is_introduced_type_info_type_category(TypeCtorCat) = IsIntroduced :-
         IsIntroduced = yes
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 remove_new_prefix(unqualified(Name0), unqualified(Name)) :-
     string.append("new ", Name, Name0).
@@ -894,11 +973,11 @@ add_new_prefix(unqualified(Name0), unqualified(Name)) :-
 add_new_prefix(qualified(Module, Name0), qualified(Module, Name)) :-
     string.append("new ", Name0, Name).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 make_type_ctor(term.atom(Name), Arity, type_ctor(unqualified(Name), Arity)).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 cell_cons_id(type_info_cell(Ctor)) = type_info_cell_constructor(Ctor).
 cell_cons_id(typeclass_info_cell) = typeclass_info_cell_constructor.
@@ -917,7 +996,7 @@ cell_inst_cons_id(Which, Arity) = InstConsId :-
     TypeCtor = cons_id_dummy_type_ctor,
     InstConsId = cons(qualified(PrivateBuiltin, Symbol), Arity, TypeCtor).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 qualify_cons_id(Args, ConsId0, ConsId, InstConsId) :-
     (
@@ -960,7 +1039,7 @@ qualify_cons_id(Args, ConsId0, ConsId, InstConsId) :-
         InstConsId = ConsId
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 type_constructors_are_type_info(Ctors) :-
     Ctors = [Ctor],
@@ -988,7 +1067,7 @@ name_is_type_info("type_ctor_info").
 name_is_type_info("typeclass_info").
 name_is_type_info("base_typeclass_info").
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 non_sub_du_type_is_notag(OoMCtors, MaybeCanonical) :-
     OoMCtors = one_or_more(Ctor, []),
@@ -1027,7 +1106,7 @@ non_sub_du_type_is_dummy(DuDetails) :-
     MaybeCanonical = canon,
     MaybeDirectArgCtors = no.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % Type unification.
 %
@@ -1321,12 +1400,12 @@ type_occurs_list([X | Xs], Y,  Bindings) :-
         type_occurs_list(Xs, Y, Bindings)
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 type_subsumes(TypeA, TypeB, TypeSubst) :-
     % TypeA subsumes TypeB iff TypeA can be unified with TypeB
     % without binding any of the type variables in TypeB.
-    type_vars(TypeB, TypeBVars),
+    type_vars_in_type(TypeB, TypeBVars),
     map.init(TypeSubst0),
     type_unify(TypeA, TypeB, TypeBVars, TypeSubst0, TypeSubst).
 
@@ -1340,7 +1419,7 @@ type_subsumes_det(TypeA, TypeB, TypeSubst) :-
 type_list_subsumes(TypesA, TypesB, TypeSubst) :-
     % TypesA subsumes TypesB iff TypesA can be unified with TypesB
     % without binding any of the type variables in TypesB.
-    type_vars_list(TypesB, TypesBVars),
+    type_vars_in_types(TypesB, TypesBVars),
     map.init(TypeSubst0),
     type_unify_list(TypesA, TypesB, TypesBVars, TypeSubst0, TypeSubst).
 
@@ -1403,7 +1482,7 @@ arg_type_list_subsumes(TVarSet, ExistQVars, ActualArgTypes, HeadTypeParams,
         % quantified type variables in the caller's argument types.
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 compute_caller_callee_type_substitution(CalleeArgTypes, CallerArgTypes,
         ExternalTypeParams, CalleeExistQVars, TypeSubn) :-
@@ -1438,7 +1517,7 @@ compute_caller_callee_type_substitution(CalleeArgTypes, CallerArgTypes,
         )
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 apply_partial_map_to_list(_PartialMap, [], []).
 apply_partial_map_to_list(PartialMap, [X | Xs], [Y | Ys]) :-
@@ -1449,6 +1528,6 @@ apply_partial_map_to_list(PartialMap, [X | Xs], [Y | Ys]) :-
     ),
     apply_partial_map_to_list(PartialMap, Xs, Ys).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 :- end_module parse_tree.prog_type.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%

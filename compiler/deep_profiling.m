@@ -23,9 +23,9 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 :- import_module maybe.
@@ -40,14 +40,19 @@
 :- pred generate_deep_const_unify(cons_id::in, prog_var::in, hlds_goal::out)
     is det.
 
-    % Create a variable with the given name and type, adding it to the
-    % prog_var_set_types structure.
-    %
-:- pred generate_var(string::in, mer_type::in, prog_var::out,
-    prog_var_set_types::in, prog_var_set_types::out) is det.
-
 :- pred get_deep_profile_builtin_ppid(module_info::in, string::in, int::in,
     pred_id::out, proc_id::out) is det.
+
+%-----------------------------------------------------------------------------%
+%
+% Utility functions exported to coverage_profiling.m.
+%
+
+:- pred generate_var_int(string::in, prog_var::out,
+    var_table::in, var_table::out) is det.
+
+:- pred generate_var_c_ptr(string::in, prog_var::out,
+    var_table::in, var_table::out) is det.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -59,6 +64,7 @@
 :- import_module hlds.code_model.
 :- import_module hlds.goal_path.
 :- import_module hlds.goal_util.
+:- import_module hlds.hlds_class.
 :- import_module hlds.hlds_dependency_graph.
 :- import_module hlds.hlds_out.
 :- import_module hlds.hlds_out.hlds_out_util.
@@ -66,6 +72,7 @@
 :- import_module hlds.instmap.
 :- import_module hlds.make_goal.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module libs.
 :- import_module libs.dependency_graph.
@@ -95,8 +102,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
-:- import_module varset.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -105,7 +111,7 @@ apply_deep_profiling_transform(!ModuleInfo) :-
     % predicates, which changes what labels they get generated. The
     % call_site_static structures we generate must match the labels created
     % during code generation.
-    dead_proc_elim(elim_opt_imported, !ModuleInfo),
+    dead_proc_elim(elim_opt_imported, _, _, !ModuleInfo),
     module_info_get_globals(!.ModuleInfo, Globals),
     globals.lookup_bool_option(Globals, deep_profile_tail_recursion,
         TailRecursion),
@@ -116,12 +122,10 @@ apply_deep_profiling_transform(!ModuleInfo) :-
         TailRecursion = no
     ),
     module_info_get_valid_pred_ids(!.ModuleInfo, PredIds),
-    module_info_get_predicate_table(!.ModuleInfo, PredTable0),
-    predicate_table_get_preds(PredTable0, PredMap0),
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
     list.foldl(deep_prof_transform_pred(!.ModuleInfo), PredIds,
-        PredMap0, PredMap),
-    predicate_table_set_preds(PredMap, PredTable0, PredTable),
-    module_info_set_predicate_table(PredTable, !ModuleInfo).
+        PredIdTable0, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo).
 
 %-----------------------------------------------------------------------------%
 
@@ -153,8 +157,7 @@ apply_deep_prof_tail_rec_transform_to_scc(SCC, !ModuleInfo) :-
 
 apply_deep_prof_tail_rec_transform_to_proc(PredProcId, !ModuleInfo) :-
     PredProcId = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_arg_types(PredInfo0, Types),
     pred_info_get_origin(PredInfo0, Origin),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
@@ -166,7 +169,7 @@ apply_deep_prof_tail_rec_transform_to_proc(PredProcId, !ModuleInfo) :-
         SolnCount \= at_most_many,
         proc_info_get_headvars(ProcInfo0, HeadVars),
         proc_info_get_argmodes(ProcInfo0, Modes),
-        find_list_of_output_args(HeadVars, Modes, Types, !.ModuleInfo,
+        find_list_of_output_args(!.ModuleInfo, HeadVars, Types, Modes,
             Outputs),
         clone_proc_id(ProcTable0, ProcId, CloneProcId),
         ClonePredProcId = proc(PredId, CloneProcId),
@@ -181,7 +184,7 @@ apply_deep_prof_tail_rec_transform_to_proc(PredProcId, !ModuleInfo) :-
         % guarantee that a unification or comparison procedure is alone
         % in its SCC unless it cannot call builtin.unify and builtin.compare.
         (
-            Origin = origin_special_pred(_, _)
+            Origin = origin_compiler(made_for_uci(_, _))
         =>
             goal_contains_builtin_unify_or_compare(Goal) = no
         )
@@ -206,31 +209,30 @@ apply_deep_prof_tail_rec_transform_to_proc(PredProcId, !ModuleInfo) :-
         map.det_update(ProcId, ProcInfo, ProcTable0, ProcTable1),
         map.det_insert(CloneProcId, CloneProcInfo, ProcTable1, ProcTable),
         pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo)
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     else
         true
     ).
 
-:- pred find_list_of_output_args(list(prog_var)::in, list(mer_mode)::in,
-    list(mer_type)::in, module_info::in, list(prog_var)::out) is det.
+:- pred find_list_of_output_args(module_info::in, list(prog_var)::in,
+    list(mer_type)::in, list(mer_mode)::in, list(prog_var)::out) is det.
 
-find_list_of_output_args(Vars, Modes, Types, ModuleInfo, !:Outputs) :-
+find_list_of_output_args(ModuleInfo, Vars, Types, Modes, !:Outputs) :-
     ( if
-        find_list_of_output_args_2(Vars, Modes, Types, ModuleInfo, !:Outputs)
+        find_list_of_output_args_2(ModuleInfo, Vars, Types, Modes, !:Outputs)
     then
         true
     else
         unexpected($pred, "list length mismatch")
     ).
 
-:- pred find_list_of_output_args_2(list(prog_var)::in, list(mer_mode)::in,
-    list(mer_type)::in, module_info::in, list(prog_var)::out) is semidet.
+:- pred find_list_of_output_args_2(module_info::in, list(prog_var)::in,
+    list(mer_type)::in, list(mer_mode)::in, list(prog_var)::out) is semidet.
 
-find_list_of_output_args_2([], [], [], _, []).
-find_list_of_output_args_2([Var | Vars], [Mode | Modes], [Type | Types],
-        ModuleInfo, Outputs) :-
-    find_list_of_output_args_2(Vars, Modes, Types, ModuleInfo, LaterOutputs),
+find_list_of_output_args_2(_, [], [], [], []).
+find_list_of_output_args_2(ModuleInfo, [Var | Vars], [Type | Types],
+        [Mode | Modes], Outputs) :-
+    find_list_of_output_args_2(ModuleInfo, Vars, Types, Modes, LaterOutputs),
     mode_to_top_functor_mode(ModuleInfo, Mode, Type, TopFunctorMode),
     (
         TopFunctorMode = top_in,
@@ -340,7 +342,7 @@ apply_deep_prof_tail_rec_to_goal(Goal0, Goal, TailRecInfo, !FoundTailCall,
         Goal = Goal0,
         Continue = no
     ;
-        GoalExpr0 = plain_call(PredId, ProcId, Args, Builtin, UnifyContext,
+        GoalExpr0 = plain_call(PredId, ProcId, ArgVars, Builtin, UnifyContext,
             SymName),
         ( if
             PredProcId = proc(PredId, ProcId),
@@ -352,13 +354,13 @@ apply_deep_prof_tail_rec_to_goal(Goal0, Goal, TailRecInfo, !FoundTailCall,
             CallDetism = TailRecInfo ^ dptri_detism,
             pred_info_get_arg_types(PredInfo, Types),
             proc_info_get_argmodes(ProcInfo, Modes),
-            find_list_of_output_args(Args, Modes, Types,
-                TailRecInfo ^ dptri_moduleinfo, CallOutputs),
+            find_list_of_output_args(TailRecInfo ^ dptri_moduleinfo,
+                ArgVars, Types, Modes, CallOutputs),
             CallOutputs = TailRecInfo ^ dptri_outputs,
             Builtin = not_builtin
         then
             ClonePredProcId = proc(ClonePredId, CloneProcId),
-            GoalExpr = plain_call(ClonePredId, CloneProcId, Args,
+            GoalExpr = plain_call(ClonePredId, CloneProcId, ArgVars,
                 Builtin, UnifyContext, SymName),
             goal_info_add_feature(feature_deep_self_tail_rec_call,
                 GoalInfo0, GoalInfo),
@@ -588,7 +590,7 @@ figure_out_rec_call_numbers_in_case_list([Case|Cases], !N, !TailCallSites) :-
 %-----------------------------------------------------------------------------%
 
 :- pred deep_prof_transform_pred(module_info::in, pred_id::in,
-    pred_table::in, pred_table::out) is det.
+    pred_id_table::in, pred_id_table::out) is det.
 
 deep_prof_transform_pred(ModuleInfo, PredId, !PredMap) :-
     map.lookup(!.PredMap, PredId, PredInfo0),
@@ -615,7 +617,8 @@ deep_prof_maybe_transform_proc(ModuleInfo, PredId, ProcId, !ProcTable) :-
         trace [io(!IO)] (
             module_info_get_globals(ModuleInfo, Globals),
             globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
-            ProcName = pred_proc_id_pair_to_string(ModuleInfo, PredId, ProcId),
+            ProcName = pred_proc_id_pair_to_user_string(ModuleInfo,
+                PredId, ProcId),
             get_progress_output_stream(ModuleInfo, ProgressStream, !IO),
             maybe_write_string(ProgressStream, VeryVerbose,
                 string.format("%% Deep profiling: %s\n", [s(ProcName)]), !IO)
@@ -665,7 +668,7 @@ make_deep_original_body(ModuleInfo, ProcInfo, DeepOriginalBody) :-
     proc_info_get_goal(ProcInfo, Body),
     proc_info_get_headvars(ProcInfo, HeadVars),
     proc_info_get_initial_instmap(ModuleInfo, ProcInfo, Instmap),
-    proc_info_get_vartypes(ProcInfo, Vartypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     proc_info_get_declared_determinism(ProcInfo, MaybeDetism),
     (
         MaybeDetism = yes(Detism)
@@ -673,9 +676,8 @@ make_deep_original_body(ModuleInfo, ProcInfo, DeepOriginalBody) :-
         MaybeDetism = no,
         proc_info_get_inferred_determinism(ProcInfo, Detism)
     ),
-    proc_info_get_varset(ProcInfo, Varset),
-    DeepOriginalBody = deep_original_body(Body, HeadVars, Instmap, Vartypes,
-        Detism, Varset).
+    DeepOriginalBody = deep_original_body(Body, HeadVars, Instmap,
+        VarTable, Detism).
 
 %-----------------------------------------------------------------------------%
 
@@ -690,7 +692,7 @@ make_deep_original_body(ModuleInfo, ProcInfo, DeepOriginalBody) :-
                 deep_current_csd        :: prog_var,
                 deep_site_num_counter   :: counter,
                 deep_call_sites         :: cord(call_site_static_data),
-                deep_varinfo            :: prog_var_set_types,
+                deep_var_table          :: var_table,
                 deep_proc_filename      :: string,
                 deep_maybe_rec_info     :: maybe(deep_recursion_info)
             ).
@@ -705,31 +707,28 @@ deep_prof_transform_normal_proc(ModuleInfo, PredProcId, !ProcInfo,
     fill_goal_id_slots_in_proc(ModuleInfo, ContainingGoalMap, !ProcInfo),
 
     module_info_get_globals(ModuleInfo, Globals),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-    some [!VarInfo, !DeepInfo, !Goal] (
+    some [!VarTable, !DeepInfo, !Goal] (
+        proc_info_get_var_table(!.ProcInfo, !:VarTable),
         proc_info_get_goal(!.ProcInfo, !:Goal),
         !.Goal = hlds_goal(_, GoalInfo0),
 
-        !:VarInfo = prog_var_set_types(VarSet0, VarTypes0),
-        generate_var("TopCSD", c_pointer_type, TopCSD, !VarInfo),
-        generate_var("MiddleCSD", c_pointer_type, MiddleCSD, !VarInfo),
-        generate_var("ProcStaticLayout", c_pointer_type, ProcStaticVar,
-            !VarInfo),
+        generate_var_c_ptr("TopCSD", TopCSD, !VarTable),
+        generate_var_c_ptr("MiddleCSD", MiddleCSD, !VarTable),
+        generate_var_c_ptr("ProcStaticLayout", ProcStaticVar, !VarTable),
 
         proc_info_get_context(!.ProcInfo, Context),
-        FileName = term.context_file(Context),
-        LineNumber = term.context_line(Context),
+        FileName = term_context.context_file(Context),
+        LineNumber = term_context.context_line(Context),
 
         proc_info_get_maybe_deep_profile_info(!.ProcInfo, MaybeDeepProfInfo),
         extract_deep_rec_info(MaybeDeepProfInfo, MaybeRecInfo),
         !:DeepInfo = deep_info(ModuleInfo, PredProcId, ContainingGoalMap,
-            MiddleCSD, counter.init(0), cord.empty, !.VarInfo, FileName,
+            MiddleCSD, counter.init(0), cord.empty, !.VarTable, FileName,
             MaybeRecInfo),
 
         % This call transforms the goals of the procedure.
         deep_prof_transform_goal(!Goal, _, !DeepInfo),
-        !:VarInfo = !.DeepInfo ^ deep_varinfo,
+        !:VarTable = !.DeepInfo ^ deep_var_table,
         CallSites = cord.list(!.DeepInfo ^ deep_call_sites),
 
         % Do coverage profiling if requested.
@@ -738,8 +737,8 @@ deep_prof_transform_normal_proc(ModuleInfo, PredProcId, !ProcInfo,
         (
             DoCoverageProfiling = yes,
             coverage_prof_transform_proc_body(ModuleInfo, PredProcId,
-                ContainingGoalMap, MaybeRecInfo, !Goal, !VarInfo,
-                CoveragePoints)
+                ContainingGoalMap, MaybeRecInfo, CoveragePoints,
+                !Goal, !VarTable)
         ;
             DoCoverageProfiling = no,
             CoveragePoints = []
@@ -772,28 +771,26 @@ deep_prof_transform_normal_proc(ModuleInfo, PredProcId, !ProcInfo,
         (
             CodeModel = model_det,
             maybe_generate_activation_ptr(UseActivationCounts, TopCSD,
-                MiddleCSD, MaybeActivationPtr, ExcpVars, !VarInfo),
+                MiddleCSD, MaybeActivationPtr, ExcpVars, !VarTable),
             build_det_proc_body(ModuleInfo, TopCSD, MiddleCSD, ProcStaticVar,
                 MaybeActivationPtr, GoalInfo0, BindProcStaticVarGoal, !Goal)
         ;
             CodeModel = model_semi,
             maybe_generate_activation_ptr(UseActivationCounts, TopCSD,
-                MiddleCSD, MaybeActivationPtr, ExcpVars, !VarInfo),
+                MiddleCSD, MaybeActivationPtr, ExcpVars, !VarTable),
             build_semi_proc_body(ModuleInfo, TopCSD, MiddleCSD, ProcStaticVar,
                 MaybeActivationPtr, GoalInfo0, BindProcStaticVarGoal, !Goal)
         ;
             CodeModel = model_non,
             generate_outermost_proc_dyns(UseActivationCounts, TopCSD,
                 MiddleCSD, MaybeOldActivationPtr, NewOutermostProcDyn,
-                ExcpVars, !VarInfo),
+                ExcpVars, !VarTable),
             build_non_proc_body(ModuleInfo, TopCSD, MiddleCSD,
                 ProcStaticVar, MaybeOldActivationPtr, NewOutermostProcDyn,
                 GoalInfo0, BindProcStaticVarGoal, !Goal)
         ),
 
-        !.VarInfo = prog_var_set_types(Vars, VarTypes),
-        proc_info_set_varset(Vars, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(!.VarTable, !ProcInfo),
         proc_info_set_goal(!.Goal, !ProcInfo),
         DeepLayoutInfo = hlds_deep_layout(ProcStatic, ExcpVars)
     ).
@@ -812,26 +809,21 @@ deep_prof_transform_inner_proc(ModuleInfo, PredProcId, !ProcInfo) :-
 
     proc_info_get_goal(!.ProcInfo, Goal0),
     Goal0 = hlds_goal(_, GoalInfo0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-    VarInfo0 = prog_var_set_types(VarSet0, VarTypes0),
-    generate_var("MiddleCSD", c_pointer_type, MiddleCSD, VarInfo0, VarInfo1),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
+    generate_var_c_ptr("MiddleCSD", MiddleCSD, VarTable0, VarTable1),
 
     Context = goal_info_get_context(GoalInfo0),
-    FileName = term.context_file(Context),
+    FileName = term_context.context_file(Context),
 
     proc_info_get_maybe_deep_profile_info(!.ProcInfo, MaybeDeepProfInfo),
     extract_deep_rec_info(MaybeDeepProfInfo, MaybeRecInfo),
     DeepInfo0 = deep_info(ModuleInfo, PredProcId, ContainingGoalMap, MiddleCSD,
-        counter.init(0), cord.empty, VarInfo1, FileName, MaybeRecInfo),
+        counter.init(0), cord.empty, VarTable1, FileName, MaybeRecInfo),
 
     deep_prof_transform_goal(Goal0, Goal, _, DeepInfo0, DeepInfo),
 
-    VarInfo = DeepInfo ^ deep_varinfo,
-    VarInfo = prog_var_set_types(VarSet, VarTypes),
-
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    VarTable = DeepInfo ^ deep_var_table,
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_goal(Goal, !ProcInfo).
 
 :- func is_proc_in_interface(module_info, pred_id, proc_id) = bool.
@@ -1075,10 +1067,13 @@ deep_prof_transform_goal(Goal0, Goal, AddedImpurity, !DeepInfo) :-
         )
     ;
         GoalExpr0 = call_foreign_proc(Attrs, _, _, _, _, _, _),
-        ( if get_may_call_mercury(Attrs) = proc_may_call_mercury then
+        MayCallMercury = get_may_call_mercury(Attrs),
+        (
+            MayCallMercury = proc_may_call_mercury,
             deep_prof_wrap_foreign_code(Goal1, Goal, !DeepInfo),
             AddedImpurity = yes
-        else
+        ;
+            MayCallMercury = proc_will_not_call_mercury,
             Goal = Goal1,
             AddedImpurity = no
         )
@@ -1268,16 +1263,16 @@ deep_prof_wrap_call(Goal0, Goal, !DeepInfo) :-
 
     SiteNumCounter0 = !.DeepInfo ^ deep_site_num_counter,
     counter.allocate(SiteNum, SiteNumCounter0, SiteNumCounter),
-    VarInfo0 = !.DeepInfo ^ deep_varinfo,
-    generate_var("SiteNum", int_type, SiteNumVar, VarInfo0, VarInfo1),
+    VarTable0 = !.DeepInfo ^ deep_var_table,
+    generate_var_int("SiteNum", SiteNumVar, VarTable0, VarTable1),
     generate_deep_const_unify(some_int_const(int_const(SiteNum)),
         SiteNumVar, SiteNumVarGoal),
-    !DeepInfo ^ deep_varinfo := VarInfo1,
+    !DeepInfo ^ deep_var_table := VarTable1,
     !DeepInfo ^ deep_site_num_counter := SiteNumCounter,
 
     Context = goal_info_get_context(GoalInfo0),
-    FileName0 = term.context_file(Context),
-    LineNumber = term.context_line(Context),
+    FileName0 = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
     compress_filename(!.DeepInfo, FileName0, FileName),
     CallKind = classify_call(ModuleInfo, GoalExpr0),
     (
@@ -1329,11 +1324,11 @@ deep_prof_wrap_call(Goal0, Goal, !DeepInfo) :-
                 [SiteNumVar, ClosureVar], [], PrepareGoal),
             CallSite = higher_order_call(FileName, LineNumber, GoalPath)
         ;
-            Generic = class_method(TypeClassInfoVar, MethodNum, _, _),
-            VarInfo2 = !.DeepInfo ^ deep_varinfo,
-            generate_var("MethodNum", int_type, MethodNumVar, VarInfo2,
-                VarInfo3),
-            !DeepInfo ^ deep_varinfo := VarInfo3,
+            Generic = class_method(TypeClassInfoVar,
+                method_proc_num(MethodNum), _, _),
+            VarTable2 = !.DeepInfo ^ deep_var_table,
+            generate_var_int("MethodNum", MethodNumVar, VarTable2, VarTable3),
+            !DeepInfo ^ deep_var_table := VarTable3,
             generate_deep_const_unify(some_int_const(int_const(MethodNum)),
                 MethodNumVar, MethodNumVarGoal),
             generate_deep_det_call(ModuleInfo, "prepare_for_method_call", 3,
@@ -1442,17 +1437,17 @@ deep_prof_wrap_call(Goal0, Goal, !DeepInfo) :-
 
 deep_prof_transform_higher_order_call(Globals, CodeModel, Goal0, Goal,
         !DeepInfo) :-
-    some [!VarInfo] (
-        !:VarInfo = !.DeepInfo ^ deep_varinfo,
+    some [!VarTable] (
+        !:VarTable = !.DeepInfo ^ deep_var_table,
 
-        generate_var("SavedPtr", c_pointer_type, SavedPtrVar, !VarInfo),
+        generate_var_c_ptr("SavedPtr", SavedPtrVar, !VarTable),
 
         globals.lookup_bool_option(Globals, use_activation_counts,
             UseActivationCounts),
         (
             UseActivationCounts = yes,
 
-            generate_var("SavedCounter", int_type, SavedCountVar, !VarInfo),
+            generate_var_int("SavedCounter", SavedCountVar, !VarTable),
             ExtraNonLocals =
                 set_of_var.list_to_set([SavedCountVar, SavedPtrVar]),
 
@@ -1482,7 +1477,7 @@ deep_prof_transform_higher_order_call(Globals, CodeModel, Goal0, Goal,
                 [], [], ReZeroStuff)
         ),
 
-        !DeepInfo ^ deep_varinfo := !.VarInfo
+        !DeepInfo ^ deep_var_table := !.VarTable
     ),
 
     Goal0 = hlds_goal(_, GoalInfo0),
@@ -1570,8 +1565,8 @@ deep_prof_wrap_foreign_code(Goal0, Goal, !DeepInfo) :-
 
     SiteNumCounter0 = !.DeepInfo ^ deep_site_num_counter,
     counter.allocate(SiteNum, SiteNumCounter0, SiteNumCounter),
-    generate_var("SiteNum", int_type, SiteNumVar, !.DeepInfo ^ deep_varinfo,
-        VarInfo),
+    generate_var_int("SiteNum", SiteNumVar,
+        !.DeepInfo ^ deep_var_table, VarTable),
     generate_deep_const_unify(some_int_const(int_const(SiteNum)),
         SiteNumVar, SiteNumVarGoal),
 
@@ -1580,8 +1575,8 @@ deep_prof_wrap_foreign_code(Goal0, Goal, !DeepInfo) :-
         [SiteNumVar], [], PrepareGoal),
 
     Context = goal_info_get_context(GoalInfo0),
-    LineNumber = term.context_line(Context),
-    FileName0 = term.context_file(Context),
+    FileName0 = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
     compress_filename(!.DeepInfo, FileName0, FileName),
     CallSite = callback(FileName, LineNumber, GoalPath),
 
@@ -1590,7 +1585,7 @@ deep_prof_wrap_foreign_code(Goal0, Goal, !DeepInfo) :-
     GoalExpr = conj(plain_conj, [SiteNumVarGoal, PrepareGoal, Goal0]),
     Goal = hlds_goal(GoalExpr, GoalInfo),
     !DeepInfo ^ deep_site_num_counter := SiteNumCounter,
-    !DeepInfo ^ deep_varinfo := VarInfo,
+    !DeepInfo ^ deep_var_table := VarTable,
     !DeepInfo ^ deep_call_sites :=
         cord.snoc(!.DeepInfo ^ deep_call_sites, CallSite).
 
@@ -1618,27 +1613,27 @@ compress_filename(Deep, FileName0, FileName) :-
 
 classify_call(ModuleInfo, Expr) = Class :-
     (
-        Expr = plain_call(PredId, ProcId, Args, _, _, _),
+        Expr = plain_call(PredId, ProcId, ArgVars, _, _, _),
         ( if
             lookup_builtin_pred_proc_id(ModuleInfo,
                 mercury_public_builtin_module, "unify",
-                pf_predicate, 2, mode_no(0), PredId, _),
-            Args = [TypeInfoVar | _]
+                pf_predicate, user_arity(2), mode_no(0), PredId, _),
+            ArgVars = [TypeInfoVar | _]
         then
             Class = call_class_special(proc(PredId, ProcId), TypeInfoVar)
         else if
             lookup_builtin_pred_proc_id(ModuleInfo,
                 mercury_public_builtin_module, "compare",
-                pf_predicate, 3, mode_no(0), PredId, _),
-            Args = [TypeInfoVar | _]
+                pf_predicate, user_arity(3), mode_no(0), PredId, _),
+            ArgVars = [TypeInfoVar | _]
         then
             Class = call_class_special(proc(PredId, ProcId), TypeInfoVar)
         else if
             lookup_builtin_pred_proc_id(ModuleInfo,
                 mercury_public_builtin_module,
-                "compare_representation", pf_predicate, 3,
+                "compare_representation", pf_predicate, user_arity(3),
                 mode_no(0), PredId, _),
-            Args = [TypeInfoVar | _]
+            ArgVars = [TypeInfoVar | _]
         then
             Class = call_class_special(proc(PredId, ProcId), TypeInfoVar)
         else
@@ -1733,10 +1728,10 @@ generate_recursion_counter_saves_and_restores_2([Chunk | Chunks], CSDVar,
     deep_info::in, deep_info::out) is det.
 
 generate_depth_var(CSN, DepthVar, !DeepInfo) :-
-    VarInfo0 = !.DeepInfo ^ deep_varinfo,
+    VarTable0 = !.DeepInfo ^ deep_var_table,
     VarName = string.format("Depth%d", [i(CSN)]),
-    generate_var(VarName, int_type, DepthVar, VarInfo0, VarInfo),
-    !DeepInfo ^ deep_varinfo:= VarInfo.
+    generate_var_int(VarName, DepthVar, VarTable0, VarTable),
+    !DeepInfo ^ deep_var_table := VarTable.
 
 :- pred generate_csn_vector(int::in, list(int)::in, list(prog_var)::out,
     list(hlds_goal)::out, prog_var::out,
@@ -1764,13 +1759,14 @@ generate_csn_vector(Length, CSNs, CSNVars, UnifyGoals, CellVar, !DeepInfo) :-
     prog_var::out, hlds_goal::out, deep_info::in, deep_info::out) is det.
 
 generate_csn_vector_cell(Length, CSNVars, CellVar, CellGoal, !DeepInfo) :-
-    VarInfo0 = !.DeepInfo ^ deep_varinfo,
     ProfilingBuiltin = mercury_profiling_builtin_module,
     CellTypeName = string.format("call_site_nums_%d", [i(Length)]),
     CellTypeCtor = type_ctor(qualified(ProfilingBuiltin, CellTypeName), 0),
     construct_type(CellTypeCtor, [], CellType),
-    generate_var("CSNCell", CellType, CellVar, VarInfo0, VarInfo),
-    !DeepInfo ^ deep_varinfo := VarInfo,
+    CellVarEntry = vte("CSNCell", CellType, is_not_dummy_type),
+    VarTable0 = !.DeepInfo ^ deep_var_table,
+    add_var_entry(CellVarEntry, CellVar, VarTable0, VarTable),
+    !DeepInfo ^ deep_var_table := VarTable,
     ConsId = cons(qualified(ProfilingBuiltin, CellTypeName), Length,
         CellTypeCtor),
     generate_deep_cell_unify(Length, ConsId, CSNVars, CellVar, CellGoal).
@@ -1779,10 +1775,10 @@ generate_csn_vector_cell(Length, CSNVars, CellVar, CellGoal, !DeepInfo) :-
     pair(prog_var, hlds_goal)::out, deep_info::in, deep_info::out) is det.
 
 generate_single_csn_unify(CSN, CSNVar - UnifyGoal, !DeepInfo) :-
-    VarInfo0 = !.DeepInfo ^ deep_varinfo,
+    VarTable0 = !.DeepInfo ^ deep_var_table,
     VarName = string.format("CSN%d", [i(CSN)]),
-    generate_var(VarName, int_type, CSNVar, VarInfo0, VarInfo),
-    !DeepInfo ^ deep_varinfo := VarInfo,
+    generate_var_int(VarName, CSNVar, VarTable0, VarTable),
+    !DeepInfo ^ deep_var_table := VarTable,
     generate_deep_const_unify(some_int_const(int_const(CSN)),
         CSNVar, UnifyGoal).
 
@@ -1828,50 +1824,31 @@ generate_deep_const_unify(ConsId, Var, Goal) :-
 :- pred generate_deep_cell_unify(int::in, cons_id::in, list(prog_var)::in,
     prog_var::in, hlds_goal::out) is det.
 
-generate_deep_cell_unify(Length, ConsId, Args, Var, Goal) :-
+generate_deep_cell_unify(Length, ConsId, ArgVars, Var, Goal) :-
     Ground = ground(shared, none_or_default_func),
     UnifyMode = unify_modes_li_lf_ri_rf(free, Ground, Ground, Ground),
     list.duplicate(Length, UnifyMode, ArgModes),
-    Unification = construct(Var, ConsId, Args, ArgModes,
+    Unification = construct(Var, ConsId, ArgVars, ArgModes,
         construct_statically(born_static), cell_is_shared,
         no_construct_sub_info),
-    GoalExpr = unify(Var, rhs_functor(ConsId, is_not_exist_constr, Args),
+    GoalExpr = unify(Var, rhs_functor(ConsId, is_not_exist_constr, ArgVars),
         UnifyMode, Unification, unify_context(umc_explicit, [])),
-    NonLocals = set_of_var.list_to_set([Var | Args]),
+    NonLocals = set_of_var.list_to_set([Var | ArgVars]),
     InstMapDelta = instmap_delta_bind_var(Var),
     Determinism = detism_det,
     goal_info_init(NonLocals, InstMapDelta, Determinism, purity_pure,
         GoalInfo),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-generate_var(Name, Type, Var, !VarInfo) :-
-    some [!VarSet, !VarTypes]
-    (
-        !.VarInfo = prog_var_set_types(!:VarSet, !:VarTypes),
-        generate_var_2(Name, Type, Var, !VarSet, !VarTypes),
-        !:VarInfo = prog_var_set_types(!.VarSet, !.VarTypes)
-    ).
-
-    % Create a variable with the given name and type, adding it to the
-    % separate prog_varset and vartypes structures.
-    %
-:- pred generate_var_2(string::in, mer_type::in, prog_var::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
-
-generate_var_2(Name, Type, Var, !VarSet, !VarTypes) :-
-    varset.new_named_var(Name, Var, !VarSet),
-    add_var_type(Var, Type, !VarTypes).
-
 :- pred maybe_generate_activation_ptr(bool::in, prog_var::in, prog_var::in,
     maybe(prog_var)::out, hlds_deep_excp_vars::out,
-    prog_var_set_types::in, prog_var_set_types::out) is det.
+    var_table::in, var_table::out) is det.
 
 maybe_generate_activation_ptr(UseActivationCounts, TopCSD, MiddleCSD,
-    MaybeActivationPtr, ExcpVars, !VarInfo) :-
+    MaybeActivationPtr, ExcpVars, !VarTable) :-
     (
         UseActivationCounts = no,
-        generate_var("ActivationPtr", c_pointer_type, ActivationPtr0,
-            !VarInfo),
+        generate_var_c_ptr("ActivationPtr", ActivationPtr0, !VarTable),
         MaybeActivationPtr = yes(ActivationPtr0)
     ;
         UseActivationCounts = yes,
@@ -1881,22 +1858,20 @@ maybe_generate_activation_ptr(UseActivationCounts, TopCSD, MiddleCSD,
 
 :- pred generate_outermost_proc_dyns(bool::in, prog_var::in, prog_var::in,
     maybe(prog_var)::out, prog_var::out, hlds_deep_excp_vars::out,
-    prog_var_set_types::in, prog_var_set_types::out) is det.
+    var_table::in, var_table::out) is det.
 
 generate_outermost_proc_dyns(UseActivationCounts, TopCSD, MiddleCSD,
-        MaybeOldActivationPtr, NewOutermostProcDyn, ExcpVars, !VarInfo) :-
+        MaybeOldActivationPtr, NewOutermostProcDyn, ExcpVars, !VarTable) :-
     (
         UseActivationCounts = no,
-        generate_var("OldOutermost", c_pointer_type, OldOutermostProcDyn0,
-            !VarInfo),
+        generate_var_c_ptr("OldOutermost", OldOutermostProcDyn0, !VarTable),
         MaybeOldActivationPtr = yes(OldOutermostProcDyn0)
     ;
         UseActivationCounts = yes,
         MaybeOldActivationPtr = no
     ),
     ExcpVars = hlds_deep_excp_vars(TopCSD, MiddleCSD, MaybeOldActivationPtr),
-    generate_var("NewOutermost", c_pointer_type, NewOutermostProcDyn,
-        !VarInfo).
+    generate_var_c_ptr("NewOutermost", NewOutermostProcDyn, !VarTable).
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -1905,14 +1880,14 @@ get_deep_profile_builtin_ppid(ModuleInfo, Name, Arity, PredId, ProcId) :-
     ModuleName = mercury_profiling_builtin_module,
     module_info_get_predicate_table(ModuleInfo, PredTable),
     predicate_table_lookup_pred_m_n_a(PredTable,
-        is_fully_qualified, ModuleName, Name, Arity, PredIds),
+        is_fully_qualified, ModuleName, Name, user_arity(Arity), PredIds),
     (
         PredIds = [],
         unexpected($pred, "no pred_id")
     ;
         PredIds = [PredId],
-        predicate_table_get_preds(PredTable, Preds),
-        map.lookup(Preds, PredId, PredInfo),
+        predicate_table_get_pred_id_table(PredTable, PredIdTable),
+        map.lookup(PredIdTable, PredId, PredInfo),
         ProcIds = pred_info_all_procids(PredInfo),
         (
             ProcIds = [],
@@ -1941,6 +1916,16 @@ extract_deep_rec_info(MaybeDeepProfInfo, MaybeRecInfo) :-
         MaybeDeepProfInfo = no,
         MaybeRecInfo = no
     ).
+
+%-----------------------------------------------------------------------------%
+
+generate_var_int(Name, Var, !VarTable) :-
+    Entry = vte(Name, int_type, is_not_dummy_type),
+    add_var_entry(Entry, Var, !VarTable).
+
+generate_var_c_ptr(Name, Var, !VarTable) :-
+    Entry = vte(Name, c_pointer_type, is_not_dummy_type),
+    add_var_entry(Entry, Var, !VarTable).
 
 %-----------------------------------------------------------------------------%
 :- end_module ll_backend.deep_profiling.

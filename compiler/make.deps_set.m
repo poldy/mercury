@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2002-2011 The University of Melbourne.
+% Copyright (C) 2020-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -40,10 +41,10 @@
 % :- type deps_set(T) == tree_bitset(T).
 
 :- type module_index.
-:- instance enum(module_index).
+:- instance uenum(module_index).
 
 :- type dependency_file_index.
-:- instance enum(dependency_file_index).
+:- instance uenum(dependency_file_index).
 
 %---------------------------------------------------------------------------%
 
@@ -72,7 +73,7 @@
 
     % Convert a dependency file to a dependency_file_index.
     %
-:- pred dependency_file_to_index(dependency_file::in,
+:- pred dependency_file_to_index(dependency_file_with_module_index::in,
     dependency_file_index::out, make_info::in, make_info::out) is det.
 
     % Convert a list of dependency files to a dependency_file_index set.
@@ -96,6 +97,7 @@
 
 :- import_module int.
 :- import_module maybe.
+:- import_module uint.
 :- import_module version_array.
 :- import_module version_hash_table.
 
@@ -105,19 +107,19 @@
 %
 
 :- type module_index
-    --->    module_index(int).
+    --->    module_index(uint).
 
-:- type dependency_file_index
-    --->    dependency_file_index(int).
-
-:- instance enum(module_index) where [
-    to_int(module_index(I)) = I,
-    from_int(I) = module_index(I)
+:- instance uenum(module_index) where [
+    to_uint(module_index(U)) = U,
+    from_uint(U, module_index(U))
 ].
 
-:- instance enum(dependency_file_index) where [
-    to_int(dependency_file_index(I)) = I,
-    from_int(I) = dependency_file_index(I)
+:- type dependency_file_index
+    --->    dependency_file_index(uint).
+
+:- instance uenum(dependency_file_index) where [
+    to_uint(dependency_file_index(U)) = U,
+    from_uint(U, dependency_file_index(U))
 ].
 
 %---------------------------------------------------------------------------%
@@ -128,18 +130,19 @@ module_name_to_index(ModuleName, Index, !Info) :-
     ( if version_hash_table.search(Forward0, ModuleName, Index0) then
         Index = Index0
     else
-        Map0 = module_index_map(_Forward0, Reverse0, Size0),
-        Index = module_index(Size0),
-        Size = Size0 + 1,
+        Map0 = module_index_map(_Forward0, Reverse0, USize0),
+        Slot = USize0,
+        Index = module_index(USize0),
+        USize = USize0 + 1u,
         version_hash_table.det_insert(ModuleName, Index, Forward0, Forward),
         TrueSize = version_array.size(Reverse0),
-        ( if Size > TrueSize then
+        ( if cast_to_int(USize) > TrueSize then
             NewSize = increase_array_size(TrueSize),
             version_array.resize(NewSize, ModuleName, Reverse0, Reverse)
         else
-            version_array.set(Size0, ModuleName, Reverse0, Reverse)
+            version_array.set(cast_to_int(Slot), ModuleName, Reverse0, Reverse)
         ),
-        Map = module_index_map(Forward, Reverse, Size),
+        Map = module_index_map(Forward, Reverse, USize),
         !Info ^ mki_module_index_map := Map
     ).
 
@@ -168,7 +171,7 @@ module_names_to_index_set_2([ModuleName | ModuleNames], !Set, !Info) :-
 module_index_to_name(Info, Index, ModuleName) :-
     Info ^ mki_module_index_map = module_index_map(_Forward, Reverse, _Size),
     Index = module_index(I),
-    ModuleName = version_array.lookup(Reverse, I).
+    ModuleName = version_array.lookup(Reverse, cast_to_int(I)).
 
 %---------------------%
 
@@ -191,18 +194,19 @@ dependency_file_to_index(DepFile, Index, !Info) :-
     ( if version_hash_table.search(ForwardMap0, DepFile, Index0) then
         Index = Index0
     else
-        Map0 = dependency_file_index_map(Forward0, Reverse0, Size0),
-        Index = dependency_file_index(Size0),
-        Size = Size0 + 1,
+        Map0 = dependency_file_index_map(Forward0, Reverse0, USize0),
+        Slot = USize0,
+        Index = dependency_file_index(USize0),
+        USize = USize0 + 1u,
         version_hash_table.det_insert(DepFile, Index, Forward0, Forward),
         TrueSize = version_array.size(Reverse0),
-        ( if Size > TrueSize then
+        ( if cast_to_int(USize) > TrueSize then
             NewSize = increase_array_size(TrueSize),
             version_array.resize(NewSize, DepFile, Reverse0, Reverse)
         else
-            version_array.set(Size0, DepFile, Reverse0, Reverse)
+            version_array.set(cast_to_int(Slot), DepFile, Reverse0, Reverse)
         ),
-        Map = dependency_file_index_map(Forward, Reverse, Size),
+        Map = dependency_file_index_map(Forward, Reverse, USize),
         !Info ^ mki_dep_file_index_map := Map
     ).
 
@@ -216,8 +220,16 @@ dependency_files_to_index_set(DepFiles, DepIndexSet, !Info) :-
     deps_set(dependency_file_index)::in, deps_set(dependency_file_index)::out,
     make_info::in, make_info::out) is det.
 
-dependency_files_to_index_set_2(DepFiles, !Set, !Info) :-
-    dependency_file_to_index(DepFiles, DepIndex, !Info),
+dependency_files_to_index_set_2(DepFile0, !Set, !Info) :-
+    (
+        DepFile0 = dep_target(target_file(ModuleName, TargetType)),
+        module_name_to_index(ModuleName, ModuleIndex, !Info),
+        DepFile = dfmi_target(ModuleIndex, TargetType)
+    ;
+        DepFile0 = dep_file(FileName),
+        DepFile = dfmi_file(FileName)
+    ),
+    dependency_file_to_index(DepFile, DepIndex, !Info),
     insert(DepIndex, !Set).
 
 %---------------------------------------------------------------------------%
@@ -229,7 +241,15 @@ index_to_dependency_file(Info, Index, DepFile) :-
     Info ^ mki_dep_file_index_map =
         dependency_file_index_map(_Forward, Reverse, _Size),
     Index = dependency_file_index(I),
-    DepFile = version_array.lookup(Reverse, I).
+    version_array.lookup(Reverse, cast_to_int(I), DepFile0),
+    (
+        DepFile0 = dfmi_target(ModuleIndex, FileType),
+        module_index_to_name(Info, ModuleIndex, ModuleName),
+        DepFile = dep_target(target_file(ModuleName, FileType))
+    ;
+        DepFile0 = dfmi_file(FileName),
+        DepFile = dep_file(FileName)
+    ).
 
 %---------------------%
 

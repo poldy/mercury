@@ -135,9 +135,9 @@ esac
 
 # The code in config.guess that distinguishes between the i*86 and x86_64
 # versions of Darwin needs to use the C compiler to make that distinction.
-# In particular, if we wish to build a 32-bit Mercury installation on
+# In particular, if we wish to build a 32-bit Mercury installation on an
 # x86_64 machine, then we need to tell configure that we are using the
-# 32-bit C compiler. If we didn't call the AC_PROG_CC macro at this point
+# 32-bit C compiler. If we didn't call the AC_PROG_CC macro at this point,
 # then configure's --with-cc option would not do that.
 
 AC_PROG_CC
@@ -151,7 +151,6 @@ export CC
 # GCC. However, it also sets it if the C compiler is clang -- because they
 # both define __GNUC__ -- do *NOT* use the GCC variable to check the C compiler
 # type, instead use the value of C_COMPILER_TYPE (defined below).
-#
 MERCURY_CC_TYPE
 
 MERCURY_HAVE_CLANG=no
@@ -428,7 +427,9 @@ then
         :- pred my_uint_xor(uint32::in, uint32::out) is det.
 
         my_uint_xor(A, B) :-
-            561u32 = uint32.xor(A, B).
+            disable_warning [[unknown_format_calls]] (
+                561u32 = uint32.xor(A, B)
+            ).
 
         :- pred p(t::out) is det.
 
@@ -573,7 +574,7 @@ EOF
         $BOOTSTRAP_MC \
             --verbose \
             $link_static_opt conftest \
-            --no-warn-stdlib-shadowing \
+            --format-2023-01-27 \
             --no-ssdb \
             </dev/null >&AS_MESSAGE_LOG_FD 2>&1 &&
         test "`./conftest 2>&1 | tr -d '\015'`" = "Hello, world" &&
@@ -1169,19 +1170,20 @@ else
     ARFLAGS="cr"
     AR_LIBFILE_OPT=""
 
-    LD_STRIP_FLAG="-s"
-    STRIP_EXE=""
-    STRIP_EXE_SHARED_FLAGS=""
-    STRIP_EXE_STATIC_FLAGS=""
-
-    # The `-s' linker option is deprecated on Darwin 9+ and has no effect other
-    # than causing the linker to emit a warning. Call the strip tool directly.
-    #
     case "$host" in
         *apple*darwin*)
+            # The `-s' linker option is deprecated on Darwin 9+ and has no
+            # effect other than causing the linker to emit a warning. Call the
+            # strip tool directly.
             LD_STRIP_FLAG=""
-            STRIP_EXE="strip"
+            AC_CHECK_TOOL([STRIP_EXE], [strip], [strip])
             STRIP_EXE_SHARED_FLAGS="-x"
+            STRIP_EXE_STATIC_FLAGS=""
+            ;;
+        *)
+            LD_STRIP_FLAG="-s"
+            STRIP_EXE=""
+            STRIP_EXE_SHARED_FLAGS=""
             STRIP_EXE_STATIC_FLAGS=""
             ;;
     esac
@@ -1194,7 +1196,6 @@ else
     # for interactive queries in the Mercury debugger. For gcc, this
     # linker option can be enabled by passing either `-rdynamic' or
     # `-Wl,-export-dynamic' to gcc; we use the former.
-    #
     case $FULLARCH in
         *-linux*)
             LDFLAGS_FOR_TRACE="-rdynamic"
@@ -2293,7 +2294,7 @@ AC_SUBST(MR_DARWIN_SETJMP_WORKAROUND)
 #-----------------------------------------------------------------------------#
 #
 # On sparc, x86, and probably on other architectures,
-# if we're using non-local gotos, then for egcs 1.1, we need
+# if we are using non-local gotos, then for egcs 1.1, we need
 # `-fno-gcse -fno-function-cse', and for gcc 2.8 we need `-fno-function-cse'.
 # Otherwise gcc generates code which initializes registers in the function
 # prologue and expects them to be valid later on, which doesn't work with
@@ -2501,13 +2502,12 @@ esac
 #  MR_decl_static(nrev__nreverse_2_0)
 #  ^
 #
-# The problem is, mfiltercc removes the first line, but lets the rest
-# through. This will confuse users even more than the unfiltered error
-# message would, since they get the all the context but no information about
-# the supposed "error" itself. For gcc versions that by default generate such
-# long error messages, the inclusion of CFLAGS_FOR_ERRMSG_FILTER in
-# CFLAGS_FOR_GOTOS will cause them to deviate from this default and switch
-# them off.
+# The problem is, mfiltercc removes the first line, but lets the rest through.
+# This will confuse users even more than the unfiltered error message would,
+# since they get the all the context but no information about the supposed
+# "error" itself. For gcc versions that by default generate such long error
+# messages, the inclusion of CFLAGS_FOR_ERRMSG_FILTER in CFLAGS_FOR_GOTOS
+# will cause them to deviate from this default and switch them off.
 #
 # We *could* try to find a way to define labels that gcc does not complain
 # about, at all. However, given that we *have* to use assembly code to make
@@ -3458,10 +3458,10 @@ AC_ARG_ENABLE(hlc-prof-grades,
                   [install profiling versions of the high level C grade]),
     [enable_hlc_prof_grades="$enableval"],[enable_hlc_prof_grades=no])
 
-AC_ARG_ENABLE(hlc-low-level-debug-grades,
-    AS_HELP_STRING([--enable-hlc-low-level-debug-grades],
-                  [install a low-level debugging version of the high level C grade]),
-    [enable_hlc_ll_debug_grades="$enableval"],[enable_hlc_ll_debug_grades=no])
+AC_ARG_ENABLE(hlc-gdb-grades,
+    AS_HELP_STRING([--enable-hlc-gdb-grades],
+                  [install a version of the high level C grade that supports debuggers for C]),
+    [enable_hlc_gdb_grades="$enableval"],[enable_hlc_gdb_grades=no])
 
 AC_ARG_ENABLE(rbmm-grades,
     AS_HELP_STRING([--enable-rbmm-grades],
@@ -3513,7 +3513,7 @@ if test "$enable_most_grades" = no; then
     enable_mmos_grades=no
     enable_dmm_grades=no
     enable_hlc_prof_grades=no
-    enable_hlc_ll_debug_grades=no
+    enable_hlc_gdb_grades=no
     enable_rbmm_grades=no
     enable_par_grades=no
     enable_stseg_grades=no
@@ -3689,9 +3689,9 @@ if test "$enable_debug_grades" = yes; then
     fi
 fi
 
-# Add low-level debug grades.
-if test "$enable_hlc_ll_debug_grades" = yes; then
-    LIBGRADES="$LIBGRADES hlc.gcd.ll_debug"
+# Add grades that support debugging using gdb and other debuggers for C.
+if test "$enable_hlc_gdb_grades" = yes; then
+    LIBGRADES="$LIBGRADES hlc.gcd.c_debug"
 fi
 
 # Add rbmm grades.
@@ -4087,13 +4087,17 @@ DEPLOYMENT_TARGET="no"
 case "$host" in
     *apple*darwin*)
         case "$mercury_cv_macosx_deployment_target" in
-            # NOTE: the sw_vers utility tells us which version of Mac OS X
-            # we are using as opposed to which version of Darwin we are using.
-            # uname only reports the latter.
             auto)
-                DEPLOYMENT_TARGET=`sw_vers -productVersion | cut -d \. -f 1 -f 2`
+                if test -n "${MACOSX_DEPLOYMENT_TARGET:-}"
+                then
+                    DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+                else
+                    # NOTE: the sw_vers utility tells us which version of
+                    # Mac OS X we are using as opposed to which version of
+                    # Darwin we are using. uname only reports the latter.
+                    DEPLOYMENT_TARGET=`sw_vers -productVersion | cut -d \. -f 1 -f 2`
+                fi
                 ;;
-
             *)
                 DEPLOYMENT_TARGET="$mercury_cv_macosx_deployment_target"
                 ;;

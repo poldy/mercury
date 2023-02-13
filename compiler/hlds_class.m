@@ -37,6 +37,7 @@
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_type_subst.
 
+:- import_module cord.
 :- import_module int.
 :- import_module require.
 :- import_module varset.
@@ -47,15 +48,18 @@
 
 :- type class_table == map(class_id, hlds_class_defn).
 
-:- type maybe_bad_class_defn
-    --->    has_no_bad_class_defn
-    ;       has_bad_class_defn.
-
     % Information about a single `typeclass' declaration.
     %
 :- type hlds_class_defn
     --->    hlds_class_defn(
                 classdefn_status            :: typeclass_status,
+
+                % The names and kinds of type variables.
+                classdefn_tvarset           :: tvarset,
+                classdefn_kinds             :: tvar_kind_map,
+
+                % ClassVars.
+                classdefn_vars              :: list(tvar),
 
                 % SuperClasses.
                 classdefn_supers            :: list(prog_constraint),
@@ -66,24 +70,24 @@
                 % All ancestors which have fundeps on them.
                 classdefn_fundep_ancestors  :: list(prog_constraint),
 
-                % ClassVars.
-                classdefn_vars              :: list(tvar),
-
-                % Kinds of class_vars.
-                classdefn_kinds             :: tvar_kind_map,
-
                 % The interface from the original declaration, used by
                 % intermod.m to write out the interface for a local typeclass
                 % to the `.opt' file.
+                % XXX METHOD intermod*.m does not refer to class_interfaces.
                 classdefn_interface         :: class_interface,
 
-                % Methods.
-                classdefn_hlds_interface    :: hlds_class_interface,
+                % Methods. There is one method_info for every mode
+                % of every predicate or function method in the typeclass
+                % declaration. The order is given
+                % - first by by the order of the predicate or function
+                %   declarations in the typeclass declaration,
+                % - and then, within the sequence of method_infos for any
+                %   given method (which will always be contiguous),
+                %   by the order of the mode declarations for the given
+                %   method.
+                classdefn_method_infos      :: list(method_info),
 
-                % VarNames.
-                classdefn_tvarset           :: tvarset,
-
-                % Location of declaration.
+                % Location of the class declaration.
                 classdefn_context           :: prog_context,
 
                 % Does this class have a bad definition? If yes, record
@@ -108,18 +112,35 @@
 
 :- type hlds_class_argpos == int.
 
+:- type maybe_bad_class_defn
+    --->    has_no_bad_class_defn
+    ;       has_bad_class_defn.
+
 :- func restrict_list_elements(set(hlds_class_argpos), list(T)) = list(T).
 
-:- type hlds_class_interface == list(pred_proc_id).
+%---------------------------------------------------------------------------%
 
     % For each class, we keep track of a list of its instances, since there
     % can be more than one instance of each class. Each visible instance
     % is assigned a unique identifier (integers beginning from one).
-    % The position in the list of instances corresponds to the instance_id.
+    % The position in the list of instances corresponds to integer
+    % inside the instance_id.
+    %
+    % We use a list for two reasons.
+    %
+    % The first reason is that a ground type may be the instance of
+    % more than one type containing type variables, and the same is true
+    % for vectors of types. This means that the search for an instance_defn
+    % that matches the particular type vector in a given situation
+    % can match more than one instance_defn, which makes the task of
+    % designing a data structure that does useful indexing much harder.
+    %
+    % The second reason is that in all non-pathological cases, the list is
+    % short enough for the lack of indexing not to be a problem.
     %
 :- type instance_table == map(class_id, list(hlds_instance_defn)).
-
-:- type instance_id == int.
+:- type instance_id
+    --->    instance_id(int).
 
     % Information about a single `instance' declaration.
     % The order of fields is intended to put the list of hlds_instance_defns
@@ -133,42 +154,121 @@
                 % Module of the instance declaration.
                 instdefn_module         :: module_name,
 
-                % The class types. The original types field is used only
-                % for error checking.
-                instdefn_types          :: list(mer_type),
-                instdefn_orig_types     :: list(mer_type),
-
                 % Import status of the instance declaration.
                 % XXX This can be set to abstract_imported even if
                 % the instance is NOT imported.
                 instdefn_status         :: instance_status,
 
-                % Context of declaration.
-                instdefn_context        :: prog_context,
+                % VarNames
+                instdefn_tvarset        :: tvarset,
+
+                % The class types. The types field is subject to the expansion
+                % of equivalence types; the original types field is not.
+                % The original types field is used only for error checking.
+                instdefn_orig_types     :: list(mer_type),
+                instdefn_types          :: list(mer_type),
 
                 % Constraints on the instance declaration.
                 instdefn_constraints    :: list(prog_constraint),
 
-                % Methods
-                instdefn_body           :: instance_body,
-
-                % After check_typeclass, we will know the pred_ids and proc_ids
-                % of all the methods.
-                instdefn_hlds_interface :: maybe(hlds_class_interface),
-
-                % VarNames
-                instdefn_tvarset        :: tvarset,
+                % If this is a concrete instance definition in the local module
+                % that subsumes an abstract instance definition that is
+                % also local (subsuming it in the sense of being equivalent
+                % to it but providing a definition), then this field should
+                % contain the context of the subsumed definition.
+                %
+                % This field is filled in by the check_typeclass pass.
+                % Until that is run, this field should always contain `no'.
+                instdefn_subsumed_ctxt  :: maybe(prog_context),
 
                 % "Proofs" of how to build the typeclass_infos for the
                 % superclasses of this class (that is, the constraints
                 % on the class declaration), for this instance.
-                instdefn_proofs         :: constraint_proof_map
+                instdefn_proofs         :: constraint_proof_map,
+
+                % Methods.
+                instdefn_body           :: instance_body,
+
+                % Before the check_typeclass pass, this field will be `no'.
+                % After the check_typeclass pass, it should be `yes(...)',
+                % with a method_info for every mode of every method.
+                % Each of these method_infos will contain the pred_proc_id
+                % of the procedure that check_typeclass.m creates as the
+                % implementation of the given mode of a given method.
+                % The body goal of this procedure will be the method's
+                % implementation from the instance declaration: either
+                % a call to the named implementation predicate or function,
+                % or the code of the provided clauses. Any problems with
+                % the implementation of a method will be detected via
+                % the usual semantic checks on these procedures
+                % carried out by mercury_compile_front_end.m.
+                %
+                % The order of the method_infos here will match
+                % the order of the method_infos in the hlds_class_defn.
+                instdefn_maybe_method_infos :: maybe(list(method_info)),
+
+                % The context of the instance declaration.
+                instdefn_context        :: prog_context
             ).
 
     % Return the value of the MR_typeclass_info_num_extra_instance_args field
     % in the base_typeclass_info of the given instance.
     %
 :- pred num_extra_instance_args(hlds_instance_defn::in, int::out) is det.
+
+:- type method_info
+    --->    method_info(
+                % The number of this method procedure.
+                % The numbering starts at #1.
+                method_proc_number      :: method_proc_num,
+
+                % The name of the method predicate or function.
+                % If this predicate or function has N modes,
+                % then the list of method_infos of the class or instance
+                % definition will contain N consecutive method_infos,
+                % all with the same method_pred_name field.
+                % They will also have the same pred_id in the first half
+                % of the method_orig_proc field, but the proc_ids in the
+                % second half will monotonically increase.
+                method_pred_name        :: pred_pf_name_arity,
+
+                % The originally created implementation of this procedure.
+                % For method_infos in class
+                method_orig_proc        :: pred_proc_id,
+
+                % The current implementation of this procedure.
+                % For method_infos in hlds_class_defns, this should be
+                % the same procedure as method_orig_proc.
+                % For method_infos in hlds_instance_defns, this should
+                % *start out* as the same procedure as method_orig_proc,
+                % but it may be updated by compiler passes after
+                % check_typeclass.m. These passes need not preserve
+                % the original grouping of method procedures into method
+                % predicates or functions. It is therefore possible for
+                % the method_info list of an instance definition to contain
+                % two method_infos whose method_orig_proc field contain e.g.
+                %
+                %   proc(pred_id(10), proc_id(0), and
+                %   proc(pred_id(10), proc_id(1)
+                %
+                % (i.e. the procedures refer to the same pred_id), but whose
+                % method_cur_proc fields contain
+                %
+                %   proc(pred_id(20), proc_id(0), and
+                %   proc(pred_id(21), proc_id(1),
+                %
+                % (i.e. the procedures refer to different pred_ids).
+                % The direct_arg_in_out pass is one (and currently the only)
+                % example of a program transformation that can do this.
+                method_cur_proc         :: pred_proc_id
+            ).
+
+:- type method_proc_num
+    --->    method_proc_num(int).
+
+:- func lookup_method_proc(list(method_info), method_proc_num) = method_info.
+
+:- func method_infos_to_pred_proc_ids(list(method_info)) = list(pred_proc_id).
 
 %---------------------------------------------------------------------------%
 
@@ -194,14 +294,29 @@ restrict_list_elements_2([Posn | Posns], Index, [X | Xs], RestrictedXs) :-
     ).
 
 num_extra_instance_args(InstanceDefn, NumExtra) :-
-    InstanceDefn = hlds_instance_defn(_InstanceModule,
-        InstanceTypes, _OrigInstanceTypes, _ImportStatus, _TermContext,
-        InstanceConstraints, _Body, _PredProcIds, _Varset, _SuperClassProofs),
-    type_vars_list(InstanceTypes, TypeVars),
+    InstanceTypes = InstanceDefn ^ instdefn_types,
+    InstanceConstraints = InstanceDefn ^ instdefn_constraints,
+    type_vars_in_types(InstanceTypes, TypeVars),
     get_unconstrained_tvars(TypeVars, InstanceConstraints, Unconstrained),
     list.length(InstanceConstraints, NumConstraints),
     list.length(Unconstrained, NumUnconstrained),
     NumExtra = NumConstraints + NumUnconstrained.
+
+lookup_method_proc(MethodInfos, method_proc_num(MethodNum)) = MethodInfo :-
+    list.det_index1(MethodInfos, MethodNum, MethodInfo).
+
+method_infos_to_pred_proc_ids(MethodInfos) = PredProcIds :-
+    acc_pred_proc_ids_for_methods(MethodInfos, cord.init, PredProcIdsCord),
+    PredProcIds = cord.list(PredProcIdsCord).
+
+:- pred acc_pred_proc_ids_for_methods(list(method_info)::in,
+    cord(pred_proc_id)::in, cord(pred_proc_id)::out) is det.
+
+acc_pred_proc_ids_for_methods([], !PredProcIdsCord).
+acc_pred_proc_ids_for_methods([MethodInfo | MethodInfos], !PredProcIdsCord) :-
+    MethodPredProcId = MethodInfo ^ method_cur_proc,
+    cord.snoc(MethodPredProcId, !PredProcIdsCord),
+    acc_pred_proc_ids_for_methods(MethodInfos, !PredProcIdsCord).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -301,7 +416,7 @@ num_extra_instance_args(InstanceDefn, NumExtra) :-
             %
             % - That would require storing a renamed version of the
             %   constraint_proofs for *every* use of an instance declaration.
-            %   This wouldn't even get GCed for a long time because it
+            %   This wouldn't even get GCed for a long time, because it
             %   would be stored in the pred_info.
             %
             % - The superclass proofs stored in the hlds_instance_defn would

@@ -24,7 +24,7 @@
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module maybe.
 
@@ -79,7 +79,6 @@
 :- import_module hlds.hlds_error_util.
 :- import_module hlds.make_goal.
 :- import_module hlds.pred_table.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.int_emu.
@@ -97,6 +96,7 @@
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.
 :- import_module transform_hlds.const_prop.
 
@@ -108,9 +108,8 @@
 :- import_module pair.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module uint.
-:- import_module varset.
 
 %---------------------------------------------------------------------------%
 
@@ -169,11 +168,11 @@ simplify_goal_plain_call(GoalExpr0, GoalExpr, GoalInfo0, GoalInfo,
 
         PredName = pred_info_name(PredInfo),
         proc_id_to_int(ProcId, ModeNum),
-        simplify_info_get_var_types(!.Info, VarTypes),
+        simplify_info_get_var_table(!.Info, VarTable),
         ( if
             % Step 1.
             simplify_do_const_prop(!.Info),
-            const_prop.evaluate_call(Globals, VarTypes, InstMap0,
+            const_prop.evaluate_call(Globals, VarTable, InstMap0,
                 ModuleName, PredName, ModeNum, Args,
                 EvaluatedGoalExpr, GoalInfo0, EvaluatedGoalInfo)
         then
@@ -370,7 +369,7 @@ maybe_generate_warning_for_implicit_stream_predicate(ModuleInfo,
         module_info_get_predicate_table(ModuleInfo, PredTable),
         PredSymName = qualified(ModuleName, PredName),
         predicate_table_lookup_pf_sym_arity(PredTable, is_fully_qualified,
-            PredOrFunc, PredSymName, OrigArity + 1, PredIds),
+            PredOrFunc, PredSymName, pred_form_arity(OrigArity + 1), PredIds),
         list.filter(
             one_extra_stream_arg(ModuleInfo, NumExtraArgs,
                 ExtraArgTypes, UserArgTypes),
@@ -532,7 +531,7 @@ maybe_generate_warning_for_call_to_obsolete_predicate(PredId, ProcId,
         true
     ).
 
-:- func wrap_sym_name_arity(sym_name_arity) = format_component.
+:- func wrap_sym_name_arity(sym_name_arity) = format_piece.
 
 wrap_sym_name_arity(SymNameAndArity) =
     qual_sym_name_arity(SymNameAndArity).
@@ -575,11 +574,11 @@ maybe_generate_warning_for_infinite_loop_call(PredId, ProcId, ArgVars,
 
         % Are the input arguments the same (or equivalent)?
         simplify_info_get_module_info(!.Info, ModuleInfo),
-        simplify_info_get_varset(!.Info, VarSet),
+        simplify_info_get_var_table(!.Info, VarTable),
         pred_info_get_var_name_remap(PredInfo, VarNameRemap),
         proc_info_get_headvars(ProcInfo, HeadVars),
         proc_info_get_argmodes(ProcInfo, ArgModes),
-        input_args_are_suspicious(ModuleInfo, Common, VarSet, VarNameRemap,
+        input_args_are_suspicious(ModuleInfo, Common, VarTable, VarNameRemap,
             HeadVars, ArgVars, ArgModes,
             all_inputs_eqv, AllInputsEqv,
             all_inputs_eqv_or_svar, AllInputsEqvOrSvar,
@@ -705,7 +704,7 @@ shut_up_suspicious_recursion_msg = Component :-
     % as VarNameRemap.
     %
 :- pred input_args_are_suspicious(module_info::in, common_info::in,
-    prog_varset::in, map(prog_var, string)::in,
+    var_table::in, map(prog_var, string)::in,
     list(prog_var)::in, list(prog_var)::in, list(mer_mode)::in,
     maybe_all_inputs_eqv::in, maybe_all_inputs_eqv::out,
     maybe_all_inputs_eqv_or_svar::in, maybe_all_inputs_eqv_or_svar::out,
@@ -714,7 +713,7 @@ shut_up_suspicious_recursion_msg = Component :-
 
 input_args_are_suspicious(_, _, _, _, [], [], _,
         !AllInputsEqv, !AllInputsEqvOrSvar, !HeadBaseNames, !ArgBaseNames).
-input_args_are_suspicious(ModuleInfo, CommonInfo, VarSet, VarNameRemap,
+input_args_are_suspicious(ModuleInfo, CommonInfo, VarTable, VarNameRemap,
         [HeadVar | HeadVars], [ArgVar | ArgVars], [Mode | Modes],
         !AllInputsEqv, !AllInputsEqvOrSvar, !HeadBaseNames, !ArgBaseNames) :-
     InitialInst = mode_get_initial_inst(ModuleInfo, Mode),
@@ -753,8 +752,10 @@ input_args_are_suspicious(ModuleInfo, CommonInfo, VarSet, VarNameRemap,
             % If either the argument or the head variable is unnamed, then
             % we have no reason to believe the recursive call is suspicious,
             % so we fail.
-            head_var_name(VarSet, VarNameRemap, HeadVar, HeadName),
-            varset.search_name(VarSet, ArgVar, ArgName),
+            head_var_name(VarTable, VarNameRemap, HeadVar, HeadName),
+            lookup_var_entry(VarTable, ArgVar, ArgVarEntry),
+            ArgName = ArgVarEntry ^ vte_name,
+            ArgName \= "",
             delete_any_numeric_suffix(HeadName, HeadBaseName),
             delete_any_numeric_suffix(ArgName, ArgBaseName),
             ( if HeadBaseName = ArgBaseName then
@@ -773,18 +774,20 @@ input_args_are_suspicious(ModuleInfo, CommonInfo, VarSet, VarNameRemap,
         % This is not an input argument.
         true
     ),
-    input_args_are_suspicious(ModuleInfo, CommonInfo, VarSet, VarNameRemap,
+    input_args_are_suspicious(ModuleInfo, CommonInfo, VarTable, VarNameRemap,
         HeadVars, ArgVars, Modes,
         !AllInputsEqv, !AllInputsEqvOrSvar, !HeadBaseNames, !ArgBaseNames).
 
-:- pred head_var_name(prog_varset::in, map(prog_var, string)::in,
+:- pred head_var_name(var_table::in, map(prog_var, string)::in,
     prog_var::in, string::out) is semidet.
 
-head_var_name(VarSet, VarNameRemap, Var, Name) :-
+head_var_name(VarTable, VarNameRemap, Var, Name) :-
     ( if map.search(VarNameRemap, Var, HeadName) then
         Name = HeadName
     else
-        varset.search_name(VarSet, Var, Name)
+        lookup_var_entry(VarTable, Var, Entry),
+        Name = Entry ^ vte_name,
+        Name \= ""
     ).
 
 :- pred delete_any_numeric_suffix(string::in, string::out) is det.
@@ -866,7 +869,7 @@ maybe_generate_warning_for_useless_comparison(PredInfo, InstMap, Args,
     ).
 
 :- pred is_useless_unsigned_comparison(string::in, string::in, mer_inst::in,
-    mer_inst::in, list(format_component)::out) is semidet.
+    mer_inst::in, list(format_piece)::out) is semidet.
 
 is_useless_unsigned_comparison(ModuleName, PredName, ArgA, ArgB, Pieces) :-
     (
@@ -1065,18 +1068,14 @@ simplify_improve_library_call(InstMap0, ModuleName, PredName, ModeNum, Args,
 simplify_inline_builtin_inequality(TI, X, Y, Inequality, Invert, GoalInfo,
         ImprovedGoalExpr, InstMap0, !Info) :-
     % Construct the variable to hold the comparison result.
-    simplify_info_get_varset(!.Info, VarSet0),
-    varset.new_var(CmpRes, VarSet0, VarSet),
-    simplify_info_set_varset(VarSet, !Info),
-
-    % We have to add the type of CmpRes to the var_types.
-    simplify_info_get_var_types(!.Info, VarTypes0),
-    add_var_type(CmpRes, comparison_result_type, VarTypes0, VarTypes),
-    simplify_info_set_var_types(VarTypes, !Info),
+    simplify_info_get_var_table(!.Info, VarTable0),
+    CmpResEntry = vte("", comparison_result_type, is_not_dummy_type),
+    add_var_entry(CmpResEntry, CmpRes, VarTable0, VarTable),
+    simplify_info_set_var_table(VarTable, !Info),
 
     % Construct the call to compare/3.
     Context = hlds_goal.goal_info_get_context(GoalInfo),
-    Args = [TI, CmpRes, X, Y],
+    ArgVars = [CmpRes, X, Y],
 
     instmap_lookup_var(InstMap0, X, XInst),
     instmap_lookup_var(InstMap0, Y, YInst),
@@ -1091,9 +1090,9 @@ simplify_inline_builtin_inequality(TI, X, Y, Inequality, Invert, GoalInfo,
     Unique = ground(unique, none_or_default_func),
     ArgInsts = [CmpRes - Unique],
     BuiltinModule = mercury_public_builtin_module,
-    generate_simple_call(ModuleInfo, BuiltinModule, "compare",
-        pf_predicate, mode_no(ModeNo), detism_det, purity_pure, Args, [],
-        instmap_delta_from_assoc_list(ArgInsts), Context, CmpGoal0),
+    generate_plain_call(ModuleInfo, pf_predicate, BuiltinModule, "compare",
+        [TI], ArgVars, instmap_delta_from_assoc_list(ArgInsts),
+        mode_no(ModeNo), detism_det, purity_pure, [], Context, CmpGoal0),
     CmpGoal0 = hlds_goal(CmpExpr, CmpInfo0),
     CmpNonLocals0 = goal_info_get_nonlocals(CmpInfo0),
     set_of_var.insert(CmpRes, CmpNonLocals0, CmpNonLocals),
@@ -1147,8 +1146,8 @@ simplify_improve_builtin_compare(_ModeNum, Args, Context,
 
     simplify_info_get_module_info(!.Info, ModuleInfo),
     list.reverse(Args, [Y, X, R | _]),
-    simplify_info_get_var_types(!.Info, VarTypes),
-    lookup_var_type(VarTypes, Y, Type),
+    simplify_info_get_var_table(!.Info, VarTable),
+    lookup_var_type(VarTable, Y, Type),
     type_definitely_has_no_user_defined_equality_pred(ModuleInfo, Type),
 
     require_det (
@@ -1161,14 +1160,14 @@ simplify_improve_builtin_compare(_ModeNum, Args, Context,
         % to determine the final outcome in almost 50% of cases, it would
         % let us avoid the cost of the second test *much* more frequently.
 
-        generate_simple_call(ModuleInfo,
+        generate_plain_call(ModuleInfo, pf_predicate,
             mercury_private_builtin_module, "builtin_compound_eq",
-            pf_predicate, only_mode, detism_semi, purity_pure, [X, Y], [],
-            instmap_delta_bind_no_var, Context, CmpEqGoal),
-        generate_simple_call(ModuleInfo,
+            [], [X, Y], instmap_delta_bind_no_var, only_mode,
+            detism_semi, purity_pure, [], Context, CmpEqGoal),
+        generate_plain_call(ModuleInfo, pf_predicate,
             mercury_private_builtin_module, "builtin_compound_lt",
-            pf_predicate, only_mode, detism_semi, purity_pure, [X, Y], [],
-            instmap_delta_bind_no_var, Context, CmpLtGoal),
+            [], [X, Y], instmap_delta_bind_no_var, only_mode,
+            detism_semi, purity_pure, [], Context, CmpLtGoal),
 
         Builtin = mercury_public_builtin_module,
         CmpRes = qualified(mercury_public_builtin_module, "comparison_result"),
@@ -1284,7 +1283,7 @@ simplify_make_binary_op_goal_expr(Info, ModuleName, Op, IsBuiltin, X, Y, Z,
     simplify_info_get_module_info(Info, ModuleInfo),
     module_info_get_predicate_table(ModuleInfo, PredTable),
     predicate_table_lookup_func_sym_arity_one(PredTable, is_fully_qualified,
-        OpSymName, 2, OpPredId),
+        OpSymName, user_arity(2), OpPredId),
     proc_id_to_int(OpProcId, 0),
     OpArgs = [X, Y, Z],
     MaybeUnifyContext = no,
@@ -1301,7 +1300,7 @@ simplify_make_cmp_goal_expr(Info, ModuleSymName, Op, IsBuiltin, X, Y,
     simplify_info_get_module_info(Info, ModuleInfo),
     module_info_get_predicate_table(ModuleInfo, PredTable),
     predicate_table_lookup_pred_sym_arity_one(PredTable, is_fully_qualified,
-        OpSymName, 2, OpPredId),
+        OpSymName, user_arity(2), OpPredId),
     proc_id_to_int(OpProcId, 0),
     OpArgs = [X, Y],
     MaybeUnifyContext = no,
@@ -1350,12 +1349,12 @@ simplify_make_const(Type, ConstConsId, ConstVar, Goal, !Info) :-
     simplify_info::in, simplify_info::out) is det.
 
 simplify_make_var(Type, Var, !Info) :-
-    simplify_info_get_varset(!.Info, VarSet0),
-    simplify_info_get_var_types(!.Info, VarTypes0),
-    varset.new_var(Var, VarSet0, VarSet),
-    add_var_type(Var, Type, VarTypes0, VarTypes),
-    simplify_info_set_varset(VarSet, !Info),
-    simplify_info_set_var_types(VarTypes, !Info).
+    simplify_info_get_module_info(!.Info, ModuleInfo),
+    IsDummy = is_type_a_dummy(ModuleInfo, Type),
+    Entry = vte("", Type, IsDummy),
+    simplify_info_get_var_table(!.Info, VarTable0),
+    add_var_entry(Entry, Var, VarTable0, VarTable),
+    simplify_info_set_var_table(VarTable, !Info).
 
 %---------------------%
 
@@ -1418,7 +1417,6 @@ simplify_improve_arith_shift_cmp_ops(IntType, InstMap0, ModuleName, PredName,
     ;
         ( PredName = "<<", Op = "unchecked_left_shift"
         ; PredName = ">>", Op = "unchecked_right_shift"
-        % XXX These two predicates do not exist yet.
         ; PredName = "<<u", Op = "unchecked_left_ushift"
         ; PredName = ">>u", Op = "unchecked_right_ushift"
         ),
@@ -1474,37 +1472,29 @@ simplify_improve_arith_shift_cmp_ops(IntType, InstMap0, ModuleName, PredName,
             )
         else
             % XXX We could replace the checked shift with the code of the check
-            % and the unchecked shift, but doing that would require getting
-            % access to three things:
+            % and the unchecked shift, but doing that requires access
+            % to three things:
             %
-            % 1. the predicate declaration for unsigned_lt, which currently
-            %    is a private predicate in int.m, and
+            % 1. the predicate declaration for unsigned_lt, which originally
+            %    was a private predicate in int.m, but is now exported from
+            %    private_builtin.m;
             %
-            % 2. the definition of the wrapper we put around the text of
-            %    the exception message, which currently is math.domain error.
+            % 2. the definition of the domain_error wrapper we put around
+            %    the text of the exception message, which originally was
+            %    in math.m, but which now is in exception.m; and
             %
             % 3. the definition of "throw" in exception.m
             %
-            % Even if ModuleName is "int", we can't currently access the
-            % first. Since math.m is never imported implicitly, we cannot
-            % count on math.domain_error being available either. And while
-            % exception.m *is* currently imported implicitly if the module
-            % being compiled contains a try_expr or an atomic_expr, a module
-            % that does not contain either may nevertheless contain a checked
-            % shift operation.
-            %
-            % We should consider making unsigned_lt an exported predicate
-            % in private_builtin.m, and math_domain_error a type in the
-            % same module. The latter would be a user-visible breaking change,
-            % but the required fix for any code that looks for that wrapper
-            % in try/catch construct would be replacing math.domain_error(...)
-            % with math_domain_error(...), which is as minimal a change as
-            % it is possible to be.
-            %
-            % As for the third point, we could make get_dependencies.m
-            % import exception.m implicitly if the module being compiled
-            % contains a call to a shift operation. We already do something
-            % very similar for calls to functions/predicates named "format".
+            % Since all compilations implicitly import private_builtin.m,
+            % access to the first is no longer a problem. The other two are,
+            % because if the module we are compiling does not explicitly import
+            % exception.m, then we can't rely on it being implicitly imported
+            % either, because the presence of calls to <</<<u/>>/>>u is not
+            % currently a reason to implicitly import exception.m. We do
+            % implicitly import exception.m if the module being compiled
+            % contains a try_expr or an atomic_expr; so we could change this.
+            % We already do something very similar for calls to
+            % functions/predicates named "format".
             %
             % The semidet_fail must stay until everything above has been done.
             semidet_fail,
@@ -1557,10 +1547,11 @@ simplify_improve_arith_shift_cmp_ops(IntType, InstMap0, ModuleName, PredName,
                 cons(ExceptionWrapperCtorSymName, 1, ExceptionTypeCtor),
             construct_functor(ExceptionVar, ExceptionWrapperCtorConsId,
                 [ErrorMsgStrVar], WrapErrorMsgGoal),
-            generate_simple_call(ModuleInfo, mercury_exception_module,
-                "throw", pf_predicate, only_mode, detism_erroneous,
-                purity_pure, [ExceptionVar], [], instmap_delta_bind_no_var,
-                term.dummy_context_init, ThrowGoal),
+            generate_plain_call(ModuleInfo, pf_predicate,
+                mercury_exception_module, "throw",
+                [], [ExceptionVar], instmap_delta_bind_no_var, only_mode,
+                detism_erroneous, purity_pure, [],
+                term_context.dummy_context, ThrowGoal),
             goal_info_init(set_of_var.init, instmap_delta_bind_no_var,
                 detism_erroneous, purity_pure, Context, ThrowConjGoalInfo), 
             conj_list_to_goal([ErrorMsgStrGoal, WrapErrorMsgGoal, ThrowGoal],

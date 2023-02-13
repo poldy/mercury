@@ -8,16 +8,16 @@
 %---------------------------------------------------------------------------%
 %
 % File: prog_item.m.
-% Main author: fjh.
+% Original author: fjh.
 %
-% This module, together with prog_data, defines a data structure for
+% This module, together with prog_data*.m, defines a data structure for
 % representing Mercury programs.
 %
 % This data structure specifies basically the same information as is
 % contained in the source code, but in a parse tree rather than a flat file.
 % This module defines the parts of the parse tree that are *not* needed
 % by the various compiler backends; parts of the parse tree that
-% are needed by the backends are contained in prog_data.m.
+% are needed by the backends are contained in prog_data*.m.
 %
 %---------------------------------------------------------------------------%
 %
@@ -64,34 +64,63 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
-:- import_module recompilation.
-:- import_module parse_tree.error_util.
-:- import_module parse_tree.file_kind.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_data_pragma.
+:- import_module recompilation.                 % XXX undesirable dependency
 
 :- import_module assoc_list.
 :- import_module cord.
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
-:- import_module one_or_more_map.
 :- import_module one_or_more.
+:- import_module one_or_more_map.
 :- import_module pair.
 :- import_module set.
 
 %---------------------------------------------------------------------------%
 
 :- type include_module_map == map(module_name, include_module_info).
+:- type int_include_module_map == map(module_name, int_include_module_info).
 :- type include_module_info
     --->    include_module_info(module_section, prog_context).
             % The "include_module" declaration occurs in the given section
             % of the relevant file, and at the given context.
 
+:- type int_include_module_info =< include_module_info
+    --->    include_module_info(int_module_section, prog_context).
+
+:- type int_module_section =< module_section
+    --->    ms_interface.
+
 :- type module_name_context == map(module_name, prog_context).
 :- type module_names_contexts == one_or_more_map(module_name, prog_context).
+
+    % Maps from module names to the includes, imports or uses
+    % in the named section. The code creating these maps will have
+    % detected and diagnosed any duplicate entries of the same kind
+    % of declaration for the same module in the same section.
+    % However, unlike include_module_maps or import_and_or_use_maps,
+    % which summarize the information in the first two of the maps below
+    % (for include_module_map) or the last four (for import_and_or_use_map),
+    % these maps may contain redundant entries as long as they are all
+    % in *different* maps (such as the module name A occurring in both
+    % the int_import_context_map and the int_use_context_map of module B).
+:- type int_incl_context_map
+    --->    int_incl_context_map(module_name_context).
+:- type imp_incl_context_map
+    --->    imp_incl_context_map(module_name_context).
+:- type int_import_context_map
+    --->    int_import_context_map(module_name_context).
+:- type int_use_context_map
+    --->    int_use_context_map(module_name_context).
+:- type imp_import_context_map
+    --->    imp_import_context_map(module_name_context).
+:- type imp_use_context_map
+    --->    imp_use_context_map(module_name_context).
 
 %---------------------%
 
@@ -136,6 +165,10 @@
     ;       imp_use(prog_context)
     ;       int_use_imp_import(prog_context, prog_context).
 
+:- type section_use =< section_import_and_or_use
+    --->    int_use(prog_context)
+    ;       imp_use(prog_context).
+
 :- type implicit_import_or_use
     --->    implicit_int_import
     ;       implicit_int_use
@@ -162,6 +195,8 @@
     % in the implementation section.
 :- type section_import_and_or_use_map ==
     map(module_name, section_import_and_or_use).
+:- type section_use_map ==
+    map(module_name, section_use).
 :- type import_and_or_use_map ==
     map(module_name, maybe_implicit_import_and_or_use).
 
@@ -176,9 +211,9 @@
 % We use cords of items instead of lists of items where we may need to add
 % items to an already-existing partial parse tree.
 %
-% The contexts of module declarations below may be term.dummy_context_init
+% The contexts of module declarations below may be term_context.dummy_context
 % if the actual context isn't known, but if the recorded context is
-% not term.dummy_context_init, then it is valid.
+% not term_context.dummy_context, then it is valid.
 
 :- type parse_tree_src
     --->    parse_tree_src(
@@ -310,18 +345,17 @@
 
                 % Items of various kinds in the interface.
                 % All these items are to be treated as being in the
-                % sms_interface section, with one exception.
-                % If this module has some submodules, i.e. if at least one
-                % of the ptms_{int,imp}_included_modules fields above are
-                % nonempty, then we handle any nonabstract instance items
-                % in the interface by
+                % interface section, with one exception.
+                % If this module has some submodules, i.e. if the
+                % ptms_include_map field above is nonempty, then we handle
+                % any nonabstract instance items in the interface by
                 % - treating only an abstract version of the item as being
-                %   in sms_interface, and
+                %   in the interface, and
                 % - treating the original version as being in the
-                %   sms_impl_but_exported_to_submodules section.
+                %   implementation section, but exported to submodules.
                 % (For abstract instances, there is no point in adding them
                 % twice, once in each section, so we treat them as only
-                % being in sms_interface.)
+                % being in the interface.)
                 ptms_int_typeclasses        :: list(item_typeclass_info),
                 ptms_int_instances          :: list(item_instance_info),
                 ptms_int_pred_decls         :: list(item_pred_decl_info),
@@ -335,7 +369,7 @@
                 % generating a warning about a lack of a definition
                 % in the implementation section (if in fact there is
                 % no definition there) would be more misleading than useful.
-                ptms_int_bad_clauses        :: set(pf_sym_name_arity),
+                ptms_int_bad_clauses        :: set(pred_pf_name_arity),
 
                 % A repeat of everything above, but in the implementation
                 % section, with the addition of some item kinds that may occur
@@ -351,13 +385,13 @@
                 % misplaced items into separate fields of their own,
                 % but so far there has been no need for that.
                 %
-                % If this module has no submodules, i.e. if the fields
-                % ptms_{int,imp}_included_modules above are both empty,
-                % then all the items in these fields are to be treated
-                % as in being in a sms_implementation section. However,
-                % if this module HAS at least one submodule (in either
-                % section), then only the following kinds of items are
-                % to be treated as being in a sms_implementation section:
+                % If this module has no submodules, i.e. if the
+                % ptms_include_map field above is empty, then all the items
+                % in these fields are to be treated as in being in the
+                % implementation section. However, if this module HAS
+                % at least one submodule (in either section), then only
+                % the following kinds of items are to be treated as being
+                % private to this module:
                 %
                 %   clauses
                 %   foreign_export_enums
@@ -366,7 +400,7 @@
                 %   finalises
                 %
                 % All the other kinds of items are to be treated as being
-                % in the sms_impl_but_exported_to_submodules section.
+                % exported to submodules.
                 ptms_imp_typeclasses        :: list(item_typeclass_info),
                 ptms_imp_instances          :: list(item_instance_info),
                 ptms_imp_pred_decls         :: list(item_pred_decl_info),
@@ -393,20 +427,13 @@
     --->    no_version_numbers
     ;       version_numbers(module_item_version_numbers).
 
-:- type parse_tree_some_int
-    --->    parse_tree_some_int0(parse_tree_int0)
-    ;       parse_tree_some_int1(parse_tree_int1)
-    ;       parse_tree_some_int2(parse_tree_int2)
-    ;       parse_tree_some_int3(parse_tree_int3).
-
 % The representations specific to .int0, .int, .int2 and .int3 files.
 % XXX We should replace the lists of items of various kinds with data
 % structures that encode uniqueness properties, such as "each type constructor
 % may be defined only once". Maps from primary keys such as type_ctors,
 % or symnames/arity pairs in general, would work for this.
 
-    % A version of parse_tree_int specialized to hold the contents of
-    % .int0 files.
+    % A representation of the contents of .int0 files.
 :- type parse_tree_int0
     --->    parse_tree_int0(
                 pti0_module_name            :: module_name,
@@ -419,18 +446,12 @@
                 % The set of modules mentioned in `:- include_module'
                 % declarations in the interface and implementation,
                 % and their locations.
-                pti0_int_includes           :: module_names_contexts,
-                pti0_imp_includes           :: module_names_contexts,
                 pti0_include_map            :: include_module_map,
 
                 % The set of modules mentioned in `:- import_module'
                 % declarations in the interface and implementation,
                 % and their locations.
-                pti0_int_imports            :: module_names_contexts,
-                pti0_int_uses               :: module_names_contexts,
-                pti0_imp_imports            :: module_names_contexts,
-                pti0_imp_uses               :: module_names_contexts,
-                pti0_import_use_map         :: import_and_or_use_map,
+                pti0_import_use_map         :: section_import_and_or_use_map,
 
                 % `:- pragma foreign_import_module' declarations
                 % in the interface and in the implementation.
@@ -464,8 +485,7 @@
                 pti0_imp_promises           :: list(item_promise_info)
             ).
 
-    % A version of parse_tree_int specialized to hold the contents of
-    % .int files.
+    % A representation of the contents of .int files.
 :- type parse_tree_int1
     --->    parse_tree_int1(
                 pti1_module_name            :: module_name,
@@ -478,16 +498,12 @@
                 % The set of modules mentioned in `:- include_module'
                 % declarations in the interface and implementation,
                 % and their contexts.
-                pti1_int_includes           :: module_names_contexts,
-                pti1_imp_includes           :: module_names_contexts,
                 pti1_include_map            :: include_module_map,
 
                 % The set of modules mentioned in `:- use_module'
                 % declarations in the interface and implementation,
                 % and their locations.
-                pti1_int_uses               :: module_names_contexts,
-                pti1_imp_uses               :: module_names_contexts,
-                pti1_import_use_map         :: import_and_or_use_map,
+                pti1_use_map                :: section_use_map,
 
                 % `:- pragma foreign_import_module' declarations
                 % in the interface and in the implementation.
@@ -519,8 +535,7 @@
                 pti1_imp_typeclasses        :: list(item_typeclass_info)
             ).
 
-    % A version of parse_tree_int specialized to hold the contents of
-    % .int2 files.
+    % A representation of the contents of .int2 files.
 :- type parse_tree_int2
     --->    parse_tree_int2(
                 pti2_module_name            :: module_name,
@@ -536,13 +551,11 @@
 
                 % The set of modules mentioned in `:- include_module'
                 % declarations in the interface, and their locations.
-                pti2_int_includes           :: module_names_contexts,
-                pti2_include_map            :: include_module_map,
+                pti3_int_includes           :: int_include_module_map,
 
                 % The set of modules mentioned in `:- use_module'
                 % declarations in the interface, and their locations.
-                pti2_int_uses               :: module_names_contexts,
-                pti2_import_use_map         :: import_and_or_use_map,
+                pti2_use_map                :: section_use_map,
 
                 % `:- pragma foreign_import_module' declarations
                 % in the interface and in the implementation.
@@ -567,8 +580,7 @@
                 pti2_type_repns             :: type_ctor_repn_map
             ).
 
-    % A version of parse_tree_int specialized to hold the contents of
-    % .int3 files.
+    % A representation of the contents of .int3 files.
 :- type parse_tree_int3
     --->    parse_tree_int3(
                 pti3_module_name            :: module_name,
@@ -578,13 +590,11 @@
 
                 % The set of modules mentioned in `:- include_module'
                 % declarations in the interface, and their locations.
-                pti3_int_includes           :: module_names_contexts,
-                pti3_include_map            :: include_module_map,
+                pti3_int_includes           :: int_incl_context_map,
 
                 % The set of modules mentioned in `:- import_module'
                 % declarations in the interface, and their locations.
-                pti3_int_imports            :: module_names_contexts,
-                pti3_import_use_map         :: import_and_or_use_map,
+                pti3_int_imports            :: int_import_context_map,
 
                 % Type, inst and mode definitions, all of which are
                 % in the interface.
@@ -797,40 +807,24 @@
 
 %---------------------------------------------------------------------------%
 %
-% A raw compilation unit is one module to be compiled. A parse_tree_src
-% that contains N nested submodules corresponds to 1 + N raw_compilation_units,
-% one for the top level module and one for each (possibly deeply) nested
+% A parse_tree_module_src is one module to be compiled. A parse_tree_src that
+% contains N nested submodules corresponds to 1 + N parse_tree_module_srcs,
+% one for the top level module, and one for each (possibly deeply) nested
 % submodule.
 %
 % A raw compilation unit consists of some raw item blocks, with each raw
 % item block containing the items in an interface or implementation section
 % of its module.
 %
-% XXX CLEANUP We should stop using raw_compilation_units completely,
-% replacing their use with a parse_tree_module_src. That also contains
-% the same components (includes, avails, fims and items), but in a more
-% convenient form, with different kinds of separated out and with
-% e.g. duplicate imports and type definitions already handled.
-%
-% Before we convert a raw compilation unit into the HLDS, we augment it
+% Before we convert a parse_tree_module_src into the HLDS, we augment it
 % with the contents of the interface files of the modules it imports
 % (directly or indirectly), and if requested, with the contents of the
 % optimization files of those modules as well. The augmented compilation unit
 % will consist of the following for compiler invocations that generate
-% target language code. (For compiler invocations that generate .int and
-% .int2 files, all the interface files mentioned below will be replaced
-% by .int3 files.)
+% target language code. (Compiler invocations that generate .int and .int2
+% files will construct an aug_make_int_unit, not an aug_compilation_unit.)
 %
-% - The module_src field contains the original raw_compilation_unit
-%   after being transformed into a parse_tree_module_src.
-%
-%   Once upon a time, we depended on the raw compilation unit
-%   having item blocks marked as "implementation section but exported
-%   to submodules", but now we rely on the fact that some kinds of items
-%   in the implementation section are *always* exported to the current
-%   module's submodules (if there are any), while others are *never* exported
-%   to submodules, and these are already separated in the
-%   parse_tree_module_src.
+% - The module_src field contains the original parse_tree_module_src.
 %
 % - The ancestor_int_specs field contains the .int0 interface files of
 %   the ancestors of this module, which are always implicitly imported.
@@ -884,8 +878,8 @@
 %   the ancestor-, direct- or indirect-imported modules than their
 %   .int0, .int or .int2 files do. Unfortunately, they often also
 %   *duplicate* items in those interface files, which leads to
-%   double definitions, which may then lead to test case failures
-%   (such as submodules/ts if I -zs- recall correctly).
+%   double definitions, which the submodules of make_hlds.m have to
+%   be prepared to detect and ignore.
 %
 % - Provided transitive intermodule optimization is enabled, the trans_opts
 %   field will contain the .trans_opt files of the modules named in
@@ -921,18 +915,6 @@
 %   in the augmented compilation unit will lead to wasted work, which means
 %   that we should avoid doing that if possible.
 %
-
-:- type raw_compilation_unit
-    --->    raw_compilation_unit(
-                % The name of the module.
-                rcu_module_name                 :: module_name,
-
-                % The context of the `:- module' declaration.
-                rcu_module_name_context         :: prog_context,
-
-                % The items in the module.
-                rcu_raw_item_blocks             :: list(raw_item_block)
-            ).
 
 :- type aug_compilation_unit
     --->    aug_compilation_unit(
@@ -1137,57 +1119,11 @@
             % Record recomp_avail_imp_use as recompilation reason.
             % (Since there is no recomp_avail_indirect_use_imp, yet).
 
-:- type raw_item_block == item_block(module_section).
-
-:- type item_block(MS)
-    --->    item_block(
-                module_name,
-                MS,
-                list(item_include),
-                list(item_avail),
-                list(item_fim),
-                list(item)
-            ).
-
 %---------------------------------------------------------------------------%
 
 :- type module_section
     --->    ms_interface
     ;       ms_implementation.
-
-:- type src_module_section
-    --->    sms_interface
-    ;       sms_implementation
-    ;       sms_impl_but_exported_to_submodules.
-            % This is used internally by the compiler, to identify items
-            % which originally came from an implementation section of a module
-            % that contains submodules; such items need to be exported
-            % to the submodules. This is done in grab_modules.m
-            % by grab_qual_imported_modules_augment.
-
-:- type imported_or_used
-    --->    iou_imported
-    ;       iou_used
-    ;       iou_used_and_imported.
-
-:- type int_module_section
-    --->    ims_imported_or_used(module_name, int_file_kind, import_locn,
-                imported_or_used)
-            % These are used internally by the compiler, to identify
-            % declarations which originally came from some other module
-            % imported with a `:- import_module' or `:- use_module'
-            % declaration. They record the name of the imported module,
-            % and in which section the module was imported or used.
-            % An iou_used_and_imported means that the module was the subject
-            % of a `:- use_module' declaration in the interface and of an
-            % `:- import_module' declaration in the implementation; its
-            % import_locn will be the one in the implementation.
-
-    ;       ims_abstract_imported(module_name, int_file_kind).
-            % This is used internally by the compiler, to identify items which
-            % originally came from the implementation section of an interface
-            % file; usually type declarations (especially equivalence types)
-            % which should be used in code generation but not in type checking.
 
 %---------------------------------------------------------------------------%
 
@@ -1258,12 +1194,11 @@
     ;       compiler_origin_finalise
     ;       compiler_origin_class_method(
                 cm_class_id                     :: class_id,
-                cm_method                       :: pf_sym_name_arity
+                cm_method                       :: pred_pf_name_arity
             )
-    ;       compiler_origin_solver_type(
-                cost_type_ctor_name             :: sym_name,
-                cost_type_ctor_arity            :: arity,
-                cost_aux_pred_kind              :: solver_type_pred_kind
+    ;       compiler_origin_solver_repn(
+                cosr_type_ctor                  :: type_ctor,
+                cosr_aux_pred_kind              :: solver_type_pred_kind
             )
     ;       compiler_origin_mutable(
                 com_module_name                 :: module_name,
@@ -1271,7 +1206,7 @@
                 com_aux_pred_kind               :: mutable_pred_kind
             )
     ;       compiler_origin_tabling(
-                cot_pred_spec                   :: pf_sym_name_arity,
+                cot_pred_spec                   :: pred_pf_name_arity,
                 cot_aux_pred_kind               :: tabling_aux_pred_kind
             ).
 
@@ -1496,7 +1431,7 @@
     --->    item_instance_info(
                 % The original types field preserves the types in the instance
                 % declaration as written by the programmer. The types field
-                % is subject to the expansion of equivalent types.
+                % is subject to the expansion of equivalence types.
                 ci_class_name                   :: class_name,
                 ci_types                        :: list(mer_type),
                 ci_original_types               :: list(mer_type),
@@ -1512,7 +1447,7 @@
     --->    item_initialise_info(
                 % :- initialise pred_name.
                 init_name                       :: sym_name,
-                init_arity                      :: arity,
+                init_arity                      :: user_arity,
                 init_maybe_attrs                :: item_maybe_attrs,
                 init_context                    :: prog_context,
                 init_seq_num                    :: item_seq_num
@@ -1522,7 +1457,7 @@
     --->    item_finalise_info(
                 % :- finalise pred_name.
                 final_name                      :: sym_name,
-                final_arity                     :: arity,
+                final_arity                     :: user_arity,
                 final_maybe_attrs               :: item_maybe_attrs,
                 final_context                   :: prog_context,
                 final_seq_num                   :: item_seq_num
@@ -2470,6 +2405,7 @@
 :- type decl_pragma
     --->    decl_pragma_obsolete_pred(pragma_info_obsolete_pred)
     ;       decl_pragma_obsolete_proc(pragma_info_obsolete_proc)
+    ;       decl_pragma_format_call(pragma_info_format_call)
     ;       decl_pragma_type_spec(pragma_info_type_spec)
     ;       decl_pragma_oisu(pragma_info_oisu)
     ;       decl_pragma_terminates(pred_pfu_name_arity)
@@ -2574,7 +2510,12 @@
                 exp_language            :: foreign_language,
                 % Predname, Predicate/function, Modes, foreign function name.
                 exp_pred_id             :: proc_pf_name_modes,
-                exp_foreign_name        :: string
+                exp_foreign_name        :: string,
+
+                % Specified the names of any variables in the modes above.
+                % Used for generating error messages about foreign_export
+                % pragmas for undeclared modes.
+                exp_varaset             :: prog_varset
             ).
 
 :- type pragma_info_external_proc
@@ -2595,17 +2536,51 @@
                 % The existing predicate name.
                 tspec_pred_name         :: sym_name,
 
-                % The name of the specialized predicate.
-                tspec_new_name          :: sym_name,
+                % The name of the module from whose (source or interface) file
+                % we read the type_spec pragma. This will always name
+                % the module that contain the pragma, because we never put
+                % a type_spec pragma into any interface file other than
+                % an interface file of the module containing the pragma.
+                tspec_module_name       :: module_name,
 
                 % The type substitution (using the variable names
                 % from the pred declaration).
                 tspec_tsubst            :: type_subst,
 
+                % The varset of the term containing the pragma, coerced
+                % to being a tvarset (since no part of the pragma except
+                % the type substitution may contain variables).
+                %
+                % All variables in this tvarset have to have explicit names.
+                % If the original pragma contains anonymous variables, the
+                % code constructing this pragma_info_type_spec will give
+                % those variable names.
+                %
+                % The reason for this requirement is that the process
+                % of writing out an anonymous variable and reading it back in
+                % will produce a non-anonymous variable. Since the names
+                % (if any) of the variables in tspec_tsubst are an input
+                % to the code that constructs the name of the type-specialized
+                % predicate, we would get a discrepancy between the predicate
+                % name constructed by compiler invocations that know the
+                % variable as unnamed (this will be the invocation that
+                % compiles the module containing the type_spec pragma,
+                % which constructs the code of the type specialized predicate),
+                % and compiler invocations that know that variable as named
+                % (this will be all the invocations that read the original
+                % module's .int file, which will be constructing many of
+                % the *calls* to the type specialized predicate). The result
+                % will be calls to the type specialized predicate that refer
+                % to it by the wrong name, leading to link errors.
+                %
+                % By giving all anonymous variables in the type_spec pragma
+                % in the original source file as soon as we have parsed it,
+                % and then always using the resulting names, we avoid this
+                % problem.
                 tspec_tvarset           :: tvarset,
 
                 % The equivalence types used.
-                tspec_items             :: set(item_id)
+                tspec_items             :: set(recomp_item_id)
             ).
 
 :- type pragma_info_unused_args
@@ -2778,6 +2753,12 @@
                 list(sym_name_arity)
             ).
 
+:- type pragma_info_format_call
+    --->    pragma_info_format_call(
+                pred_pf_name_arity,
+                one_or_more(format_string_values)
+            ).
+
 :- type pragma_info_require_feature_set
     --->    pragma_info_require_feature_set(
                 rfs_feature_set         :: set(required_feature)
@@ -2848,34 +2829,34 @@
     % During a bootcheck in august 2015, the frequencies of occurrence
     % of the various goal kinds were these:
     %
-    % goal_unify                1360701
-    % goal_conj                 1316066
-    % goal_call                 1263403
+    % goal_unify               1360701
+    % goal_conj                1316066 when we had a conj_expr for each ","
+    % goal_call                1263403
     %
-    % goal_true                  135352
-    % goal_if_then_else          128052
-    % goal_disj                  116547
-    % goal_not                     7080
+    % goal_true                 135352
+    % goal_if_then_else         128052
+    % goal_disj                 116547 when we had a disj_expr for each ";"
+    % goal_not                    7080
     %
-    % goal_fail                    5219
-    % goal_pro_purity              1492
-    % goal_trace                   1356
-    % goal_pro_eqv_solns            913
-    % goal_some_state_vars          620 now goal_quant/some/state
-    % goal_some                     192 now goal_quant/some/ordinary
-    % goal_req_compl_switch         172
-    % goal_par_conj                 132
-    % goal_implies                  129
-    % goal_all                       78 now goal_quant/all/ordinary
-    % goal_req_detism                49
-    % goal_try                       35
-    % goal_equivalent                18
-    % goal_event                     17
-    % goal_req_arm_detism            14
-    % goal_pro_arbitrary             12
-    % goal_pro_eqv_soln_sets          8
-    % goal_atomic                     2
-    % goal_all_state_vars             0 now goal_quant/all/state
+    % goal_fail                   5219
+    % goal_pro_purity             1492
+    % goal_trace                  1356
+    % goal_pro_eqv_solns           913
+    % goal_some_state_vars         620 now goal_quant/some/state
+    % goal_some                    192 now goal_quant/some/ordinary
+    % goal_req_compl_switch        172
+    % goal_par_conj                132 when we had a par_conj_expr for each "&"
+    % goal_implies                 129
+    % goal_all                      78 now goal_quant/all/ordinary
+    % goal_req_detism               49
+    % goal_try                      35
+    % goal_equivalent               18
+    % goal_event                    17
+    % goal_req_arm_detism           14
+    % goal_pro_arbitrary            12
+    % goal_pro_eqv_soln_sets         8
+    % goal_atomic                    2
+    % goal_all_state_vars            0 now goal_quant/all/state
 
 :- type quant_type
     --->    quant_some
@@ -2896,8 +2877,26 @@
     --->    unify_expr(prog_context, prog_term, prog_term, purity)
     ;       call_expr(prog_context, sym_name, list(prog_term), purity)
 
-    ;       conj_expr(prog_context, goal, goal)
+    ;       conj_expr(prog_context, goal, list(goal))
             % nonempty plain conjunction
+            % NOTE: We could replace this with
+            %   conj_expr(prog_context, goal, goal, list(goal))
+            % to encode the invariant that
+            % - a conjunction has at least one conjunction operator, and
+            % - that operator has two argument goals.
+            % However, no part of the current compiler can exploit
+            % this extra information.
+            % NOTE: On the other hand, we could also replace this with
+            %   conj_expr(prog_context, list(goal))
+            % letting a conj_expr with an empty list of goals take over
+            % the role of true_expr. However, that would make the parse tree
+            % representation of plain conjunctions differ from the
+            % representation of parallel conjunctions. And the most
+            % frequent goal that does not now have its own primary tag
+            % on 64 bit machines, fail_expr, is infrequent enough that
+            % giving it its own primary tag would not materially improve
+            % performance, and even if it were frequent enough, it could be
+            % folded into disj_exprs in a similar way.
 
     ;       true_expr(prog_context)
             % empty conjunction
@@ -2910,8 +2909,8 @@
                 goal,           % Then
                 goal            % Else
             )
-    ;       disj_expr(prog_context, goal, goal)
-            % nonempty disjunction
+    ;       disj_expr(prog_context, goal, goal, list(goal))
+            % nonempty disjunction; will contain at least two goals.
 
     ;       not_expr(prog_context, goal)
 
@@ -2920,7 +2919,7 @@
     ;       fail_expr(prog_context)
             % empty disjunction
 
-    ;       par_conj_expr(prog_context, goal, goal)
+    ;       par_conj_expr(prog_context, goal, list(goal))
             % nonempty parallel conjunction
 
     ;       quant_expr(
@@ -3229,7 +3228,7 @@ get_goal_context(Goal) = Context :-
     ( Goal = conj_expr(Context, _, _)
     ; Goal = par_conj_expr(Context, _, _)
     ; Goal = true_expr(Context)
-    ; Goal = disj_expr(Context, _, _)
+    ; Goal = disj_expr(Context, _, _, _)
     ; Goal = fail_expr(Context)
     ; Goal = quant_expr(_, _, Context, _, _)
     ; Goal = promise_purity_expr(Context, _, _)

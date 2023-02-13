@@ -21,10 +21,12 @@
 :- import_module hlds.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_pred.
+:- import_module hlds.instmap.
+:- import_module hlds.pred_name.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
@@ -39,13 +41,17 @@
 
 :- type mode_error_info
     --->    mode_error_info(
-                set_of_progvar,     % The variables which caused the error
-                                    % (we will attempt to reschedule the goal
-                                    % if one of these variables becomes
-                                    % more instantiated).
-                mode_error,         % The nature of the error.
-                prog_context,       % Where the error occurred.
-                mode_context        % Where the error occurred.
+                % The variables which caused the error (we will attempt
+                % to reschedule the goal if one of these variables becomes
+                % more instantiated).
+                set_of_progvar,
+
+                % The nature of the error.
+                mode_error,
+
+                % Where the error occurred.
+                prog_context,
+                mode_context
             ).
 
 %---------------------%
@@ -114,13 +120,14 @@
             % *functions* without mode declarations: if the user does not
             % provide one, the compiler will.
 
-    ;       mode_error_no_matching_mode(list(prog_var), list(mer_inst),
+    ;       mode_error_no_matching_mode(instmap, list(prog_var),
                 list(list(mer_inst)))
             % Call to a predicate with an insufficiently instantiated variable
             % (for preds with >1 mode).
             %
-            % The first two arguments give the argument vars of the call
-            % and their insts at the time of the call.
+            % The secord argument gives the argument vars of the call,
+            % and lookup them in the instmap gives their insts at the time
+            % of the call.
             %
             % If the third argument is a nonempty list, then every member
             % of that list gives the list of the required initial insts
@@ -133,14 +140,11 @@
     % Mode errors in higher order calls.
 
     ;       mode_error_bad_higher_order_inst(prog_var, mer_inst,
-                pred_or_func, arity)
+                pred_or_func, user_arity, higher_order_mismatch_info)
             % The variable has the given inst, which does not match
             % the expected higher order inst with the given pred_or_func
-            % and the given arity.
-            % XXX We should generate a different error message for
-            % a pred_or_func mismatch than for an arity mismatch,
-            % so we should have an arg specifying the mismatch kind
-            % (since the code that constructs this term has to know that).
+            % and the given arity. The last argument specifies the
+            % nature of the mismatch.
 
     % Mode errors in conjunctions.
 
@@ -219,6 +223,14 @@
     ;       purity_error_lambda_should_be_any(one_or_more(prog_var)).
             % A ground lambda term contains the given nonlocal variables
             % that have inst `any', but is not marked impure.
+
+:- type higher_order_mismatch_info
+    --->    mismatch_not_higher_order_type
+    ;       mismatch_no_higher_order_inst_info
+    ;       mismatch_pred_vs_func(pred_or_func)
+            % actual PorF (expected is in enclosing term)
+    ;       mismatch_on_arity(user_arity).
+            % actual arity (expected is in enclosing term)
 
 %---------------------%
 
@@ -354,14 +366,13 @@
 
 :- import_module check_hlds.inst_match.
 :- import_module check_hlds.inst_test.
-:- import_module hlds.hlds_module.
 :- import_module check_hlds.mode_util.
 :- import_module hlds.error_msg_inst.
 :- import_module hlds.hlds_error_util.
+:- import_module hlds.hlds_module.
 :- import_module hlds.hlds_out.
 :- import_module hlds.hlds_out.hlds_out_goal.
 :- import_module hlds.hlds_out.hlds_out_util.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.op_mode.
@@ -373,6 +384,8 @@
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_util.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module int.
 :- import_module io.            % used only for a typeclass instance
@@ -468,14 +481,15 @@ mode_error_to_spec(ModeInfo, ModeError) = Spec :-
         ModeError = mode_error_callee_pred_has_no_mode_decl,
         Spec = mode_error_callee_pred_has_no_mode_decl_to_spec(ModeInfo)
     ;
-        ModeError = mode_error_no_matching_mode(Vars, Insts, InitialInsts),
-        Spec = mode_error_no_matching_mode_to_spec(ModeInfo, Vars, Insts,
-            InitialInsts)
+        ModeError = mode_error_no_matching_mode(InstMap, ArgVars,
+            ProcInitialInsts),
+        Spec = mode_error_no_matching_mode_to_spec(ModeInfo, InstMap, ArgVars,
+            ProcInitialInsts)
     ;
         ModeError = mode_error_bad_higher_order_inst(Var, Inst,
-            ExpectedPredOrFunc, ExpectedArity),
+            ExpectedPredOrFunc, ExpectedUserArity, Mismatch),
         Spec = mode_error_bad_higher_order_inst_to_spec(ModeInfo, Var, Inst,
-            ExpectedPredOrFunc, ExpectedArity)
+            ExpectedPredOrFunc, ExpectedUserArity, Mismatch)
     ;
         ModeError = mode_error_unschedulable_conjuncts(OoMErrors, Culprit),
         Spec = mode_error_unschedulable_conjuncts_to_spec(ModeInfo, OoMErrors,
@@ -527,13 +541,15 @@ mode_error_to_spec(ModeInfo, ModeError) = Spec :-
 mode_error_unify_var_var_to_spec(ModeInfo, X, Y, InstX, InstY) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     Pieces = [words("mode error in unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)), words("and"),
-        quote(mercury_var_to_name_only(VarSet, Y)), suffix("."), nl,
-        words("Variable"), quote(mercury_var_to_name_only(VarSet, X)) |
+        quote(mercury_var_to_name_only(VarTable, X)), words("and"),
+        quote(mercury_var_to_name_only(VarTable, Y)), suffix("."), nl,
+        words("Variable"),
+        quote(mercury_var_to_name_only(VarTable, X)) |
         has_instantiatedness(ModeInfo, InstX, ",")] ++
-        [words("variable"), quote(mercury_var_to_name_only(VarSet, Y)) |
+        [words("variable"),
+        quote(mercury_var_to_name_only(VarTable, Y)) |
         has_instantiatedness(ModeInfo, InstY, ".")],
     Spec = simplest_spec($pred, severity_error,
         phase_mode_check(report_in_any_mode), Context, Preamble ++ Pieces).
@@ -546,10 +562,10 @@ mode_error_unify_var_var_to_spec(ModeInfo, X, Y, InstX, InstY) = Spec :-
 mode_error_unify_var_poly_to_spec(ModeInfo, Var, VarInst) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     MainPieces = [words("in polymorphically-typed unification:"), nl,
         words("mode error: variable"),
-        quote(mercury_var_to_name_only(VarSet, Var)) |
+        quote(mercury_var_to_name_only(VarTable, Var)) |
         has_instantiatedness(ModeInfo, VarInst, ",")] ++
         [words("expected instantiatedness was"), quote("ground"),
         words("or"), quote("any"), suffix("."), nl],
@@ -569,21 +585,21 @@ mode_error_unify_var_poly_to_spec(ModeInfo, Var, VarInst) = Spec :-
 :- func mode_error_unify_var_functor_to_spec(mode_info, prog_var,
     cons_id, list(prog_var), mer_inst, list(mer_inst)) = error_spec.
 
-mode_error_unify_var_functor_to_spec(ModeInfo, X, ConsId, Args,
+mode_error_unify_var_functor_to_spec(ModeInfo, X, ConsId, ArgVars,
         InstX, ArgInsts) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     mode_info_get_module_info(ModeInfo, ModuleInfo),
-    FunctorConsIdStr = functor_cons_id_to_string(ModuleInfo, VarSet,
-        print_name_only, ConsId, Args),
+    FunctorConsIdStr = functor_cons_id_to_string(ModuleInfo,
+        vns_var_table(VarTable), print_name_only, ConsId, ArgVars),
     ConsIdStr = mercury_cons_id_to_string(output_mercury,
         does_not_need_brackets, ConsId),
     FakeTermInst = defined_inst(user_inst(unqualified(ConsIdStr), ArgInsts)),
     Pieces = [words("mode error in unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)),
+        quote(mercury_var_to_name_only(VarTable, X)),
         words("and"), words_quote(FunctorConsIdStr), suffix("."), nl,
-        words("Variable"), quote(mercury_var_to_name_only(VarSet, X)) |
+        words("Variable"), quote(mercury_var_to_name_only(VarTable, X)) |
         has_instantiatedness(ModeInfo, InstX, ",")] ++
         [words("term"), words_quote(FunctorConsIdStr) |
         has_instantiatedness(ModeInfo, FakeTermInst, ".")],
@@ -598,11 +614,11 @@ mode_error_unify_var_functor_to_spec(ModeInfo, X, ConsId, Args,
 mode_error_unify_var_lambda_to_spec(ModeInfo, X, InstX, InstY) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     Pieces = [words("mode error in unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)),
+        quote(mercury_var_to_name_only(VarTable, X)),
         words("and lambda expression."), nl,
-        words("Variable"), quote(mercury_var_to_name_only(VarSet, X)) |
+        words("Variable"), quote(mercury_var_to_name_only(VarTable, X)) |
         has_instantiatedness(ModeInfo, InstX, ",")] ++
         [words("lambda expression") |
         has_instantiatedness(ModeInfo, InstY, ".")],
@@ -619,7 +635,7 @@ mode_error_unify_var_multimode_pf_to_spec(ModeInfo, X, PredMultiModeError)
     PredMultiModeError = pred_id_var_multimode_error(PredId, MultiModeError),
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     mode_info_get_module_info(ModeInfo, ModuleInfo),
     module_info_pred_info(ModuleInfo, PredId, PredInfo),
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
@@ -629,7 +645,7 @@ mode_error_unify_var_multimode_pf_to_spec(ModeInfo, X, PredMultiModeError)
     Arity = pred_info_orig_arity(PredInfo),
     adjust_func_arity(PredOrFunc, FuncArity, Arity),
     StartPieces = [words("mode error in unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)),
+        quote(mercury_var_to_name_only(VarTable, X)),
         words("and higher-order term based on multi-moded"),
         p_or_f(PredOrFunc),
         qual_sym_name_arity(sym_name_arity(QualifiedName, FuncArity)),
@@ -638,7 +654,7 @@ mode_error_unify_var_multimode_pf_to_spec(ModeInfo, X, PredMultiModeError)
         MultiModeError = some_ho_args_non_ground(NonGroundArgVars),
         VarOrVars = choose_number(NonGroundArgVars, "variable", "variables"),
         NonGroundArgVarPieces =
-            named_and_unnamed_vars_to_pieces(VarSet, NonGroundArgVars),
+            named_and_unnamed_vars_to_pieces(VarTable, NonGroundArgVars),
         DetailPieces = [words("The higher order argument"),
             words(VarOrVars)] ++ NonGroundArgVarPieces ++
             [words("should be ground, but are not."), nl]
@@ -654,7 +670,7 @@ mode_error_unify_var_multimode_pf_to_spec(ModeInfo, X, PredMultiModeError)
         ),
         ModeOrModes = choose_number(ArgVars, "mode", "modes"),
         VarOrVars = choose_number(ArgVars, "variable", "variables"),
-        ArgVarPieces = named_and_unnamed_vars_to_pieces(VarSet, ArgVars),
+        ArgVarPieces = named_and_unnamed_vars_to_pieces(VarTable, ArgVars),
         DetailPieces = [words("The"), words(ModeOrModes),
             words("of the argument"), words(VarOrVars)] ++ ArgVarPieces ++
             MatchPieces ++ [words("of the called"),
@@ -664,12 +680,16 @@ mode_error_unify_var_multimode_pf_to_spec(ModeInfo, X, PredMultiModeError)
         phase_mode_check(report_in_any_mode),
         Context, Preamble ++ StartPieces ++ DetailPieces).
 
-:- func named_and_unnamed_vars_to_pieces(prog_varset, list(prog_var)) =
-    list(format_component).
+:- func named_and_unnamed_vars_to_pieces(var_table, list(prog_var)) =
+    list(format_piece).
 
-named_and_unnamed_vars_to_pieces(VarSet, Vars) = Pieces :-
-    list.filter_map(varset.search_name(VarSet), Vars,
-        NamedVarNames, UnnamedVars),
+named_and_unnamed_vars_to_pieces(VarTable, Vars) = Pieces :-
+    list.filter_map(
+        ( pred(V::in, N::out) is semidet :-
+            lookup_var_entry(VarTable, V, E),
+            E = vte(N, _, _),
+            N \= ""
+        ), Vars, NamedVarNames, UnnamedVars),
     (
         NamedVarNames = [],
         Pieces = []
@@ -694,9 +714,9 @@ mode_error_non_ground_non_local_lambda_var_to_spec(ModeInfo, Var, VarInst)
         = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     Pieces = [words("mode error: variable"),
-        quote(mercury_var_to_name_only(VarSet, Var)) |
+        quote(mercury_var_to_name_only(VarTable, Var)) |
         has_instantiatedness(ModeInfo, VarInst, ",")] ++
         [words("expected instantiatedness for non-local variables"),
         words("of lambda goals is"), quote("ground"), suffix("."), nl],
@@ -712,28 +732,28 @@ mode_error_higher_order_unify_to_spec(ModeInfo, LHSVar, RHS, Type, PredOrFunc)
         = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     mode_info_get_instvarset(ModeInfo, InstVarSet),
     mode_info_get_module_info(ModeInfo, ModuleInfo),
     (
         RHS = error_at_var(Y),
-        RHSStr = mercury_var_to_name_only(VarSet, Y)
+        RHSStr = mercury_var_to_name_only(VarTable, Y)
     ;
         RHS = error_at_functor(ConsId, ArgVars),
-        RHSStr = functor_cons_id_to_string(ModuleInfo, VarSet, print_name_only,
-            ConsId, ArgVars)
+        RHSStr = functor_cons_id_to_string(ModuleInfo, vns_var_table(VarTable),
+            print_name_only, ConsId, ArgVars)
     ;
         RHS = error_at_lambda(ArgVars, ArgFromToInsts),
         ArgModes = list.map(from_to_insts_to_mode, ArgFromToInsts),
         assoc_list.from_corresponding_lists(ArgVars, ArgModes, ArgVarsModes),
         RHSStr = "lambda(["
-            ++ var_modes_to_string(output_debug, VarSet, InstVarSet,
-                print_name_only, ArgVarsModes)
+            ++ var_modes_to_string(output_debug, vns_var_table(VarTable),
+                InstVarSet, print_name_only, ArgVarsModes)
             ++ "] ... )"
     ),
     varset.init(TypeVarSet),
     MainPieces = [words("In unification of"),
-        quote(mercury_var_to_name_only(VarSet, LHSVar)),
+        quote(mercury_var_to_name_only(VarTable, LHSVar)),
         words("with"), quote(RHSStr), suffix(":"), nl,
         words("mode error: attempt at higher-order unification."), nl,
         words("Cannot unify two terms of type"),
@@ -766,9 +786,9 @@ mode_error_var_is_not_sufficiently_instantiated_to_spec(ModeInfo, Var,
         VarInst, ExpectedInst, MaybeMultiModeError) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     MainPieces = [words("mode error: variable"),
-        quote(mercury_var_to_name_only(VarSet, Var)) |
+        quote(mercury_var_to_name_only(VarTable, Var)) |
         has_inst_expected_inst_was(ModeInfo, VarInst, ExpectedInst)],
     MainMsgs = [simplest_msg(Context, Preamble ++ MainPieces)],
     Phase = phase_mode_check(report_in_any_mode),
@@ -841,10 +861,10 @@ inst_has_uniqueness(Inst, SearchUniq) :-
 mode_error_clobbered_var_is_live_to_spec(ModeInfo, Var) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     Pieces = [words("unique-mode error: the called procedure"),
         words("would clobber its argument, but variable"),
-        quote(mercury_var_to_name_only(VarSet, Var)),
+        quote(mercury_var_to_name_only(VarTable, Var)),
         words("is still live."), nl],
     Spec = simplest_spec($pred, severity_error,
         phase_mode_check(report_in_any_mode), Context, Preamble ++ Pieces).
@@ -864,15 +884,11 @@ mode_error_callee_pred_has_no_mode_decl_to_spec(ModeInfo) = Spec :-
 
 %---------------------------------------------------------------------------%
 
-:- func mode_error_no_matching_mode_to_spec(mode_info, list(prog_var),
-    list(mer_inst), list(list(mer_inst))) = error_spec.
+:- func mode_error_no_matching_mode_to_spec(mode_info, instmap, list(prog_var),
+    list(list(mer_inst))) = error_spec.
 
-mode_error_no_matching_mode_to_spec(ModeInfo, Vars, Insts, InitialInsts)
+mode_error_no_matching_mode_to_spec(ModeInfo, InstMap, Vars, ProcInitialInsts)
         = Spec :-
-    list.length(Vars, NumVars),
-    list.length(Insts, NumInsts),
-    expect(unify(NumVars, NumInsts), $pred, "NumVars != NumInsts"),
-
     PrefixPieces = mode_info_context_preamble(ModeInfo) ++
         [words("mode error:")],
     mode_info_get_mode_context(ModeInfo, ModeContext),
@@ -906,11 +922,12 @@ mode_error_no_matching_mode_to_spec(ModeInfo, Vars, Insts, InitialInsts)
             module_info_pred_info(ModuleInfo, PredId, PredInfo),
             pred_info_get_orig_arity(PredInfo, OrigArity),
             PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+            list.length(Vars, NumVars),
             NumExtra = NumVars - OrigArity
         )
     ;
         ( ModeContext = mode_context_unify(_, _)
-        ; ModeContext = mode_context_uninitialized
+        ; ModeContext = mode_context_not_call_or_unify
         ),
         unexpected($pred, "invalid context")
     ),
@@ -928,30 +945,30 @@ mode_error_no_matching_mode_to_spec(ModeInfo, Vars, Insts, InitialInsts)
         % their instantiation states, but we do so separately, in an effort
         % to avoid confusing users.
         list.det_split_list(NumExtra, Vars, ExtraVars, UserVars),
-        list.det_split_list(NumExtra, Insts, ExtraInsts, UserInsts),
         UserArgPieces = [words("argument")],
         UserVarInstPieces = arg_inst_mismatch_pieces(ModeInfo, UserArgPieces,
-            PredOrFunc, UserVars, UserInsts),
-        ( if list.all_true(inst_is_ground(ModuleInfo), ExtraInsts) then
+            PredOrFunc, InstMap, UserVars),
+        ( if var_insts_are_all_ground(ModuleInfo, InstMap, ExtraVars) then
             VarListInstPieces = UserVarInstPieces
         else
             ExtraArgPieces = [words("the compiler-generated argument")],
             ExtraVarInstPieces = arg_inst_mismatch_pieces(ModeInfo,
-                ExtraArgPieces, pf_predicate, ExtraVars, ExtraInsts),
+                ExtraArgPieces, pf_predicate, InstMap, ExtraVars),
             VarListInstPieces =  ExtraVarInstPieces ++ UserVarInstPieces
         )
     else
         UserArgPieces = [words("argument")],
         VarListInstPieces = arg_inst_mismatch_pieces(ModeInfo, UserArgPieces,
-            PredOrFunc, Vars, Insts)
+            PredOrFunc, InstMap, Vars)
     ),
     NoMatchPieces =
         [words("which does not match any of the modes for"),
         words(call_id_to_string(CallId)), suffix("."), nl],
-    mode_info_get_var_types(ModeInfo, VarTypes),
-    construct_argnum_var_type_inst_tuples(VarTypes, Vars, Insts, 1, ArgTuples),
-    find_satisfied_initial_insts_in_procs(ModuleInfo, ArgTuples, InitialInsts,
-        0, map.init, ArgNumMatchedProcs),
+    mode_info_get_var_table(ModeInfo, VarTable),
+    construct_argnum_var_type_inst_tuples(VarTable, InstMap, 1,
+        Vars, ArgTuples),
+    find_satisfied_initial_insts_in_procs(ModuleInfo, ArgTuples,
+        ProcInitialInsts, 0, map.init, ArgNumMatchedProcs),
     report_any_never_matching_args(ModeInfo, ArgNumMatchedProcs, NumExtra,
         ArgTuples, BadArgPieces),
     Pieces = PrefixPieces ++ VarListInstPieces ++ NoMatchPieces ++
@@ -960,30 +977,40 @@ mode_error_no_matching_mode_to_spec(ModeInfo, Vars, Insts, InitialInsts)
     Spec = simplest_spec($pred, severity_error,
         phase_mode_check(report_in_any_mode), Context, Pieces).
 
-:- func arg_inst_mismatch_pieces(mode_info, list(format_component),
-    pred_or_func, list(prog_var), list(mer_inst)) = list(format_component).
+:- pred var_insts_are_all_ground(module_info::in, instmap::in,
+    list(prog_var)::in) is semidet.
 
-arg_inst_mismatch_pieces(ModeInfo, ArgPieces, PredOrFunc, Vars, Insts)
+var_insts_are_all_ground(_, _, []).
+var_insts_are_all_ground(ModuleInfo, InstMap, [Var | Vars]) :-
+    instmap_lookup_var(InstMap, Var, VarInst),
+    inst_is_ground(ModuleInfo, VarInst),
+    var_insts_are_all_ground(ModuleInfo, InstMap, Vars).
+
+:- func arg_inst_mismatch_pieces(mode_info, list(format_piece),
+    pred_or_func, instmap, list(prog_var)) = list(format_piece).
+
+arg_inst_mismatch_pieces(ModeInfo, ArgPieces, PredOrFunc, InstMap, Vars)
         = Pieces :-
-    mode_info_get_varset(ModeInfo, VarSet),
     (
         Vars = [],
         Pieces = []
     ;
         Vars = [HeadVar | TailVars],
+        instmap_lookup_vars(InstMap, Vars, Insts),
+        mode_info_get_var_table(ModeInfo, VarTable),
         (
             PredOrFunc = pf_predicate,
             (
                 TailVars = [],
                 Pieces = ArgPieces ++
-                    [quote(mercury_var_to_name_only(VarSet, HeadVar)),
+                    [quote(mercury_var_to_name_only(VarTable, HeadVar)),
                     words("has the following inst:"), nl_indent_delta(1)] ++
                     inst_list_to_sep_lines(ModeInfo, Insts)
                 % inst_list_to_sep_lines does nl_indent_delta(-1).
             ;
                 TailVars = [_ | _],
                 Pieces = ArgPieces ++ [suffix("s"),
-                    quote(mercury_vars_to_name_only(VarSet, Vars)),
+                    quote(mercury_vars_to_name_only(VarTable, Vars)),
                     words("have the following insts:"), nl_indent_delta(1)] ++
                     inst_list_to_sep_lines(ModeInfo, Insts)
                 % inst_list_to_sep_lines does nl_indent_delta(-1).
@@ -994,7 +1021,7 @@ arg_inst_mismatch_pieces(ModeInfo, ArgPieces, PredOrFunc, Vars, Insts)
             (
                 ArgVars = [],
                 Pieces = [words("the return value"),
-                    quote(mercury_var_to_name_only(VarSet, ReturnVar)),
+                    quote(mercury_var_to_name_only(VarTable, ReturnVar)),
                     words("has the following inst:"), nl_indent_delta(1)] ++
                     inst_list_to_sep_lines(ModeInfo, Insts)
                 % inst_list_to_sep_lines does nl_indent_delta(-1).
@@ -1007,9 +1034,9 @@ arg_inst_mismatch_pieces(ModeInfo, ArgPieces, PredOrFunc, Vars, Insts)
                     SuffixPieces = [suffix("s")]
                 ),
                 Pieces = ArgPieces ++ SuffixPieces ++
-                    [quote(mercury_vars_to_name_only(VarSet, ArgVars)),
+                    [quote(mercury_vars_to_name_only(VarTable, ArgVars)),
                     words("and the return value"),
-                    quote(mercury_var_to_name_only(VarSet, ReturnVar)),
+                    quote(mercury_var_to_name_only(VarTable, ReturnVar)),
                     words("have the following insts:"), nl_indent_delta(1)] ++
                     inst_list_to_sep_lines(ModeInfo, Insts)
                 % inst_list_to_sep_lines does nl_indent_delta(-1).
@@ -1020,21 +1047,17 @@ arg_inst_mismatch_pieces(ModeInfo, ArgPieces, PredOrFunc, Vars, Insts)
 :- type argnum_var_type_inst
     --->    argnum_var_type_inst(int, prog_var, mer_type, mer_inst).
 
-:- pred construct_argnum_var_type_inst_tuples(vartypes::in,
-    list(prog_var)::in, list(mer_inst)::in, int::in,
-    list(argnum_var_type_inst)::out) is det.
+:- pred construct_argnum_var_type_inst_tuples(var_table::in, instmap::in,
+    int::in, list(prog_var)::in, list(argnum_var_type_inst)::out) is det.
 
-construct_argnum_var_type_inst_tuples(_VarTypes, [], [], _ArgNum, []).
-construct_argnum_var_type_inst_tuples(_VarTypes, [], [_ | _], _ArgNum, _) :-
-    unexpected($pred, "length mismatch").
-construct_argnum_var_type_inst_tuples(_VarTypes, [_ | _], [], _ArgNum, _) :-
-    unexpected($pred, "length mismatch").
-construct_argnum_var_type_inst_tuples(VarTypes, [Var | Vars], [Inst | Insts],
-        ArgNum, [ArgTuple | ArgTuples]) :-
-    lookup_var_type(VarTypes, Var, Type),
+construct_argnum_var_type_inst_tuples(_, _, _, [], []).
+construct_argnum_var_type_inst_tuples(VarTable, InstMap, ArgNum,
+        [Var | Vars], [ArgTuple | ArgTuples]) :-
+    lookup_var_type(VarTable, Var, Type),
+    instmap_lookup_var(InstMap, Var, Inst),
     ArgTuple = argnum_var_type_inst(ArgNum, Var, Type, Inst),
-    construct_argnum_var_type_inst_tuples(VarTypes, Vars, Insts,
-        ArgNum + 1, ArgTuples).
+    construct_argnum_var_type_inst_tuples(VarTable, InstMap, ArgNum + 1,
+        Vars, ArgTuples).
 
 %---------------------%
 
@@ -1082,7 +1105,7 @@ find_satisfied_initial_insts_in_proc(ModuleInfo,
 
 :- pred report_any_never_matching_args(mode_info::in,
     multi_map(int, int)::in, int::in, list(argnum_var_type_inst)::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 report_any_never_matching_args(_ModeInfo, _ArgNumMatchedProcs, _NumExtra,
         [], []).
@@ -1110,9 +1133,9 @@ report_any_never_matching_args(ModeInfo, ArgNumMatchedProcs, NumExtra,
         else
             HOPieces = []
         ),
-        mode_info_get_varset(ModeInfo, VarSet),
+        mode_info_get_var_table(ModeInfo, VarTable),
         BadArgPieces = ArgNumPieces ++
-            [quote(mercury_var_to_name_only(VarSet, Var)),
+            [quote(mercury_var_to_name_only(VarTable, Var)),
             words("has inst")] ++
             report_inst(ModeInfo, quote_short_inst, [suffix(",")],
                 [nl_indent_delta(1)], [suffix(","), nl_indent_delta(-1)],
@@ -1125,30 +1148,60 @@ report_any_never_matching_args(ModeInfo, ArgNumMatchedProcs, NumExtra,
 %---------------------------------------------------------------------------%
 
 :- func mode_error_bad_higher_order_inst_to_spec(mode_info, prog_var, mer_inst,
-    pred_or_func, arity) = error_spec.
+    pred_or_func, user_arity, higher_order_mismatch_info) = error_spec.
 
-mode_error_bad_higher_order_inst_to_spec(ModeInfo, Var, VarInst,
-        ExpectedPredOrFunc, ExpectedArity) = Spec :-
-    Preamble = mode_info_context_preamble(ModeInfo),
+mode_error_bad_higher_order_inst_to_spec(ModeInfo, PredVar, PredVarInst,
+        ExpectedPredOrFunc, ExpectedUserArity, Mismatch) = Spec :-
+    PreamblePieces = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
+    PredVarName = mercury_var_to_name_only(VarTable, PredVar),
+    ExpPFStr = pred_or_func_to_full_str(ExpectedPredOrFunc),
+    ExpectedUserArity = user_arity(ExpUserArityInt),
     % Don't let the specification of the expected arity be broken up,
     % since that would make the error message harder to read.
+    ExpArityPiece = fixed("arity " ++ int_to_string(ExpUserArityInt)),
     (
-        ExpectedPredOrFunc = pf_predicate,
-        ExpectingPieces = [words("expecting higher-order pred inst"),
-            fixed("of arity " ++ int_to_string(ExpectedArity) ++ "."), nl]
+        Mismatch = mismatch_not_higher_order_type,
+        MismatchPieces = [words("mode error: context requires a"),
+            words(ExpPFStr), words("of"), ExpArityPiece, suffix(","),
+            words("but the type of"), words(PredVarName),
+            words("is not a higher order type."), nl]
     ;
-        ExpectedPredOrFunc = pf_function,
-        ExpectingPieces = [words("expecting higher-order func inst"),
-            fixed("of arity " ++ int_to_string(ExpectedArity - 1) ++ "."), nl]
+        Mismatch = mismatch_no_higher_order_inst_info,
+        ( if
+            ( PredVarInst = free
+            ; PredVarInst = free(_)
+            )
+        then
+            BadInstPieces = [words("but"), words(PredVarName),
+                words("is a free variable."), nl]
+        else
+            BadInstPieces = [words("but the inst of"), words(PredVarName),
+                words("is not a higher order inst."), nl]
+        ),
+        MismatchPieces = [words("mode error: context requires a"),
+            words(ExpPFStr), words("of"), ExpArityPiece, suffix(",")] ++
+            BadInstPieces
+    ;
+        Mismatch = mismatch_pred_vs_func(ActualPredOrFunc),
+        ActPFStr = pred_or_func_to_full_str(ActualPredOrFunc),
+        MismatchPieces = [words("mode error: context requires a"),
+            words(ExpPFStr), words("of"), ExpArityPiece, suffix(","),
+            words("but"), words(PredVarName), words("is a"),
+            words(ActPFStr), words("variable."), nl]
+    ;
+        Mismatch = mismatch_on_arity(ActualUserArity),
+        ActualUserArity = user_arity(ActUserArityInt),
+        ActArityPiece = fixed("arity " ++ int_to_string(ActUserArityInt)),
+        MismatchPieces = [words("mode error: context requires a"),
+            words(ExpPFStr), words("of"), ExpArityPiece, suffix(","),
+            words("but"), words(PredVarName), words("has"),
+            ActArityPiece, suffix("."), nl]
     ),
-    Pieces = [words("mode error: variable"),
-        quote(mercury_var_to_name_only(VarSet, Var)) |
-        has_instantiatedness(ModeInfo, VarInst, ",")] ++
-        ExpectingPieces,
-    Spec = simplest_spec($pred, severity_error,
-        phase_mode_check(report_in_any_mode), Context, Preamble ++ Pieces).
+    Phase = phase_mode_check(report_in_any_mode),
+    Spec = simplest_spec($pred, severity_error, Phase,
+        Context, PreamblePieces ++ MismatchPieces).
 
 %---------------------------------------------------------------------------%
 
@@ -1285,8 +1338,8 @@ mode_error_conjunct_to_msgs(Context, !.ModeInfo, DelayedGoal) = Msgs :-
     ;
         DebugModes = yes,
         set_of_var.to_sorted_list(Vars, VarList),
-        mode_info_get_varset(!.ModeInfo, VarSet),
-        VarNames = mercury_vars_to_name_only(VarSet, VarList),
+        mode_info_get_var_table(!.ModeInfo, VarTable),
+        VarNames = mercury_vars_to_name_only(VarTable, VarList),
         Pieces1 = [words("Floundered goal, waiting on {"),
             words(VarNames), words("}:"), nl],
         Msg1 = simplest_msg(Context, Pieces1),
@@ -1300,23 +1353,23 @@ mode_error_conjunct_to_msgs(Context, !.ModeInfo, DelayedGoal) = Msgs :-
             Components2 =
                 [always([nl]),
                 'new print_anything'(
-                    write_indented_goal(ModuleInfo, VarSet, Goal))],
+                    write_indented_goal(ModuleInfo, VarTable, Goal))],
             Msg2 = error_msg(no, treat_based_on_posn, 0, Components2),
             Msgs = [Msg1, Msg2] ++ SubMsgs
         )
     ).
 
 :- type write_indented_goal
-    --->    write_indented_goal(module_info, prog_varset, hlds_goal).
+    --->    write_indented_goal(module_info, var_table, hlds_goal).
 
-:- instance error_util.print_anything(write_indented_goal) where [
-    ( print_anything(write_indented_goal(ModuleInfo, VarSet, Goal), !IO) :-
+:- instance error_spec.print_anything(write_indented_goal) where [
+    ( print_anything(write_indented_goal(ModuleInfo, VarTable, Goal), !IO) :-
         io.output_stream(Stream, !IO),
         io.write_string(Stream, "\t\t", !IO),
         module_info_get_globals(ModuleInfo, Globals),
         OutInfo = init_hlds_out_info(Globals, output_debug),
-        write_goal(OutInfo, Stream, ModuleInfo, VarSet, print_name_only, 2,
-            ".\n", Goal, !IO)
+        write_goal(OutInfo, Stream, ModuleInfo, vns_var_table(VarTable),
+            print_name_only, 2, ".\n", Goal, !IO)
     )
 ].
 
@@ -1434,7 +1487,7 @@ mode_error_coerce_error_to_spec(ModeInfo, Error) = Spec :-
         phase_mode_check(report_in_any_mode), Context, Preamble ++ Pieces).
 
 :- func make_term_path_piece(coerce_error_term_path_step) =
-    list(format_component).
+    list(format_piece).
 
 make_term_path_piece(Step) = Pieces :-
     Step = coerce_error_term_path_step(ConsId, ArgNum),
@@ -1472,7 +1525,7 @@ mode_error_bind_locked_var_to_spec(ModeInfo, Reason, Var, VarInst, Inst)
         = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     (
         Reason = var_lock_negation,
         ReasonStr = "attempt to bind a non-local variable inside a negation."
@@ -1498,7 +1551,8 @@ mode_error_bind_locked_var_to_spec(ModeInfo, Reason, Var, VarInst, Inst)
             " inside more than one parallel conjunct."
     ),
     MainPieces = [words("scope error:"), words(ReasonStr), nl,
-        words("Variable"), quote(mercury_var_to_name_only(VarSet, Var)) |
+        words("Variable"),
+        quote(mercury_var_to_name_only(VarTable, Var)) |
         has_inst_expected_inst_was(ModeInfo, VarInst, Inst)],
     (
         Reason = var_lock_negation,
@@ -1547,11 +1601,11 @@ mode_error_bind_locked_var_to_spec(ModeInfo, Reason, Var, VarInst, Inst)
 :- func mode_error_unexpected_final_inst_to_spec(mode_info, int, prog_var,
     mer_inst, mer_inst, final_inst_error) = error_spec.
 
-mode_error_unexpected_final_inst_to_spec(ModeInfo, ArgNum, Var,
+mode_error_unexpected_final_inst_to_spec(ModeInfo, RawArgNum, Var,
         ActualInst, ExpectedInst, Reason) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     (
         Reason = too_instantiated,
         Problem = "became too instantiated."
@@ -1563,10 +1617,34 @@ mode_error_unexpected_final_inst_to_spec(ModeInfo, ArgNum, Var,
         % I don't think this can happen. But just in case...
         Problem = "had the wrong instantiatedness."
     ),
-    Pieces = [words("mode error: argument"), fixed(int_to_string(ArgNum)),
-        words(Problem), nl,
+    mode_info_get_module_info(ModeInfo, ModuleInfo),
+    mode_info_get_pred_id(ModeInfo, PredId),
+    module_info_pred_info(ModuleInfo, PredId, PredInfo),
+    pred_info_get_polymorphism_added_args(PredInfo, NumPolyAddedArgs),
+    ArgNum = RawArgNum - NumPolyAddedArgs,
+    ( if ArgNum >= 1 then
+        PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+        pred_form_arity(PredFormArityInt) =
+            pred_info_pred_form_arity(PredInfo),
+        ( if
+            PredOrFunc = pf_function,
+            ArgNum = PredFormArityInt
+        then
+            ArgNumPieces = [words("the function result")]
+        else
+            ArgNumPieces = [words("argument"), int_fixed(ArgNum)]
+        )
+    else
+        % This should not happen. All code that passes around
+        % compiler-generated arguments is of course also compiler generated,
+        % and that code is supposed to be "correct by construction".
+        % This is here in case that supposition turns out to be mistaken.
+        ArgNumPieces = [words("compiler-generated argument"),
+            int_fixed(RawArgNum)]
+    ),
+    Pieces = [words("mode error:")] ++ ArgNumPieces ++ [words(Problem), nl,
         words("Final instantiatedness of"),
-        quote(mercury_var_to_name_only(VarSet, Var)), words("was") |
+        quote(mercury_var_to_name_only(VarTable, Var)), words("was") |
         report_inst(ModeInfo, quote_short_inst, [suffix(","), nl],
             [nl_indent_delta(1)], [suffix(","), nl_indent_delta(-1)],
             ActualInst)] ++
@@ -1587,19 +1665,19 @@ mode_error_in_callee_to_spec(!.ModeInfo, Vars, Insts,
     Preamble = mode_info_context_preamble(!.ModeInfo),
     mode_info_get_module_info(!.ModeInfo, ModuleInfo),
     mode_info_get_context(!.ModeInfo, Context),
-    mode_info_get_varset(!.ModeInfo, VarSet),
+    mode_info_get_var_table(!.ModeInfo, VarTable),
     (
         Vars = [],
         unexpected($pred, "Vars = []")
     ;
         Vars = [Var],
         MainPieces = [words("mode error: argument"),
-            quote(mercury_var_to_name_only(VarSet, Var)),
+            quote(mercury_var_to_name_only(VarTable, Var)),
             words("has the following inst:"), nl_indent_delta(1)]
     ;
         Vars = [_, _ | _],
         MainPieces = [words("mode error: arguments"),
-            quote(mercury_vars_to_name_only(VarSet, Vars)),
+            quote(mercury_vars_to_name_only(VarTable, Vars)),
             words("have the following insts:"), nl_indent_delta(1)]
     ),
     NoMatchPieces = inst_list_to_sep_lines(!.ModeInfo, Insts) ++
@@ -1626,6 +1704,13 @@ mode_error_in_callee_to_spec(!.ModeInfo, Vars, Insts,
         mode_info_set_proc_id(CalleeProcId, !ModeInfo),
         mode_info_set_context(CalleeContext, !ModeInfo),
         mode_info_set_mode_context(CalleeModeContext, !ModeInfo),
+        % Any variables in CalleeModeErrors have their names in
+        % the var table of the callee, not in the var table of the procedure
+        % we are modechecking now.
+        module_info_proc_info(ModuleInfo, CalleePredId, CalleeProcId,
+            CalleeProcInfo),
+        proc_info_get_var_table(CalleeProcInfo, CalleeVarTable),
+        mode_info_set_var_table(CalleeVarTable, !ModeInfo),
         CalleeModeErrorSpec0 = mode_error_to_spec(!.ModeInfo, CalleeModeError),
         module_info_get_globals(ModuleInfo, Globals),
         extract_spec_msgs(Globals, CalleeModeErrorSpec0, LaterMsgs0),
@@ -1677,7 +1762,7 @@ mode_error_cannot_create_implied_mode_to_spec(ModeInfo, Reason, Var, VarInst,
     Phase = phase_mode_check(report_in_any_mode),
     ( if OpMode = opm_top_args(opma_augment(opmau_generate_code(_))) then
         Preamble = mode_info_context_preamble(ModeInfo),
-        mode_info_get_varset(ModeInfo, VarSet),
+        mode_info_get_var_table(ModeInfo, VarTable),
         (
             Reason = cannot_init_any,
             ReasonPieces = [words("initializing a solver variable")]
@@ -1688,7 +1773,8 @@ mode_error_cannot_create_implied_mode_to_spec(ModeInfo, Reason, Var, VarInst,
         Pieces = [words("sorry, the compiler currently"),
             words("cannot implement implied modes that require")] ++
             ReasonPieces ++ [suffix("."), nl,
-            words("Variable"), quote(mercury_var_to_name_only(VarSet, Var)) |
+            words("Variable"),
+            quote(mercury_var_to_name_only(VarTable, Var)) |
             has_inst_expected_inst_was(ModeInfo, VarInst,
                 NonImpliedInitialInst)],
         Spec = simplest_spec($pred, severity_error, Phase, Context,
@@ -1707,19 +1793,19 @@ purity_error_should_be_in_promise_purity_scope_to_spec(NegCtxtDesc,
         ModeInfo, Var) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     (
         NegCtxtDesc = if_then_else,
         Pieces = [words("purity error: if-then-else should be inside"),
             words("a promise_purity scope because non-local variable"),
-            quote(mercury_var_to_name_only(VarSet, Var)),
+            quote(mercury_var_to_name_only(VarTable, Var)),
             words("has inst"), quote("any"),
             words("and appears in the condition."), nl]
     ;
         NegCtxtDesc = negation,
         Pieces = [words("purity error: negation should be inside"),
             words("a promise_purity scope because non-local variable"),
-            quote(mercury_var_to_name_only(VarSet, Var)),
+            quote(mercury_var_to_name_only(VarTable, Var)),
             words("has inst"), quote("any"),
             words("and appears in the body."), nl]
     ),
@@ -1734,12 +1820,13 @@ purity_error_should_be_in_promise_purity_scope_to_spec(NegCtxtDesc,
 purity_error_lambda_should_be_any_to_spec(ModeInfo, OoMVars) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     Vars = one_or_more_to_list(OoMVars),
     Pieces = [words("purity error: lambda is"), quote("ground"),
         words("but contains the following non-local variables"),
         words("whose insts contain"), quote("any"), suffix(":"),
-        words(mercury_vars_to_name_only(VarSet, Vars)), suffix("."), nl],
+        words(mercury_vars_to_name_only(VarTable, Vars)),
+        suffix("."), nl],
     Always = always(Preamble ++ Pieces),
     VerboseOnly = verbose_only(verbose_once, [words("Predicate expressions"),
         words("with inst"), quote("any"), words("can be written"),
@@ -1767,8 +1854,8 @@ purity_error_lambda_should_be_any_to_spec(ModeInfo, OoMVars) = Spec :-
 merge_error_to_msgs(ModeInfo, MainContext, IsDisjunctive, MergeError) = Msgs :-
     MergeError = merge_error(Var, ContextsInsts0),
     mode_info_get_module_info(ModeInfo, ModuleInfo),
-    mode_info_get_varset(ModeInfo, VarSet),
-    VarNamePiece = quote(mercury_var_to_name_only(VarSet, Var)),
+    mode_info_get_var_table(ModeInfo, VarTable),
+    VarNamePiece = quote(mercury_var_to_name_only(VarTable, Var)),
     list.sort(ContextsInsts0, ContextsInsts),
     count_ground_insts(ModuleInfo, ContextsInsts,
         0, NumGroundInsts, 0, NumAllInsts),
@@ -1851,7 +1938,7 @@ count_ground_insts(ModuleInfo, [ContextInst | ContextsInsts],
     ;       report_ground_vs_nonground_only
     ;       report_inst_and_ground_vs_nonground.
 
-:- func report_inst_in_context(mode_info, format_component,
+:- func report_inst_in_context(mode_info, format_piece,
     report_inst_how, pair(prog_context, mer_inst)) = error_msg.
 
 report_inst_in_context(ModeInfo, VarNamePiece, ReportIsGround, Context - Inst)
@@ -1889,8 +1976,8 @@ report_inst_in_context(ModeInfo, VarNamePiece, ReportIsGround, Context - Inst)
     --->    ground
     ;       nonground.
 
-:- func report_inst_in_branch(mode_info, format_component,
-    maybe(ground_or_nonground), mer_inst) = list(format_component).
+:- func report_inst_in_branch(mode_info, format_piece,
+    maybe(ground_or_nonground), mer_inst) = list(format_piece).
 
 report_inst_in_branch(ModeInfo, VarNamePiece, MaybeGroundOrNonGround, Inst)
         = Pieces :-
@@ -1928,16 +2015,16 @@ report_inst_in_branch(ModeInfo, VarNamePiece, MaybeGroundOrNonGround, Inst)
         )
     ).
 
-:- func report_inst_in_branch_simple(format_component, string)
-    = list(format_component).
+:- func report_inst_in_branch_simple(format_piece, string)
+    = list(format_piece).
 
 report_inst_in_branch_simple(VarNamePiece, FreeOrGround) = Pieces :-
     MainPieces = [words("In this branch,"), VarNamePiece,
         words("is"), words(FreeOrGround), suffix("."), nl],
     Pieces = [nl_indent_delta(1) | MainPieces] ++ [nl_indent_delta(-1)].
 
-:- func report_inst_in_branch_detail(mode_info, list(format_component),
-    mer_inst) = list(format_component).
+:- func report_inst_in_branch_detail(mode_info, list(format_piece),
+    mer_inst) = list(format_piece).
 
 report_inst_in_branch_detail(ModeInfo, IntroPieces, Inst) = Pieces :-
     Pieces = [nl_indent_delta(1) | IntroPieces] ++ [nl_indent_delta(1) |
@@ -1948,18 +2035,18 @@ report_inst_in_branch_detail(ModeInfo, IntroPieces, Inst) = Pieces :-
 %------------%
 
 :- func inst_list_to_sep_lines(mode_info, list(mer_inst))
-    = list(format_component).
+    = list(format_piece).
 
 inst_list_to_sep_lines(_ModeInfo, []) = [].
 inst_list_to_sep_lines(ModeInfo, [Inst | Insts]) = Pieces :-
     (
         Insts = [],
-        Pieces = report_inst(ModeInfo, fixed_short_inst, [nl_indent_delta(-1)],
-            [], [nl_indent_delta(-1)], Inst)
+        Pieces = report_inst(ModeInfo, fixed_short_inst, [], [], [], Inst) ++
+            [nl_indent_delta(-1)]
     ;
         Insts = [_ | _],
-        HeadPieces = report_inst(ModeInfo, fixed_short_inst, [suffix(","), nl],
-            [], [suffix(","), nl], Inst),
+        HeadPieces = report_inst(ModeInfo, fixed_short_inst, [suffix(",")],
+            [], [suffix(",")], Inst) ++ [nl],
         TailPieces = inst_list_to_sep_lines(ModeInfo, Insts),
         Pieces = HeadPieces ++ TailPieces
     ).
@@ -1967,14 +2054,14 @@ inst_list_to_sep_lines(ModeInfo, [Inst | Insts]) = Pieces :-
 %------------%
 
 :- func has_inst_expected_inst_was(mode_info, mer_inst, mer_inst)
-    = list(format_component).
+    = list(format_piece).
 
 has_inst_expected_inst_was(ModeInfo, ActualInst, ExpectedInst) =
     has_instantiatedness(ModeInfo, ActualInst, ",") ++
     expected_inst_was(ModeInfo, ExpectedInst).
 
 :- func has_instantiatedness(mode_info, mer_inst, string)
-    = list(format_component).
+    = list(format_piece).
 
 has_instantiatedness(ModeInfo, Inst, Suffix) =
     [words("has instantiatedness") |
@@ -1982,7 +2069,7 @@ has_instantiatedness(ModeInfo, Inst, Suffix) =
             [nl_indent_delta(1)], [suffix(Suffix), nl_indent_delta(-1)],
             Inst)].
 
-:- func expected_inst_was(mode_info, mer_inst) = list(format_component).
+:- func expected_inst_was(mode_info, mer_inst) = list(format_piece).
 
 expected_inst_was(ModeInfo, Inst) =
     [words("expected instantiatedness was") |
@@ -1990,8 +2077,8 @@ expected_inst_was(ModeInfo, Inst) =
             [nl_indent_delta(1)], [suffix("."), nl_indent_delta(-1)], Inst)].
 
 :- func report_inst(mode_info, short_inst,
-    list(format_component), list(format_component), list(format_component),
-    mer_inst) = list(format_component).
+    list(format_piece), list(format_piece), list(format_piece),
+    mer_inst) = list(format_piece).
 
 report_inst(ModeInfo, ShortInstQF, ShortInstSuffix,
         LongInstPrefix, LongInstSuffix, Inst0) = Pieces :-
@@ -2029,14 +2116,14 @@ mode_warning_info_to_spec(!.ModeInfo, Warning) = Spec :-
 mode_warning_cannot_succeed_var_var(ModeInfo, X, Y, InstX, InstY) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     Pieces = [words("warning: unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)),
-        words("and"), quote(mercury_var_to_name_only(VarSet, Y)),
+        quote(mercury_var_to_name_only(VarTable, X)),
+        words("and"), quote(mercury_var_to_name_only(VarTable, Y)),
         words("cannot succeed."), nl,
-        quote(mercury_var_to_name_only(VarSet, X)) |
+        quote(mercury_var_to_name_only(VarTable, X)) |
         has_instantiatedness(ModeInfo, InstX, ",")] ++
-        [quote(mercury_var_to_name_only(VarSet, Y)) |
+        [quote(mercury_var_to_name_only(VarTable, Y)) |
         has_instantiatedness(ModeInfo, InstY, ".")],
     Spec = simplest_spec($pred, severity_warning,
         phase_mode_check(report_only_if_in_all_modes),
@@ -2050,13 +2137,13 @@ mode_warning_cannot_succeed_var_var(ModeInfo, X, Y, InstX, InstY) = Spec :-
 mode_warning_cannot_succeed_var_functor(ModeInfo, X, InstX, ConsId) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     ConsIdStr = mercury_cons_id_to_string(output_mercury,
         does_not_need_brackets, ConsId),
     Pieces = [words("warning: unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)), words("and"),
+        quote(mercury_var_to_name_only(VarTable, X)), words("and"),
         words(ConsIdStr), words("cannot succeed."), nl,
-        quote(mercury_var_to_name_only(VarSet, X)) |
+        quote(mercury_var_to_name_only(VarTable, X)) |
         has_instantiatedness(ModeInfo, InstX, ".")],
     Spec = simplest_spec($pred, severity_warning,
         phase_mode_check(report_only_if_in_all_modes),
@@ -2070,13 +2157,13 @@ mode_warning_cannot_succeed_var_functor(ModeInfo, X, InstX, ConsId) = Spec :-
 mode_warning_cannot_succeed_ground_occur_check(ModeInfo, X, ConsId) = Spec :-
     Preamble = mode_info_context_preamble(ModeInfo),
     mode_info_get_context(ModeInfo, Context),
-    mode_info_get_varset(ModeInfo, VarSet),
+    mode_info_get_var_table(ModeInfo, VarTable),
     ConsIdStr = mercury_cons_id_to_string(output_mercury,
         does_not_need_brackets, ConsId),
     Pieces = [words("warning: unification of"),
-        quote(mercury_var_to_name_only(VarSet, X)), words("and"),
+        quote(mercury_var_to_name_only(VarTable, X)), words("and"),
         words(ConsIdStr), words("cannot succeed, because"),
-        quote(mercury_var_to_name_only(VarSet, X)),
+        quote(mercury_var_to_name_only(VarTable, X)),
         words("cannot be equal to a term containing itself."), nl],
     Spec = simplest_spec($pred, severity_warning,
         phase_mode_check(report_in_any_mode), Context, Preamble ++ Pieces).
@@ -2087,7 +2174,7 @@ mode_warning_cannot_succeed_ground_occur_check(ModeInfo, X, ConsId) = Spec :-
 % Utility predicates needed to print both errors and warnings.
 %
 
-:- func mode_info_context_preamble(mode_info) = list(format_component).
+:- func mode_info_context_preamble(mode_info) = list(format_piece).
 
 mode_info_context_preamble(ModeInfo) = Pieces :-
     mode_info_get_module_info(ModeInfo, ModuleInfo),
@@ -2096,22 +2183,27 @@ mode_info_context_preamble(ModeInfo) = Pieces :-
     module_info_pred_proc_info(ModuleInfo, PredId, ProcId,
         PredInfo, ProcInfo),
     pred_info_get_origin(PredInfo, PredOrigin),
-    ( if PredOrigin = origin_instance_method(MethodName, _) then
-        Name0 = unqualify_name(MethodName),
+    ( if
+        PredOrigin = origin_user(OriginUser),
+        OriginUser = user_made_instance_method(PFMethodSymNameArity, _),
+        PFMethodSymNameArity = pred_pf_name_arity(_, MethodSymName, _)
+    then
+        Name = unqualify_name(MethodSymName),
         ExtraMethodPieces = [words("type class method implementation for")]
     else
-        Name0 = pred_info_name(PredInfo),
+        Name = pred_info_name(PredInfo),
         ExtraMethodPieces = []
     ),
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
     mode_info_get_instvarset(ModeInfo, InstVarSet),
-    Name = unqualified(Name0),
+    SymName = unqualified(Name),
     pred_info_get_markers(PredInfo, PredMarkers),
     proc_info_declared_argmodes(ProcInfo, Modes0),
-    strip_builtin_qualifiers_from_mode_list(Modes0, Modes),
+    strip_module_names_from_mode_list(strip_builtin_module_name,
+        Modes0, Modes),
     MaybeDet = no,
     ModeSubDeclStr = mercury_mode_subdecl_to_string(output_debug, PredOrFunc,
-        InstVarSet, Name, Modes, MaybeDet),
+        InstVarSet, SymName, Modes, MaybeDet),
     mode_info_get_mode_context(ModeInfo, ModeContext),
     ModeContextPieces =
         mode_context_to_pieces(ModeInfo, ModeContext, PredMarkers),
@@ -2122,11 +2214,11 @@ mode_info_context_preamble(ModeInfo) = Pieces :-
     % XXX Some parts of the mode context never get set up.
     %
 :- func mode_context_to_pieces(mode_info, mode_context, pred_markers)
-    = list(format_component).
+    = list(format_piece).
 
 mode_context_to_pieces(ModeInfo, ModeContext, Markers) = Pieces :-
     (
-        ModeContext = mode_context_uninitialized,
+        ModeContext = mode_context_not_call_or_unify,
         Pieces = []
     ;
         ModeContext = mode_context_call(ModeCallId, ArgNum),
@@ -2150,35 +2242,45 @@ mode_context_to_pieces(ModeInfo, ModeContext, Markers) = Pieces :-
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-should_report_mode_warning_for_pred_origin(origin_special_pred(_, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_instance_method(_, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_class_method(_, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_transformed(_, _, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_created(_)) = no.
-should_report_mode_warning_for_pred_origin(origin_assertion(_, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_lambda(_, _, _)) = yes.
-should_report_mode_warning_for_pred_origin(origin_solver_type(_, _, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_tabling(_, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_mutable(_, _, _)) = no.
-should_report_mode_warning_for_pred_origin(origin_initialise) = no.
-should_report_mode_warning_for_pred_origin(origin_finalise) = no.
-should_report_mode_warning_for_pred_origin(origin_user(_)) = yes.
+should_report_mode_warning_for_pred_origin(Origin) = Report :-
+    (
+        Origin = origin_user(OriginUser),
+        (
+            ( OriginUser = user_made_pred(_, _, _)
+            ; OriginUser = user_made_lambda(_, _, _)
+            ),
+            Report = yes
+        ;
+            ( OriginUser = user_made_class_method(_, _)
+            ; OriginUser = user_made_instance_method(_, _)
+            ; OriginUser = user_made_assertion(_, _, _)
+            ),
+            Report = no
+        )
+    ;
+        ( Origin = origin_compiler(_)
+        ; Origin = origin_pred_transform(_, _, _)
+        ; Origin = origin_proc_transform(_, _, _, _)
+        ),
+        Report = no
+    ).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
 mode_decl_to_string(Lang, ProcId, PredInfo) = String :-
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
-    Name0 = pred_info_name(PredInfo),
-    Name = unqualified(Name0),
+    Name = pred_info_name(PredInfo),
+    SymName = unqualified(Name),
     pred_info_get_proc_table(PredInfo, Procs),
     map.lookup(Procs, ProcId, ProcInfo),
     proc_info_declared_argmodes(ProcInfo, Modes0),
     proc_info_get_declared_determinism(ProcInfo, MaybeDet),
     varset.init(InstVarSet),
-    strip_builtin_qualifiers_from_mode_list(Modes0, Modes),
+    strip_module_names_from_mode_list(strip_builtin_module_name,
+        Modes0, Modes),
     String = mercury_mode_subdecl_to_string(Lang, PredOrFunc,
-        InstVarSet, Name, Modes, MaybeDet).
+        InstVarSet, SymName, Modes, MaybeDet).
 
 %---------------------------------------------------------------------------%
 :- end_module check_hlds.mode_errors.

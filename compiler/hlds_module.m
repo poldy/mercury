@@ -238,9 +238,9 @@
     % compilation unit.
     %
 :- pred module_info_init(globals::in, module_name::in, prog_context::in,
-    string::in, used_modules::in, set(module_name)::in,
+    string::in, include_module_map::in, used_modules::in, set(module_name)::in,
     partial_qualifier_info::in, maybe(recompilation_info)::in,
-    module_info::out) is det.
+    type_repn_decision_data::in, module_info::out) is det.
 
     % Once the module_info has been built, we call module_info_optimize
     % to attempt to optimize the data structures for lots of accesses
@@ -319,6 +319,8 @@
     prog_context::out) is det.
 :- pred module_info_get_dump_hlds_base_file_name(module_info::in,
     string::out) is det.
+:- pred module_info_get_include_module_map(module_info::in,
+    include_module_map::out) is det.
 :- pred module_info_get_partial_qualifier_info(module_info::in,
     partial_qualifier_info::out) is det.
 :- pred module_info_get_maybe_recompilation_info(module_info::in,
@@ -344,7 +346,7 @@
 :- pred module_info_get_fact_table_file_names(module_info::in,
     list(string)::out) is det.
 :- pred module_info_get_int_bad_clauses(module_info::in,
-    set(pf_sym_name_arity)::out) is det.
+    set(pred_pf_name_arity)::out) is det.
 :- pred module_info_get_maybe_dependency_info(module_info::in,
     maybe(hlds_dependency_info)::out) is det.
 :- pred module_info_get_type_ctor_gen_infos(module_info::in,
@@ -359,6 +361,8 @@
     avail_module_map::out) is det.
 :- pred module_info_get_used_modules(module_info::in,
     used_modules::out) is det.
+:- pred module_info_get_ancestor_avail_modules(module_info::in,
+    set(module_name)::out) is det.
 :- pred module_info_get_maybe_complexity_proc_map(module_info::in,
     maybe(pair(int, complexity_proc_map))::out) is det.
 :- pred module_info_get_complexity_proc_infos(module_info::in,
@@ -372,6 +376,8 @@
 :- pred module_info_get_user_final_pred_target_names(module_info::in,
     pred_target_names::out) is det.
 :- pred module_info_get_structure_reuse_preds(module_info::in,
+    set(pred_id)::out) is det.
+:- pred module_info_get_format_call_pragma_preds(module_info::in,
     set(pred_id)::out) is det.
 :- pred module_info_get_exported_enums(module_info::in,
     list(exported_enum_info)::out) is det.
@@ -440,7 +446,7 @@
     module_info::in, module_info::out) is det.
 :- pred module_info_set_foreign_body_codes(cord(foreign_body_code)::in,
     module_info::in, module_info::out) is det.
-:- pred module_info_set_int_bad_clauses(set(pf_sym_name_arity)::in,
+:- pred module_info_set_int_bad_clauses(set(pred_pf_name_arity)::in,
     module_info::in, module_info::out) is det.
 :- pred module_info_set_type_ctor_gen_infos(list(type_ctor_gen_info)::in,
     module_info::in, module_info::out) is det.
@@ -451,6 +457,8 @@
 :- pred module_info_set_table_struct_map(table_struct_map::in,
     module_info::in, module_info::out) is det.
 :- pred module_info_set_used_modules(used_modules::in,
+    module_info::in, module_info::out) is det.
+:- pred module_info_set_ancestor_avail_modules(set(module_name)::in,
     module_info::in, module_info::out) is det.
 :- pred module_info_set_maybe_complexity_proc_map(
     maybe(pair(int, complexity_proc_map))::in,
@@ -466,6 +474,8 @@
 :- pred module_info_set_user_final_pred_target_names(pred_target_names::in,
     module_info::in, module_info::out) is det.
 :- pred module_info_set_structure_reuse_preds(set(pred_id)::in,
+    module_info::in, module_info::out) is det.
+:- pred module_info_set_format_call_pragma_preds(set(pred_id)::in,
     module_info::in, module_info::out) is det.
 :- pred module_info_set_exported_enums(list(exported_enum_info)::in,
     module_info::in, module_info::out) is det.
@@ -487,8 +497,9 @@
 % a simple getter or setter predicates.
 %
 
-:- pred module_info_get_preds(module_info::in, pred_table::out) is det.
-:- pred module_info_set_preds(pred_table::in,
+:- pred module_info_get_pred_id_table(module_info::in,
+    pred_id_table::out) is det.
+:- pred module_info_set_pred_id_table(pred_id_table::in,
     module_info::in, module_info::out) is det.
 
     % Given a pred_id, return the pred_info of the specified pred.
@@ -599,6 +610,9 @@
 :- pred module_info_next_atomic_count(prog_context::in, int::out,
     module_info::in, module_info::out) is det.
 
+:- pred module_info_next_loop_inv_count(prog_context::in, int::out,
+    module_info::in, module_info::out) is det.
+
 %---------------------%
 
 :- pred module_add_avail_module_name(module_name::in,
@@ -628,7 +642,7 @@
 :- pred module_info_get_all_deps(module_info::in,
     set(module_name)::out) is det.
 
-:- pred module_info_add_parent_to_used_modules(module_name::in,
+:- pred module_info_add_module_to_public_used_modules(module_name::in,
     module_info::in, module_info::out) is det.
 
 %---------------------%
@@ -776,6 +790,8 @@
                 mri_module_name_context         :: prog_context,
                 mri_dump_base_file_name         :: string,
 
+                mri_include_module_map          :: include_module_map,
+
                 mri_partial_qualifier_info      :: partial_qualifier_info,
                 mri_maybe_recompilation_info    :: maybe(recompilation_info),
 
@@ -822,13 +838,14 @@
                 % The set of predicates and functions for which there was
                 % an attempt to define them in the interface (by clause,
                 % foreign_proc, or external_proc pragma), which means that
-                % if find no definition for them in the implementation section
-                % either, we should NOT generate an error message complaining
-                % about the definition being missing. Such a message would be
-                % misleading, since the definition is not missing, it was
-                % just misplaced, and we have already generated an error
-                % message about that misplaced attempt at definition.
-                mri_int_bad_clauses             :: set(pf_sym_name_arity),
+                % if we find no definition for them in the implementation
+                % section either, we should NOT generate an error message
+                % complaining about the definition being missing. Such a
+                % message would be misleading, since the definition is not
+                % missing, it was just misplaced, and we have already
+                % generated an error message about that misplaced attempt
+                % at definition.
+                mri_int_bad_clauses             :: set(pred_pf_name_arity),
 
                 % Please see module_info_ensure_dependency_info for the
                 % meaning of this dependency_info, and the constraints on it.
@@ -857,25 +874,47 @@
                 % the same file.
                 mri_atomics_per_context         :: map(prog_context, counter),
 
-                % The names of all the directly imported modules
-                % (used during type checking, and by the MLDS back-end).
-                % XXX CLEANUP The above is COMPLETELY WRONG.
+                % How many loop invariant optimizations we have done at
+                % different contexts in the module. This is used to provide
+                % a uniquely identify the predicates that we create
+                % using the loop invariant optimization, in the rare case
+                % that one line contains the definition of more than one
+                % predicate.
+                mri_loop_invs_per_context       :: map(prog_context, counter),
+
+                % The add_item_avails predicate in make_hlds_passes.m fills
+                % this field with information about all the import- and
+                % use_module declarations both in the module being compiled,
+                % and in the .int0 interface files of its ancestors.
+                %
+                % Each entry in the avail_module_map will specify
+                %
+                % - whether the module is imported or used in the interface
+                %   of either the module or its ancestors, and
+                %
+                % - whether the module is imported (as opposed to used)
+                %   in either the module or its ancestors.
+                %
+                % Each entry will also contain a list of avail_modules
+                % *for import/use_module declarations in this module only*;
+                % there won't be any entries for imports/uses in ancestors.
                 %
                 % This field is used by:
                 %
                 % - intermod.m to (over-)estimate the set of use_module decls
-                %   needed by the code put into a .opt file
+                %   needed by the code put into a .opt file;
                 %
                 % - try_expand.m to see whether exception is imported
                 %   and hence whether it has anything to do at all
                 %   (since we import exception.m implicitly if some code
-                %   contains a try goal)
+                %   contains a try goal);
                 %
                 % - by unused_imports.m to decide what import_module and/or
-                %   use_module declarations to warn about
+                %   use_module declarations to warn about;
                 %
-                % - by xml_documentation to prettyprint a module as XML
+                % - by xml_documentation to prettyprint a module as XML;
                 %
+                % and possibly more.
                 mri_avail_module_map            :: avail_module_map,
 
                 % The names of all the indirectly imported modules
@@ -894,10 +933,18 @@
                                                 :: set(module_name),
 
                 % The modules which have already been calculated as being used.
-                % Currently this is the module imports inherited from the
-                % parent modules plus those calculated during expansion of
-                % equivalence types and insts.
+                % This slot is initialized to the set of modules that have
+                % been seen to be used during the expansion of equivalence
+                % types and insts.
                 mri_used_modules                :: used_modules,
+
+                % The set of modules imported by ancestor modules.
+                %
+                % We used to add these to mri_used_modules, but that prevented
+                % the compiler from generating useful warnings about unused
+                % local imports/uses of those modules. We now keep this info
+                % on a "may be useful later" basis; it is current unused.
+                mri_ancestor_avail_modules      :: set(module_name),
 
                 % Information about the procedures we are performing
                 % complexity experiments on.
@@ -926,6 +973,21 @@
                 % procedures. Its only use is to avoid writing out pragmas
                 % for structure reuse predicates to `.trans_opt' files.
                 mri_structure_reuse_preds       :: set(pred_id),
+
+                % The set of predicates in the HLDS that have
+                % a format_call pragma.
+                %
+                % This set is filled in by add_pragma.m when the HLDS
+                % is first constructed. Usually, this set will be empty,
+                % but if it is not, the check_pragma_format_call_preds pass
+                % will check all these pragmas for errors.
+                %
+                % This pass must be after type and mode analysis (since it
+                % needs to know the types and modes of procedure arguments),
+                % and must be before the simplification pass at the end of
+                % semantic analysis (since that is when format_call.m's code
+                % uses this info, relying on it having being checked).
+                mri_format_call_pragma_preds    :: set(pred_id),
 
                 % Enumeration types that have been exported to a foreign
                 % language.
@@ -1013,8 +1075,8 @@
 %---------------------------------------------------------------------------%
 
 module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
-        UsedModules, ImplicitlyUsedModules, QualifierInfo, MaybeRecompInfo,
-        ModuleInfo) :-
+        InclMap, UsedModules, ImplicitlyUsedModules,
+        QualifierInfo, MaybeRecompInfo, TypeRepnDec, ModuleInfo) :-
     SpecialPredMaps = special_pred_maps(map.init, map.init, map.init),
     map.init(ClassTable),
     map.init(InstanceTable),
@@ -1057,6 +1119,7 @@ module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
     map.init(TablingStructMap),
     map.init(LambdasPerContext),
     map.init(AtomicsPerContext),
+    map.init(LoopInvsPerContext),
 
     % XXX ITEM_LIST Given that we start with an aug_compilation_unit,
     % shouldn't the work of finding implicit dependencies have already
@@ -1078,6 +1141,7 @@ module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
 
     set.init(IndirectlyImportedModules),
 
+    set.init(AncestorAvailModules),
     MaybeComplexityMap = no,
     ComplexityProcInfos = [],
     set.init(ProcAnalysisKinds),
@@ -1093,18 +1157,19 @@ module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
     UserInitPredTargetNames = pred_target_names(map.init),
     UserFinalPredTargetNames = pred_target_names(map.init),
     set.init(StructureReusePredIds),
+    set.init(FormatCallPragmaPredIds),
     ExportedEnums = [],
     EventSet = event_set("", map.init),
     map.init(OISUMap),
     set.init(OISUProcs),
     TSStringTableSize = 0,
     TSRevStringTable = [],
-    TypeRepnDecision = type_repn_decision_data(map.init, map.init, [], []),
 
     ModuleRareInfo = module_rare_info(
         ModuleName,
         ModuleNameContext,
         DumpBaseFileName,
+        InclMap,
         QualifierInfo,
         MaybeRecompInfo,
         ProcRequests,
@@ -1125,9 +1190,11 @@ module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
         TablingStructMap,
         LambdasPerContext,
         AtomicsPerContext,
+        LoopInvsPerContext,
         AvailModuleMap,
         IndirectlyImportedModules,
         UsedModules,
+        AncestorAvailModules,
         MaybeComplexityMap,
         ComplexityProcInfos,
         ProcAnalysisKinds,
@@ -1135,13 +1202,14 @@ module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
         UserInitPredTargetNames,
         UserFinalPredTargetNames,
         StructureReusePredIds,
+        FormatCallPragmaPredIds,
         ExportedEnums,
         EventSet,
         OISUMap,
         OISUProcs,
         TSStringTableSize,
         TSRevStringTable,
-        TypeRepnDecision),
+        TypeRepnDec),
 
     predicate_table_init(PredicateTable),
     TypeTable = init_type_table,
@@ -1202,6 +1270,8 @@ module_info_optimize(!ModuleInfo) :-
     map(prog_context, counter)::out) is det.
 :- pred module_info_get_atomics_per_context(module_info::in,
     map(prog_context, counter)::out) is det.
+:- pred module_info_get_loop_invs_per_context(module_info::in,
+    map(prog_context, counter)::out) is det.
 :- pred module_info_get_indirectly_imported_module_names(module_info::in,
     set(module_name)::out) is det.
 
@@ -1210,6 +1280,8 @@ module_info_optimize(!ModuleInfo) :-
 :- pred module_info_set_lambdas_per_context(map(prog_context, counter)::in,
     module_info::in, module_info::out) is det.
 :- pred module_info_set_atomics_per_context(map(prog_context, counter)::in,
+    module_info::in, module_info::out) is det.
+:- pred module_info_set_loop_invs_per_context(map(prog_context, counter)::in,
     module_info::in, module_info::out) is det.
 
 %---------------------------------------------------------------------------%
@@ -1255,6 +1327,8 @@ module_info_get_name_context(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_module_name_context.
 module_info_get_dump_hlds_base_file_name(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_dump_base_file_name.
+module_info_get_include_module_map(MI, X) :-
+    X = MI ^ mi_rare_info ^ mri_include_module_map.
 module_info_get_partial_qualifier_info(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_partial_qualifier_info.
 module_info_get_maybe_recompilation_info(MI, X) :-
@@ -1295,12 +1369,16 @@ module_info_get_lambdas_per_context(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_lambdas_per_context.
 module_info_get_atomics_per_context(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_atomics_per_context.
+module_info_get_loop_invs_per_context(MI, X) :-
+    X = MI ^ mi_rare_info ^ mri_loop_invs_per_context.
 module_info_get_avail_module_map(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_avail_module_map.
 module_info_get_indirectly_imported_module_names(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_indirectly_imported_module_names.
 module_info_get_used_modules(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_used_modules.
+module_info_get_ancestor_avail_modules(MI, X) :-
+    X = MI ^ mi_rare_info ^ mri_ancestor_avail_modules.
 module_info_get_maybe_complexity_proc_map(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_maybe_complexity_proc_map.
 module_info_get_complexity_proc_infos(MI, X) :-
@@ -1315,6 +1393,8 @@ module_info_get_user_final_pred_target_names(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_user_final_pred_target_names.
 module_info_get_structure_reuse_preds(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_structure_reuse_preds.
+module_info_get_format_call_pragma_preds(MI, X) :-
+    X = MI ^ mi_rare_info ^ mri_format_call_pragma_preds.
 module_info_get_exported_enums(MI, X) :-
     X = MI ^ mi_rare_info ^ mri_exported_enums.
 module_info_get_event_set(MI, X) :-
@@ -1425,8 +1505,12 @@ module_info_set_lambdas_per_context(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_lambdas_per_context := X.
 module_info_set_atomics_per_context(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_atomics_per_context := X.
+module_info_set_loop_invs_per_context(X, !MI) :-
+    !MI ^ mi_rare_info ^ mri_loop_invs_per_context := X.
 module_info_set_used_modules(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_used_modules := X.
+module_info_set_ancestor_avail_modules(X, !MI) :-
+    !MI ^ mi_rare_info ^ mri_ancestor_avail_modules := X.
 module_info_set_maybe_complexity_proc_map(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_maybe_complexity_proc_map := X.
 module_info_set_complexity_proc_infos(X, !MI) :-
@@ -1441,6 +1525,8 @@ module_info_set_user_final_pred_target_names(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_user_final_pred_target_names := X.
 module_info_set_structure_reuse_preds(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_structure_reuse_preds := X.
+module_info_set_format_call_pragma_preds(X, !MI) :-
+    !MI ^ mi_rare_info ^ mri_format_call_pragma_preds := X.
 module_info_set_exported_enums(X, !MI) :-
     !MI ^ mi_rare_info ^ mri_exported_enums := X.
 module_info_set_event_set(X, !MI) :-
@@ -1461,18 +1547,18 @@ module_info_set_type_repn_dec(X, !MI) :-
 % a simple getter or setter predicates.
 %
 
-module_info_get_preds(MI, Preds) :-
+module_info_get_pred_id_table(MI, PredIdTable) :-
     module_info_get_predicate_table(MI, PredTable),
-    predicate_table_get_preds(PredTable, Preds).
+    predicate_table_get_pred_id_table(PredTable, PredIdTable).
 
-module_info_set_preds(Preds, !MI) :-
+module_info_set_pred_id_table(PredIdTable, !MI) :-
     module_info_get_predicate_table(!.MI, PredTable0),
-    predicate_table_set_preds(Preds, PredTable0, PredTable),
+    predicate_table_set_pred_id_table(PredIdTable, PredTable0, PredTable),
     module_info_set_predicate_table(PredTable, !MI).
 
 module_info_pred_info(MI, PredId, PredInfo) :-
-    module_info_get_preds(MI, Preds),
-    ( if map.search(Preds, PredId, PredInfoPrime) then
+    module_info_get_pred_id_table(MI, PredIdTable),
+    ( if map.search(PredIdTable, PredId, PredInfoPrime) then
         PredInfo = PredInfoPrime
     else
         pred_id_to_int(PredId, PredInt),
@@ -1519,9 +1605,10 @@ module_info_remove_predicate(PredId, !MI) :-
     module_info_set_predicate_table(PredTable, !MI).
 
 module_info_set_pred_info(PredId, PredInfo, !MI) :-
-    module_info_get_preds(!.MI, Preds0),
-    map.set(PredId, PredInfo, Preds0, Preds),
-    module_info_set_preds(Preds, !MI).
+    module_info_get_pred_id_table(!.MI, PredIdTable0),
+    % XXX Should be map.det_update.
+    map.set(PredId, PredInfo, PredIdTable0, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !MI).
 
 module_info_set_pred_proc_info(proc(PredId, ProcId), PredInfo, ProcInfo,
         !MI) :-
@@ -1529,6 +1616,7 @@ module_info_set_pred_proc_info(proc(PredId, ProcId), PredInfo, ProcInfo,
         PredInfo, ProcInfo, !MI).
 
 module_info_set_pred_proc_info(PredId, ProcId, PredInfo0, ProcInfo, !MI) :-
+    % XXX Should be pred_info_set_proc_info, which calls map.det_update.
     pred_info_get_proc_table(PredInfo0, Procs0),
     map.set(ProcId, ProcInfo, Procs0, Procs),
     pred_info_set_proc_table(Procs, PredInfo0, PredInfo),
@@ -1632,6 +1720,21 @@ module_info_next_atomic_count(Context, Count, !MI) :-
     ),
     module_info_set_atomics_per_context(ContextCounter, !MI).
 
+module_info_next_loop_inv_count(Context, Count, !MI) :-
+    module_info_get_loop_invs_per_context(!.MI, ContextCounter0),
+    ( if
+        map.insert(Context, counter.init(2),
+            ContextCounter0, FoundContextCounter)
+    then
+        Count = 1,
+        ContextCounter = FoundContextCounter
+    else
+        map.lookup(ContextCounter0, Context, Counter0),
+        counter.allocate(Count, Counter0, Counter),
+        map.det_update(Context, Counter, ContextCounter0, ContextCounter)
+    ),
+    module_info_set_loop_invs_per_context(ContextCounter, !MI).
+
 %---------------------%
 
 module_add_avail_module_name(ModuleName, NewSection, NewImportOrUse,
@@ -1646,6 +1749,13 @@ module_add_avail_module_name(ModuleName, NewSection, NewImportOrUse,
     AvailMap0 = !.MI ^ mi_rare_info ^ mri_avail_module_map,
     ( if map.search(AvailMap0, ModuleName, OldEntry) then
         OldEntry = avail_module_entry(OldSection, OldImportOrUse, OldAvails),
+        % XXX: If one of the entries (new or old) is a use_module in the
+        % interface section, while the other is an import_module in the
+        % implementation section, the result *ought* to be something like
+        % the int_use_imp_import alternative of the section_import_or_use type,
+        % BUT the design of avail_module_entry has no way to express that.
+        % The code of combine_old_new_avail_attrs returns "import_module in the
+        % interface section" in such cases, which is almost certainly a bug.
         combine_old_new_avail_attrs(OldSection, NewSection,
             OldImportOrUse, NewImportOrUse, Section, ImportOrUse),
         Avails = NewAvails ++ OldAvails,
@@ -1706,9 +1816,9 @@ module_info_get_all_deps(ModuleInfo, AllImports) :-
     AllImports = set.union_list([IndirectImports,
         set.list_to_set(DirectImports), set.list_to_set(Parents)]).
 
-module_info_add_parent_to_used_modules(ModuleSpecifier, !MI) :-
+module_info_add_module_to_public_used_modules(ModuleName, !MI) :-
     module_info_get_used_modules(!.MI, UsedModules0),
-    record_module_and_ancestors_as_used(visibility_public, ModuleSpecifier,
+    record_module_and_ancestors_as_used(visibility_public, ModuleName,
         UsedModules0, UsedModules),
     module_info_set_used_modules(UsedModules, !MI).
 
@@ -1749,11 +1859,12 @@ module_info_user_final_pred_procs(MI, PredProcIds) :-
 :- pred get_unique_pred_proc_id_for_pred_sym_name_arity(module_info::in,
     sym_name_arity::in, pred_proc_id::out) is det.
 
-get_unique_pred_proc_id_for_pred_sym_name_arity(MI,
-        sym_name_arity(SymName, Arity), PredProcId) :-
+get_unique_pred_proc_id_for_pred_sym_name_arity(MI, SNA, PredProcId) :-
     module_info_get_predicate_table(MI, PredTable),
+    SNA = sym_name_arity(SymName, Arity),
+    UserArity = user_arity(Arity),
     predicate_table_lookup_pred_sym_arity(PredTable,
-        may_be_partially_qualified, SymName, Arity, PredIds),
+        may_be_partially_qualified, SymName, UserArity, PredIds),
     ( if PredIds = [PredId] then
         pred_table.get_single_proc_id(MI, PredId, ProcId),
         PredProcId = proc(PredId, ProcId)

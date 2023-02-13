@@ -15,17 +15,23 @@
 :- interface.
 
 :- import_module hlds.hlds_module.
+:- import_module hlds.make_hlds.make_hlds_types.
 :- import_module hlds.make_hlds.qual_info.
+:- import_module libs.
+:- import_module libs.globals.
 :- import_module parse_tree.
 :- import_module parse_tree.equiv_type.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.module_qual.
+:- import_module parse_tree.prog_data.
+:- import_module parse_tree.prog_data_used_modules.
+:- import_module parse_tree.prog_item.
 
 :- import_module list.
 
 %---------------------------------------------------------------------------%
 
-    % do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo,
+    % parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo,
     %   TypeEqvMap, UsedModules, QualInfo, InvalidTypes, InvalidModes,
     %   HLDS, Specs):
     %
@@ -37,7 +43,7 @@
     % QualInfo is an abstract type that check_typeclass.m will later pass
     % to produce_instance_method_clauses.
     %
-:- pred do_parse_tree_to_hlds(aug_compilation_unit::in, globals::in,
+:- pred parse_tree_to_hlds(aug_compilation_unit::in, globals::in,
     string::in, mq_info::in, type_eqv_map::in, used_modules::in,
     qual_info::out, found_invalid_type::out, found_invalid_inst_or_mode::out,
     module_info::out, list(error_spec)::out) is det.
@@ -52,6 +58,7 @@
 :- import_module hlds.add_pred.
 :- import_module hlds.add_special_pred.
 :- import_module hlds.default_func_mode.
+:- import_module hlds.hlds_clauses.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.make_hlds.add_class.
@@ -64,20 +71,20 @@
 :- import_module hlds.make_hlds.add_type.
 :- import_module hlds.make_hlds.make_hlds_passes.make_hlds_separate_items.
 :- import_module hlds.make_hlds.make_hlds_warn.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.special_pred.
-:- import_module libs.
-:- import_module libs.globals.
+:- import_module hlds.status.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
+:- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
+:- import_module parse_tree.error_util.
 :- import_module parse_tree.get_dependencies.
 :- import_module parse_tree.maybe_error.
-:- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_foreign.
 :- import_module parse_tree.prog_item_stats.
 :- import_module parse_tree.prog_mode.
-:- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_util.
 :- import_module recompilation.
@@ -87,12 +94,14 @@
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
-:- import_module string.
+:- import_module set.
+:- import_module term_context.
+:- import_module term_subst.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
 
-do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
+parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
         TypeEqvMap, UsedModules, !:QualInfo,
         !:FoundInvalidType, !:FoundInvalidInstOrMode, !:ModuleInfo, !:Specs) :-
     ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
@@ -101,8 +110,6 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
     get_implicit_avail_needs_in_aug_compilation_unit(Globals, AugCompUnit,
         ImplicitlyUsedModules),
     mq_info_get_partial_qualifier_info(MQInfo0, PQInfo),
-    module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
-        UsedModules, ImplicitlyUsedModules, PQInfo, no, !:ModuleInfo),
 
     % Optionally gather statistics about the items in the compilation unit.
     trace [compile_time(flag("item_stats")), io(!IO)] (
@@ -129,11 +136,6 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
             io.close_output(Stream, !IO)
         )
     ),
-
-    map.init(DirectArgMap),
-    TypeRepnDec = type_repn_decision_data(TypeRepnMap, DirectArgMap,
-        ForeignEnums, ForeignExportEnums),
-    module_info_set_type_repn_dec(TypeRepnDec, !ModuleInfo),
 
     TypeSpecs = ParseTreeModuleSrc ^ ptms_type_specs,
     InstModeSpecs = ParseTreeModuleSrc ^ ptms_inst_mode_specs,
@@ -189,17 +191,33 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
     %
     % The constraints of what we have to add before what are documented below.
 
-    separate_items_in_aug_comp_unit(AugCompUnit, Avails, FIMs,
+    separate_items_in_aug_comp_unit(AugCompUnit, InclMap, Avails, FIMs,
         TypeDefnsAbstract, TypeDefnsMercury, TypeDefnsForeign,
         InstDefns, ModeDefns, PredDecls, ModeDecls,
         Promises, Typeclasses, Instances, Initialises, Finalises, Mutables,
         TypeRepnMap, ForeignEnums, ForeignExportEnums,
-        PragmasDecl, PragmasImpl, PragmasGen, Clauses, IntBadClauses),
+        PragmasDecl, PragmasDeclTypeSpec,
+        PragmasDeclTermInfo, PragmasDeclTerm2Info,
+        PragmasDeclSharing, PragmasDeclReuse,
+        PragmasImpl,
+        PragmasGenUnusedArgs, PragmasGenExceptions,
+        PragmasGenTrailing, PragmasGenMMTabling,
+        Clauses, IntBadClauses),
+
+    map.init(DirectArgMap),
+    TypeRepnDec = type_repn_decision_data(TypeRepnMap, DirectArgMap,
+        ForeignEnums, ForeignExportEnums),
+    module_info_init(Globals, ModuleName, ModuleNameContext, DumpBaseFileName,
+        InclMap, UsedModules, ImplicitlyUsedModules, PQInfo, no, TypeRepnDec,
+        !:ModuleInfo),
 
     % The old pass 1.
 
     % Record the import_module and use_module declarations.
-    add_item_avails(Avails, !ModuleInfo),
+    add_item_avails(Avails, set.init, AncestorAvailModules, !ModuleInfo),
+    module_info_get_ancestor_avail_modules(!.ModuleInfo, AncestorAvailSet0),
+    set.union(AncestorAvailModules, AncestorAvailSet0, AncestorAvailSet),
+    module_info_set_ancestor_avail_modules(AncestorAvailSet, !ModuleInfo),
 
     % Record type definitions.
     %
@@ -425,11 +443,6 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
     add_clauses(MutableClauses,
         !ModuleInfo, !QualInfo, !Specs),
     % Add clauses that record promises.
-    % XXX CLEANUP For each promise, we add a clause, find that there is
-    % no predicate declaration for the predicate that the clause is for,
-    % remember that oh yeah, this is normal for promises, and then add
-    % the implicitly-specified predicate declaration. It would be much simpler
-    % to just construct and add the predicate declaration first.
     add_promises(Promises,
         !ModuleInfo, !QualInfo, !Specs),
 
@@ -473,7 +486,7 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
     %
     % 1: We had to do this for foreign_enum pragmas, since these may affect
     %    type representations, and *that* may affect many other things.
-    %    However, but these now have their own item kind, which are processed
+    %    However, these now have their own item kind, which are processed
     %    at the very top above.
     %
     % 2: We once also had to do this for foreign_decl pragmas, but the
@@ -494,6 +507,16 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
     % or to modes of predicates.
     add_decl_pragmas(PragmasDecl,
         !ModuleInfo, !QualInfo, !Specs),
+    add_decl_pragmas_type_spec(PragmasDeclTypeSpec,
+        !ModuleInfo, !QualInfo, !Specs),
+    add_decl_pragmas_term_info(PragmasDeclTermInfo,
+        !ModuleInfo, !Specs),
+    add_decl_pragmas_term2_info(PragmasDeclTerm2Info,
+        !ModuleInfo, !Specs),
+    add_decl_pragmas_sharing(PragmasDeclSharing,
+        !ModuleInfo, !Specs),
+    add_decl_pragmas_reuse(PragmasDeclReuse,
+        !ModuleInfo, !Specs),
 
     % We want to process tabled pragmas *after* any inline pragmas
     % (which are also impl pragmas), so that we can detect and report
@@ -514,7 +537,13 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
     list.foldl(module_add_foreign_body_code, MutableForeignBodyCodes,
         !ModuleInfo),
 
-    list.foldl2(add_gen_pragma, PragmasGen,
+    list.foldl2(add_gen_pragma_unused_args, PragmasGenUnusedArgs,
+        !ModuleInfo, !Specs),
+    list.foldl2(add_gen_pragma_exceptions, PragmasGenExceptions,
+        !ModuleInfo, !Specs),
+    list.foldl2(add_gen_pragma_trailing, PragmasGenTrailing,
+        !ModuleInfo, !Specs),
+    list.foldl2(add_gen_pragma_mm_tabling, PragmasGenMMTabling,
         !ModuleInfo, !Specs),
 
     % Check that the declarations for field extraction and update functions
@@ -560,7 +589,6 @@ do_parse_tree_to_hlds(AugCompUnit, Globals, DumpBaseFileName, MQInfo0,
 
 add_builtin_type_ctor_special_preds_in_builtin_module(TypeCtor, !ModuleInfo) :-
     varset.init(TVarSet),
-    term.context_init(Context),
     % These predicates are local only in the public builtin module,
     % but we *get here* only if we are compiling the public builtin module.
     TypeStatus = type_status(status_local),
@@ -575,24 +603,27 @@ add_builtin_type_ctor_special_preds_in_builtin_module(TypeCtor, !ModuleInfo) :-
     % (since we need to put references to the type's unify and compare
     % predicates into that structure.)
     add_special_pred_decl_defns_for_type_eagerly(TVarSet,
-        Type, TypeCtor, Body, TypeStatus, Context, !ModuleInfo).
+        Type, TypeCtor, Body, TypeStatus, dummy_context, !ModuleInfo).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
 :- pred add_item_avails(ims_list(item_avail)::in,
+    set(module_name)::in, set(module_name)::out,
     module_info::in, module_info::out) is det.
 
-add_item_avails([], !ModuleInfo).
-add_item_avails([ImsList | ImsLists], !ModuleInfo) :-
+add_item_avails([], !AncestorAvailModules, !ModuleInfo).
+add_item_avails([ImsList | ImsLists], !AncestorAvailModules, !ModuleInfo) :-
     ImsList = ims_sub_list(ItemMercuryStatus, Avails),
-    list.foldl(add_item_avail(ItemMercuryStatus), Avails, !ModuleInfo),
-    add_item_avails(ImsLists, !ModuleInfo).
+    list.foldl2(add_item_avail(ItemMercuryStatus), Avails,
+        !AncestorAvailModules, !ModuleInfo),
+    add_item_avails(ImsLists, !AncestorAvailModules, !ModuleInfo).
 
 :- pred add_item_avail(item_mercury_status::in, item_avail::in,
+    set(module_name)::in, set(module_name)::out,
     module_info::in, module_info::out) is det.
 
-add_item_avail(ItemMercuryStatus, Avail, !ModuleInfo) :-
+add_item_avail(ItemMercuryStatus, Avail, !AncestorAvailModules, !ModuleInfo) :-
     (
         Avail = avail_import(avail_import_info(ModuleName, Context, _SeqNum)),
         ImportOrUse = import_decl
@@ -618,33 +649,16 @@ add_item_avail(ItemMercuryStatus, Avail, !ModuleInfo) :-
         (
             ItemImport = item_import_int_concrete(ImportLocn),
             (
-                ImportLocn = import_locn_ancestor_int0_interface,
-                module_add_avail_module_name(ModuleName, ms_interface,
+                (
+                    ImportLocn = import_locn_ancestor_int0_interface,
+                    Section = ms_interface
+                ;
+                    ImportLocn = import_locn_ancestor_int0_implementation,
+                    Section = ms_implementation
+                ),
+                module_add_avail_module_name(ModuleName, Section,
                     ImportOrUse, no, !ModuleInfo),
-                % A module that is imported by an ancestor may be used
-                % in that ancestor even if it is not used in this module.
-                % We therefore record it as "used" to avoid reporting
-                % a warning that may be incorrect.
-                %
-                % If the import is not used in the ancestor's interface,
-                % we should be able to generate a warning for that
-                % when we compile the ancestor. XXX We do not currently
-                % do this.
-                module_info_add_parent_to_used_modules(ModuleName, !ModuleInfo)
-            ;
-                ImportLocn = import_locn_ancestor_int0_implementation,
-                module_add_avail_module_name(ModuleName, ms_implementation,
-                    ImportOrUse, no, !ModuleInfo),
-                % A module that is imported by an ancestor may be used
-                % in that ancestor even if it is not used in this module.
-                % We therefore record it as "used" to avoid reporting
-                % a warning that may be incorrect.
-                %
-                % If the import is not used in the ancestor itself,
-                % we should be able to generate a warning for that
-                % when we compile the ancestor. XXX We do not currently
-                % do this.
-                module_info_add_parent_to_used_modules(ModuleName, !ModuleInfo)
+                set.insert(ModuleName, !AncestorAvailModules)
             ;
                 ( ImportLocn = import_locn_interface
                 ; ImportLocn = import_locn_implementation
@@ -838,16 +852,18 @@ maybe_add_default_mode(PredDecl, !ModuleInfo) :-
             PredOrFunc = pf_predicate
         ;
             PredOrFunc = pf_function,
-            list.length(TypesAndModes, Arity),
-            adjust_func_arity(pf_function, FuncArity, Arity),
+            PredFormArity = arg_list_arity(TypesAndModes),
+            user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
             module_info_get_predicate_table(!.ModuleInfo, PredTable0),
             predicate_table_lookup_func_sym_arity(PredTable0,
-                is_fully_qualified, PredSymName, FuncArity, PredIds),
+                is_fully_qualified, PredSymName, UserArity, PredIds),
             (
                 PredIds = [_ | _],
-                predicate_table_get_preds(PredTable0, Preds0),
-                maybe_add_default_func_modes(PredIds, Preds0, Preds),
-                predicate_table_set_preds(Preds, PredTable0, PredTable),
+                predicate_table_get_pred_id_table(PredTable0, PredIdTable0),
+                maybe_add_default_func_modes(!.ModuleInfo, PredIds,
+                    PredIdTable0, PredIdTable),
+                predicate_table_set_pred_id_table(PredIdTable,
+                    PredTable0, PredTable),
                 module_info_set_predicate_table(PredTable, !ModuleInfo)
             ;
                 PredIds = [],
@@ -923,22 +939,32 @@ add_promise(PredStatus, PromiseInfo, !ModuleInfo, !QualInfo, !Specs) :-
     ;
         PromiseType = promise_type_true
     ),
+    GoalType = goal_for_promise(PromiseType),
     ClauseType = clause_for_promise(PromiseType),
 
-    term.context_line(Context, Line),
-    term.context_file(Context, File),
-    string.format("%s__%d__%s",
-        [s(prog_out.promise_to_string(PromiseType)), i(Line), s(File)], Name),
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
+    PromisePredName = promise_pred_name(PromiseType, FileName, LineNumber),
     module_info_get_name(!.ModuleInfo, ModuleName),
-    PromisePredSymName = qualified(ModuleName, Name),
+    PromiseModuleName = ModuleName,
+    PromisePredSymName = qualified(PromiseModuleName, PromisePredName),
 
     % If the outermost universally quantified variables are placed in the head
     % of the dummy predicate, the typechecker will avoid warning about unbound
     % type variables, as this implicitly adds a universal quantification of the
     % type variables needed.
-    term.var_list_to_term_list(UnivVars, HeadVars),
-    ClauseInfo = item_clause_info(pf_predicate, PromisePredSymName, HeadVars,
-        VarSet, ok2(Goal, []), Context, SeqNum),
+    HeadVars = UnivVars,
+    PredFormArity = arg_list_arity(HeadVars),
+    clauses_info_init_for_assertion(HeadVars, ClausesInfo),
+    PredOrigin = origin_user(
+        user_made_assertion(PromiseType, FileName, LineNumber)),
+    add_implicit_pred_decl(pf_predicate, PromiseModuleName, PromisePredName,
+        PredFormArity, PredStatus, Context, PredOrigin, GoalType, ClausesInfo,
+        _PredId, !ModuleInfo),
+
+    term_subst.var_list_to_term_list(HeadVars, HeadVarTerms),
+    ClauseInfo = item_clause_info(pf_predicate, PromisePredSymName,
+        HeadVarTerms, VarSet, ok2(Goal, []), Context, SeqNum),
     module_add_clause(PredStatus, ClauseType, ClauseInfo,
         !ModuleInfo, !QualInfo, !Specs).
 
@@ -1037,13 +1063,13 @@ add_finalise(ModuleInfo, ItemMercuryStatus, FinaliseInfo,
     ;       iof_final.
 
 :- pred implement_initialise_finalise(module_info::in, init_or_final::in,
-    sym_name::in, arity::in, prog_context::in, item_seq_num::in,
+    sym_name::in, user_arity::in, prog_context::in, item_seq_num::in,
     list(item_pragma_info(pragma_info_foreign_proc_export))::in,
     list(item_pragma_info(pragma_info_foreign_proc_export))::out,
     pred_target_names::in, pred_target_names::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-implement_initialise_finalise(ModuleInfo, InitOrFinal, SymName, Arity,
+implement_initialise_finalise(ModuleInfo, InitOrFinal, SymName, UserArity,
         Context, SeqNum, !RevPragmaFPEInfos, !PredTargetNames, !Specs) :-
     % To implement an `:- initialise pred.' or `:- finalise pred' declaration
     % for C backends, we need to:
@@ -1055,21 +1081,16 @@ implement_initialise_finalise(ModuleInfo, InitOrFinal, SymName, Arity,
     %     initialisation/finalisation
 
     module_info_get_predicate_table(ModuleInfo, PredTable),
+    UserArity = user_arity(UserArityInt),
     predicate_table_lookup_pred_sym_arity(PredTable,
-        may_be_partially_qualified, SymName, Arity, PredIds),
+        may_be_partially_qualified, SymName, UserArity, PredIds),
     ( InitOrFinal = iof_init,  DeclName = "initialise"
     ; InitOrFinal = iof_final, DeclName = "finalise"
     ),
     (
-        SeqNum = item_seq_num(SeqNumInt)
-    ;
-        SeqNum = item_no_seq_num,
-        unexpected($pred, "item_no_seq_num")
-    ),
-    (
         PredIds = [],
         Pieces = [words("Error:"),
-            qual_sym_name_arity(sym_name_arity(SymName, Arity)),
+            qual_sym_name_arity(sym_name_arity(SymName, UserArityInt)),
             words("used in"), decl(DeclName), words("declaration"),
             words("does not have a corresponding"),
             decl("pred"), words("declaration."), nl],
@@ -1083,31 +1104,32 @@ implement_initialise_finalise(ModuleInfo, InitOrFinal, SymName, Arity,
             module_info_get_name(ModuleInfo, ModuleName),
             (
                 InitOrFinal = iof_init,
-                Origin = compiler_origin_initialise,
-                new_user_init_pred(ModuleName, SeqNumInt, SymName, Arity,
-                    CName, !PredTargetNames)
+                NameIoF = "init",
+                Origin = compiler_origin_initialise
             ;
                 InitOrFinal = iof_final,
-                Origin = compiler_origin_finalise,
-                new_user_final_pred(ModuleName, SeqNumInt, SymName, Arity,
-                    CName, !PredTargetNames)
+                NameIoF = "final",
+                Origin = compiler_origin_finalise
             ),
+            new_user_init_or_final_pred_target_name(ModuleName, NameIoF,
+                SeqNum, SymName, UserArity, TargetName, !PredTargetNames),
             module_info_get_globals(ModuleInfo, Globals),
             make_pragma_foreign_proc_export(Globals, SymName,
-                ExpectedHeadModes, CName, Origin, Context, PragmaFPEInfo),
+                ExpectedHeadModes, TargetName, Origin, Context, PragmaFPEInfo),
             !:RevPragmaFPEInfos = [PragmaFPEInfo | !.RevPragmaFPEInfos]
         else
             Pieces = [words("Error:"),
-                qual_sym_name_arity(sym_name_arity(SymName, Arity)),
+                qual_sym_name_arity(sym_name_arity(SymName, UserArityInt)),
                 words("used in"), decl(DeclName), words("declaration"),
                 words("has an invalid signature."), nl,
                 words("A signature is valid only if it has"),
-                words("one of these two forms:"), nl,
+                words("one of these two forms:"),
+                nl_indent_delta(1),
                 quote(":- pred <predname>(io::di, io::uo) is <detism>."), nl,
-                quote(":- impure pred <predname> is <detism>."), nl,
-                words("where"), quote("<detism>"),
-                words("is either"), quote("det"),
-                words("or"), quote("cc_multi"), suffix("."), nl],
+                quote(":- impure pred <predname> is <detism>."),
+                nl_indent_delta(-1),
+                words("where"), quote("<detism>"), words("is either"),
+                quote("det"), words("or"), quote("cc_multi"), suffix("."), nl],
             Spec = simplest_spec($pred, severity_error,
                 phase_parse_tree_to_hlds, Context, Pieces),
             !:Specs = [Spec | !.Specs]
@@ -1115,7 +1137,7 @@ implement_initialise_finalise(ModuleInfo, InitOrFinal, SymName, Arity,
     ;
         PredIds = [_, _ | _],
         Pieces = [words("Error:"),
-            qual_sym_name_arity(sym_name_arity(SymName, Arity)),
+            qual_sym_name_arity(sym_name_arity(SymName, UserArityInt)),
             words("used in"), decl(DeclName), words("declaration"),
             words("has multiple"), decl("pred"), words("declarations."), nl],
         Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
@@ -1166,8 +1188,12 @@ make_pragma_foreign_proc_export(Globals, SymName, HeadModes, CName,
     globals.get_target(Globals, CompilationTarget),
     ExportLang = target_lang_to_foreign_export_lang(CompilationTarget),
     PredNameModesPF = proc_pf_name_modes(pf_predicate, SymName, HeadModes),
+    % Since the pragma is not coming from the user, we won't be
+    % generating any error messages for it, which means that
+    % the varset won't be used.
+    varset.init(VarSet),
     FPEInfo = pragma_info_foreign_proc_export(PEOrigin, ExportLang,
-        PredNameModesPF, CName),
+        PredNameModesPF, CName, VarSet),
     PragmaFPEInfo = item_pragma_info(FPEInfo, Context, item_no_seq_num).
 
 %---------------------------------------------------------------------------%

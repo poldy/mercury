@@ -42,7 +42,7 @@
 This file documents the Mercury implementation, version <VERSION>.
 
 Copyright @copyright{} 1995--2012 The University of Melbourne.@*
-Copyright @copyright{} 2013--2022 The Mercury team.
+Copyright @copyright{} 2013--2023 The Mercury team.
 
 Permission is granted to make and distribute verbatim copies of
 this manual provided the copyright notice and this permission notice
@@ -78,7 +78,7 @@ into another language, under the above conditions for modified versions.
 @page
 @vskip 0pt plus 1filll
 Copyright @copyright{} 1995--2012 The University of Melbourne.@*
-Copyright @copyright{} 2013--2022 The Mercury team.
+Copyright @copyright{} 2013--2023 The Mercury team.
 
 Permission is granted to make and distribute verbatim copies of
 this manual provided the copyright notice and this permission notice
@@ -201,14 +201,14 @@ generates both @file{.int} and @file{.int2} files.)
 @findex --make-private-interface
 @findex --make-optimization-interface
 @findex --make-transitive-optimization-interface
-@findex --make-trans-opt-int
+@findex --make-trans-opt
 Files whose names end in @file{.opt} are used for inter-module optimization,
 and are created using the @samp{--make-optimization-interface}
 (or @samp{--make-opt-int}) option.
 Similarly, files whose name ends in @file{.trans_opt}
 are used for transitive inter-module optimization,
 and are created using the @samp{--make-transitive-optimization-interface}
-(or @samp{--make-trans-opt-int}) option.
+(or @samp{--make-trans-opt}) option.
 
 Since the interface of a module changes less often than its implementation,
 the @file{.int}, @file{.int0}, @file{.int2}, @file{.int3}, @file{.opt},
@@ -345,11 +345,19 @@ for further details.)
 When targeting Java,
 @samp{mmc} will package up all of the class files for the executable
 into a Java archive (JAR) named @file{@var{filename}.jar}.
-If you are using the Windows command line interpreter @samp{cmd.exe},
-@samp{mmc} will generate a batch file called @file{@var{filename}.bat}
-that invokes the program using the Java interpreter.
-Otherwise, it will generate a shell script called @file{@var{filename}}
-that also invokes the program using the Java interpreter.
+It will also generate a launcher that invokes the program using the Java
+interpreter.
+If you are using the Windows command line interpreter @samp{cmd.exe}, this
+launcher will be a batch file called @file{@var{filename}.bat}.
+Otherwise, the launcher will be a shell script called @file{@var{filename}}.
+Java runtime flags can be set using @samp{mmc}'s @samp{--java-runtime-flags} or
+@samp{--java-runtime-flag} options.
+Such Java runtime flags will be included in the generated launcher shell script
+or batch file.
+You may override any runtime flags set at (Mercury) compile time by setting the
+variable @var{MERCURY_JAVA_OPTIONS} in the environment.
+Classpath settings made using @samp{mmc}'s @samp{--java-classpath} option will
+also be included in the generated launcher shell script or batch file.
 
 If you use Mmake or @samp{mmc --make},
 then you do not need to understand the details
@@ -3393,36 +3401,43 @@ specifies how many of the initial differences to skip.
 The option @samp{-m} (or @samp{--max}), if present,
 specifies how many differences to print.
 @sp 1
-@item dump [-qx] goal @var{filename}
+@item dump [-pqx] goal @var{filename}
 @kindex dump (mdb command)
 Writes the goal of the current call in its present state of instantiation
 to the specified file,
 and outputs a message announcing this fact
 unless the option @samp{-q} (or @samp{--quiet}) was given.
-The option @samp{-x} (or @samp{--xml}) causes the output to be in XML.
+The option @samp{-p} (or @samp{--prettyprint}) causes the goal to be output
+in a pretty-printed form.
+The option @samp{-x} (or @samp{--xml}) causes the goal to be output
+in XML format.
 @sp 1
-@item dump [-qx] exception @var{filename}
+@item dump [-pqx] exception @var{filename}
 Writes the value of the exception at an EXCP port to the specified file,
 and outputs a message announcing this fact
 unless the option @samp{-q} (or @samp{--quiet}) was given.
 Reports an error if the current event does not refer to such a port.
+The option @samp{-p} (or @samp{--prettyprint}) causes the exception value
+to be output in a pretty-printed form.
 The option @samp{-x} (or @samp{--xml}) causes the output to be in XML.
 @sp 1
-@item dump [-qx] @var{name} @var{filename}
-@itemx dump [-qx] @var{num} @var{filename}
+@item dump [-pqx] @var{name} @var{filename}
+@itemx dump [-pqx] @var{num} @var{filename}
 Writes the value of the variable in the current environment
 with the given ordinal number or with the given name to the specified file,
 and outputs a message announcing this fact
 unless the option @samp{-q} (or @samp{--quiet}) was given.
+The option @samp{-p} (or @samp{--prettyprint}) causes the variable's value
+to be output in a pretty-printed form.
 The option @samp{-x} (or @samp{--xml}) causes the output to be in XML.
 @sp 1
 @item open @var{term}
 Save @var{term} to a temporary file and open the file in an editor.
-The environment variable @env{EDITOR} is consulted to determine what editor to
-use.
-If this environment variable is not set then @samp{vi} is used.
-@var{term} may be any term that can be saved to a file with the
-@samp{save_to_file} command.
+The name of the editor to be used is taken from
+the environment variable @env{EDITOR} if this is set;
+if it is not set, then the editor will be @samp{vi}.
+@var{term} may be any term
+that can be saved to a file with the @samp{save_to_file} command.
 @sp 1
 @item grep @var{pattern} @var{term}
 Saves the given term to a temporary file
@@ -4768,7 +4783,7 @@ the list will include the procedures of
 compiler generated unify, compare, index and initialization predicates.
 Normally, the list includes the procedures of only user defined predicates.
 @sp 1
-@item ambiguity [-o @var{filename}] [-ptf] [@var{modulename} @dots{}]
+@item ambiguity [-o @var{filename}] [-ptfbs] [@var{modulename} @dots{}]
 @kindex ambiguity (mdb command)
 Print ambiguous procedure, type constructor and/or function symbol names.
 A procedure name is ambiguous
@@ -4794,14 +4809,46 @@ If the @samp{-o} or @samp{--outputfile} option is given,
 the output goes to the file named as the argument of the option;
 otherwise, it goes to standard output.
 @sp 1
-If one or more of the @samp{-p}, @samp{-t}, @samp{-f} options
-or their long equivalents, @samp{--types}, or @samp{--functors},
+If given one or more of the @samp{-p}, @samp{-t} and @samp{-f} options,
+or their long equivalents
+@samp{--procedures}, @samp{--types}, and @samp{--functors},
 this command prints ambiguities only for the indicated kinds of constructs.
-The default is to print all ambiguities.
+The default is to print ambiguities for all these three kinds of constructs.
+@sp 1
+This command does not normally report
+two kinds of ambiguities among procedures.
+@sp 1
+First, this command does not usually report
+operations that have both function and predicate forms,
+with the predicate version having a (usually output) argument
+in place of the function's return value.
+An example is @code{list.length} being both a function with arity one
+and a predicate with arity two.
+The reason for not reporting this by default is that
+this is usually an @emph{intended} ambiguity,
+and this command is usually used to find @emph{unintended} ambiguities,
+so that they can be eliminated by renaming.
+However, users can ask for these ambiguities to be printed
+by specifying either the option @samp{-b},
+or its long form @samp{--both-pred-and-func}.
+@sp 1
+Second, this command does not usually report
+ambiguities involving procedures that were created by the compiler
+as a type specialized version of another procedure.
+The reason for not reporting this by default is that
+ambiguities among the names of type specialized procedures
+cannot arise without ambiguities among
+the names of the original, not-yet-type-specialized procedures,
+and eliminating the ambiguities among the original names
+will perforce eliminate the ambiguities among the specialized names as well.
+However, users can ask for these ambiguities to be printed
+by specifying either the option @samp{-s},
+or its long form @samp{--typespec}.
 @sp 1
 @item trail_details
 @kindex trail_details (mdb command)
-Prints out low-level details of the state of the trail.
+In grades that specify trailing,
+prints out low-level details of the state of the trail.
 In other grades, it reports an error.
 @end table
 
@@ -6879,9 +6926,10 @@ The later mismatches may be avalanche errors caused by earlier mismatches.
 @sp 1
 @item --warn-unknown-format-calls
 @findex --warn-unknown-format-calls
-Warn about calls to string.format or io.format for which
-the compiler cannot tell whether there are any mismatches between
-the format string and the supplied values.
+Warn about calls to
+@code{string.format}, @code{io.format} or @code{stream.string_writer.format}
+for which the compiler cannot tell whether there are any mismatches
+between the format string and the supplied values.
 
 @sp 1
 @item --no-warn-obsolete
@@ -6941,6 +6989,12 @@ some actual errors may not be detected at all.
 Do not warn about one state variable shadowing another.
 
 @sp 1
+@item --no-warn-unneeded-mode-specific-clause
+@findex --no-warn-unneeded-mode-specific-clause
+Do not warn about clauses that needlessly specify
+the modes of their arguments.
+
+@sp 1
 @item --no-warn-suspected-occurs-check-failure
 @findex --no-warn-suspected-occurs-check-failure
 Do not warn about code that looks like it unifies a variable
@@ -6953,6 +7007,13 @@ it fails what is called the @samp{occurs check}.
 @findex --warn-potentially-ambiguous-pragma
 Generate warnings for pragmas that do not specify
 whether they are for a predicate or a function.
+
+@sp 1
+@item --warn-ambiguous-pragma
+@findex --warn-ambiguous-pragma
+Generate warnings for pragmas that do not specify
+whether they are for a predicate or a function,
+when there is both a predicate and a function with the given name and arity.
 
 @sp 1
 @item --no-inform-inferred
@@ -7125,6 +7186,16 @@ to the mode checking of the predicate or function with the specified pred id.
 @findex --debug-det
 @findex --debug-determinism
 Output detailed debugging traces of determinism analysis.
+
+@c @sp 1
+@c @item --debug-dead-proc-elim
+@c @findex --debug-dead-proc-elim
+@c Output the needed-entity-map generated by dead procedure elimination.
+
+@c @sp 1
+@c @item --debug-higher-order-specialization
+@c @findex --debug-higher-order-specialization
+@c Output messages about the procedure specializations done by higher_order.m.
 
 @sp 1
 @item --debug-opt
@@ -7610,6 +7681,13 @@ Set the maximum width of an error message line to @var{N} characters
 Specifying @samp{--no-max-error-line-width} removes the limit.
 
 @sp 1
+@item --reverse-error-order
+@findex --reverse-error-order
+Print error messages in descending order of their line numbers,
+instead of the usual ascending order. This is useful if you want to work
+on the last errors in a file first.
+
+@sp 1
 @item --show-definitions
 @findex --show-definitions
 Write out a list of the types, insts, modes, predicates, functions,
@@ -7632,6 +7710,25 @@ the module, together with the approximate line numbers of their
 first and last lines, to @file{@var{module}.defn_extents}.
 The list will be ordered on the starting line numbers
 of the predicates and functions.
+
+@sp 1
+@item --show-local-call-tree
+@findex --show-local-call-tree
+Construct the call tree of the predicates and functions
+defined in the module. Each node of this tree is a local
+predicate or function, and each node has edges linking it to the
+nodes of the other local predicates and functions it refers to.
+Write out to @file{@var{module}.local_call_tree} a list of these nodes.
+Put these nodes into the order in which they are encountered
+by a depth-first left-to-right traversal of the bodies
+(as reordered by mode analysis),
+of the first procedure of each predicate or function,
+starting the traversal at the exported predicates and/or functions
+of the module.
+List the callees of each node in the same order.
+Write a flattened form of this call tree, containing just
+the predicates and functions in the same traversal order,
+to @file{@var{module}.local_call_tree_order}.
 
 @sp 1
 @item --show-local-type-representations
@@ -7664,6 +7761,12 @@ The imports graph contains the directed graph module A
 imports module B.
 The resulting file can be processed by the graphviz tools.
 Effective only if @samp{--generate-dependencies} is also specified.
+
+@c @sp 1
+@c @item --trans-opt-deps-spec @var{filename}
+@c @findex --trans-opt-deps-spec
+@c Specify a file to remove edges from the trans-opt dependency
+@c graph.
 
 @c @sp 1
 @c @item -d @var{stage}
@@ -8179,7 +8282,6 @@ as these are the two fastest.
 @cindex .stseg (grade modifier)
 @cindex .threadscope (grade modifier)
 @cindex .tr (grade modifier)
-@cindex .trseg (grade modifier)
 
 The grade modifiers may be given in any order.
 Each grade modifier sets one or more compilation model options.
@@ -8213,7 +8315,6 @@ all of which are available only when targeting C.
 @item trailing
 The default is no trailing.
 Applications that need trailing should specify the grade modifier @samp{.tr}.
-@samp{.trseg} is currently accepted as synonym for @samp{.tr}.
 Trailing is available only when targeting C.
 
 (A trail is a data structure
@@ -8365,8 +8466,6 @@ they are followed by descriptions of those options.
 @findex --memory-profiling
 @findex --deep-profiling
 @findex --use-trail
-@findex --trail-segments
-@findex --no-trail-segments
 @findex --record-term-sizes-as-words
 @findex --record-term-sizes-as-cells
 @findex --single-prec-float
@@ -8430,10 +8529,7 @@ they are followed by descriptions of those options.
 @c @code{--profile-calls}.
 @c
 @item @samp{.tr}
-@code{--use-trail --no-trail-segments}.
-
-@item @samp{.trseg}
-@code{--use-trail --trail-segments}.
+@code{--use-trail}.
 
 @c @item @samp{.tsw}
 @c @code{--record-term-sizes-as-words}.
@@ -8556,13 +8652,19 @@ This option is not supported by the @samp{--high-level-code} back-ends.
 @cindex MLDS back-end compilation model options
 
 @table @asis
-@c @item @code{-H}, @code{--high-level-code} (grades: hlc, csharp, java)
 @item @code{-H}, @code{--high-level-code} (grades: hlc, csharp, java)
 @findex -H
 @findex --high-level-code
 Use an alternative back-end that generates high-level code
-rather than the very low-level code that is generated by our
-original back-end.
+rather than the very low-level code that is generated by our original back-end.
+
+@item @code{--c-debug-grade} (grades: hlc)
+@findex --c-debug-grade
+Require that all modules in the program be compiled to object code
+in a way that allows the program executable to be debuggable
+with debuggers for C, such as gdb.
+This option is intended mainly for the developers of Mercury,
+though it can also help to debug C code included in Mercury programs.
 
 @end table
 
@@ -8766,7 +8868,7 @@ This is the case for the C# and Java back-ends, which always use
 the underlying implementation's garbage collector.
 
 @sp 1
-@item @code{--use-trail} (grades: any grade containing @samp{.tr} or @samp{.trseg})
+@item @code{--use-trail} (grades: any grade containing @samp{.tr})
 @findex --use-trail
 @cindex Trailing
 @cindex Constraint solving
@@ -8776,15 +8878,6 @@ Enable use of a trail.
 This is necessary for interfacing with constraint solvers,
 or for backtrackable destructive update.
 This option is only supported by the C back-ends.
-
-@item @code{--trail-segments} (grades: any grade containing @samp{.trseg})
-@findex --trail-segments
-@cindex Trailing
-@cindex Constraint solving
-@cindex Backtrackable destructive update
-@cindex Destructive update, backtrackable
-This option is deprecated as trailing now always uses trail segments.
-The @samp{.trseg} grade modifier is a synonym for @samp{.tr}.
 
 @sp 1
 @item @code{--parallel}
@@ -9825,8 +9918,7 @@ extension.
 @cindex Target code compilation options
 
 If you are using Mmake, you need to pass these options
-to the target code compiler (e.g.@: @samp{mgnuc}) rather
-than to @samp{mmc}.
+to the target code compiler (e.g.@: @samp{mgnuc}) rather than to @samp{mmc}.
 
 @table @code
 @sp 1
@@ -9835,10 +9927,10 @@ than to @samp{mmc}.
 @findex @code{--c-debug}
 @findex @code{/debug}
 Enable debugging of the generated target code.
-If the target language is C, this has the same effect as
-@samp{--c-debug} (see below).
-If the target language is C#, this causes the compiler to pass @samp{/debug} to
-the C# compiler.
+If the target language is C,
+this has the same effect as @samp{--c-debug} (see below).
+If the target language is C#,
+this causes the Mercury compiler to pass @samp{/debug} to the C# compiler.
 
 @sp 1
 @item --cc @var{compiler-name}
@@ -9853,22 +9945,24 @@ Specify which C compiler to use.
 @findex --c-include-dir
 @cindex Include directories
 @cindex Directories
-Append @var{dir} to the list of directories to be searched for
-C header files.  Note that if you want to override this list, rather than
-append to it, then you can set the @env{MERCURY_MC_ALL_C_INCL_DIRS}
-environment variable to a sequence of @samp{--c-include-directory} options.
+Append @var{dir} to the list of directories to be searched for C header files.
+Note that if you want to override this list, rather than append to it,
+then you can set the @env{MERCURY_MC_ALL_C_INCL_DIRS} environment variable
+to a sequence of @samp{--c-include-directory} options.
 
 @sp 1
 @item @code{--c-debug}
 @findex --c-debug
 @cindex C debugging
 @cindex Debugging the generated C code
-Pass the @samp{-g} flag to the C compiler, to enable debugging
-of the generated C code, and also disable stripping of C debugging
-information from the executable.
-Since the generated C code is very low-level, this option is not likely
-to be useful to anyone except the Mercury implementors, except perhaps
-for debugging code that uses Mercury's C interface extensively.
+Pass the @samp{-g} flag to the C compiler,
+to enable debugging of the generated C code,
+and also disable stripping of C debugging information from the executable.
+Since the relationship between Mercury code
+and the C code generated for it is not always obvious,
+this option is not likely to be useful to anyone
+outside the team of Mercury implementors,
+except maybe people debugging code that uses Mercury's C interface extensively.
 
 @sp 1
 @item --no-c-optimize
@@ -9918,8 +10012,12 @@ Specify which Java interpreter to use.  The default is @samp{java}.
 @sp 1
 @item --java-flags @var{options}
 @itemx --java-flag @var{option}
+@itemx --javac-flags @var{options}
+@itemx --javac-flag @var{option}
 @findex --java-flags
 @findex --java-flag
+@findex --javac-flags
+@findex --javac-flags
 @cindex Java compiler options
 Specify options to be passed to the Java compiler.
 @samp{--java-flag} should be used for single words which need
@@ -9930,7 +10028,7 @@ to be quoted when passed to the shell.
 @findex --java-classpath
 @cindex classpath
 @cindex Directories
-Set the classpath for the Java compiler.
+Set the classpath for the Java compiler and interpreter.
 
 @sp 1
 @item --java-object-file-extension @var{extension}
@@ -9938,6 +10036,16 @@ Set the classpath for the Java compiler.
 @cindex File extensions
 Specify an extension for Java object (bytecode) files.  By default this
 is @samp{.class}.
+
+@sp 1
+@item --java-runtime-flags @var{options}
+@itemx --java-runtime-flag @var{option}
+@findex --java-runtime-flags
+@findex --java-runtime
+@cindex Java runtime options
+Specify options to be passed to the Java interpreter.
+@samp{--java-runtime-flag} should be used for single words which need
+to be quoted when passed to the shell.
 
 @sp 1
 @item --csharp-compiler @var{compiler-name}

@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %-----------------------------------------------------------------------------%
 % Copyright (C) 1996-2012 The University of Melbourne.
-% Copyright (C) 2015, 2017-2018 The Mercury team.
+% Copyright (C) 2015, 2017-2018, 2020-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %-----------------------------------------------------------------------------%
@@ -166,13 +166,13 @@
 :- import_module backend_libs.builtin_ops.
 :- import_module hlds.code_model.
 :- import_module hlds.goal_form.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
 :- import_module ll_backend.continuation_info.
 :- import_module ll_backend.global_data.
 :- import_module ll_backend.lookup_util.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -183,7 +183,6 @@
 :- import_module pair.
 :- import_module require.
 :- import_module set.
-:- import_module std_util.
 :- import_module string.
 
 %-----------------------------------------------------------------------------%
@@ -202,8 +201,8 @@ is_lookup_switch(BranchStart, GetTag, TaggedCases, GoalInfo, StoreMap,
     generate_constants_for_lookup_switch(BranchStart, GetTag, TaggedCases,
         OutVars, ArmNonLocals, StoreMap, Liveness, map.init, CaseSolnMap,
         !MaybeEnd, set_of_var.init, ResumeVars, no, GoalsMayModifyTrail, !CI),
-    get_vartypes(!.CI, VarTypes),
-    lookup_var_types(VarTypes, OutVars, OutTypes),
+    get_var_table(!.CI, VarTable),
+    OutTypes = list.map(lookup_var_type_func(VarTable), OutVars),
     ( if project_all_to_one_solution(CaseSolnMap, CaseValuePairsMap) then
         CaseConsts = all_one_soln(CaseValuePairsMap)
     else
@@ -496,7 +495,7 @@ generate_several_soln_int_lookup_switch(IndexRval, EndLabel, StoreMap,
         !CI, !.CLD) :-
     % If there are no output variables, then how can the individual solutions
     % differ from each other?
-    expect(negate(unify(OutVars, [])), $pred, "no OutVars"),
+    expect_not(unify(OutVars, []), $pred, "no OutVars"),
 
     % Now generate the static cells into which we do the lookups of the values
     % of the output variables, if there are any.

@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
-% Copyright (C) 2021 The Mercury team.
+% Copyright (C) 2021-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -139,8 +139,8 @@
 
 :- implementation.
 
+:- import_module hlds.pred_name.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.lp_rational.
 :- import_module libs.polyhedron.
@@ -155,6 +155,7 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_data_pragma.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.intermod_order_pred_info.
 :- import_module transform_hlds.term_constr_data.
 :- import_module transform_hlds.term_constr_main_types.
@@ -169,9 +170,8 @@
 :- import_module maybe.
 :- import_module one_or_more.
 :- import_module pair.
-:- import_module std_util.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module unit.
 :- import_module varset.
 
@@ -247,7 +247,7 @@ write_trans_opt_file(Stream, ModuleInfo, ParseTreeTransOpt, !IO) :-
     write_analysis_pragmas(Stream, TermInfos, TermInfos2, Exceptions,
         TrailingInfos, MMTablingInfos, SharingInfos, ReuseInfos, !IO),
 
-    ParseTreeTransOpt = parse_tree_trans_opt(ModuleName, term.context_init,
+    ParseTreeTransOpt = parse_tree_trans_opt(ModuleName, dummy_context,
         list.map(wrap_dummy_pragma_item, TermInfos),
         list.map(wrap_dummy_pragma_item, TermInfos2),
         list.map(wrap_dummy_pragma_item, Exceptions),
@@ -569,7 +569,7 @@ maybe_constr_arg_size_info_to_arg_size_constr(VarToVarIdMap,
     ;
         MaybeArgSizeConstrs = yes(Polyhedron),
         Constraints0 = polyhedron.non_false_constraints(Polyhedron),
-        Constraints1 = list.filter(isnt(nonneg_constr), Constraints0),
+        Constraints1 = list.negated_filter(nonneg_constr, Constraints0),
         Constraints  = list.sort(Constraints1),
         list.map(lp_rational_constraint_to_arg_size_constr(VarToVarIdMap),
             Constraints, ArgSizeInfoConstrs),
@@ -605,7 +605,8 @@ lp_term_to_arg_size_term(VarToVarIdMap, LPTerm, ArgSizeTerm) :-
     % Gather any exception pragmas for this predicate.
     %
 :- pred gather_pragma_exceptions_for_pred(module_info::in, order_pred_info::in,
-    cord(pragma_info_exceptions)::in, cord(pragma_info_exceptions)::out) is det.
+    cord(pragma_info_exceptions)::in, cord(pragma_info_exceptions)::out)
+    is det.
 
 gather_pragma_exceptions_for_pred(ModuleInfo, OrderPredInfo,
         !ExceptionsCord) :-
@@ -617,7 +618,8 @@ gather_pragma_exceptions_for_pred(ModuleInfo, OrderPredInfo,
 
 :- pred gather_pragma_exceptions_for_proc(module_info::in,
     order_pred_info::in, proc_id::in, proc_info::in,
-    cord(pragma_info_exceptions)::in, cord(pragma_info_exceptions)::out) is det.
+    cord(pragma_info_exceptions)::in, cord(pragma_info_exceptions)::out)
+    is det.
 
 gather_pragma_exceptions_for_proc(ModuleInfo, OrderPredInfo,
         ProcId, ProcInfo, !ExceptionsCord) :-
@@ -781,7 +783,8 @@ gather_pragma_structure_sharing_for_proc(ModuleInfo, OrderPredInfo,
         proc_info_get_structure_sharing(ProcInfo, MaybeSharingStatus),
         MaybeSharingStatus = yes(SharingStatus)
     then
-        proc_info_get_varset(ProcInfo, VarSet),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        split_var_table(VarTable, VarSet, _VarTypes),
         pred_info_get_typevarset(PredInfo, TypeVarSet),
         ModuleName = pred_info_module(PredInfo),
         PredSymName = qualified(ModuleName, PredName),
@@ -789,8 +792,7 @@ gather_pragma_structure_sharing_for_proc(ModuleInfo, OrderPredInfo,
         PredNameModesPF = proc_pf_name_modes(PredOrFunc,
             PredSymName, ArgModes),
         proc_info_get_headvars(ProcInfo, HeadVars),
-        proc_info_get_vartypes(ProcInfo, VarTypes),
-        lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+        lookup_var_types(VarTable, HeadVars, HeadVarTypes),
         SharingStatus = structure_sharing_domain_and_status(Sharing, _Status),
         SharingInfo = pragma_info_structure_sharing(PredNameModesPF,
             HeadVars, HeadVarTypes, VarSet, TypeVarSet, yes(Sharing)),
@@ -832,7 +834,8 @@ gather_pragma_structure_reuse_for_proc(ModuleInfo, OrderPredInfo,
         proc_info_get_structure_reuse(ProcInfo, MaybeStructureReuseDomain),
         MaybeStructureReuseDomain = yes(StructureReuseDomain)
     then
-        proc_info_get_varset(ProcInfo, VarSet),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        split_var_table(VarTable, VarSet, _VarTypes),
         pred_info_get_typevarset(PredInfo, TypeVarSet),
         ModuleName = pred_info_module(PredInfo),
         PredSymName = qualified(ModuleName, PredName),
@@ -840,8 +843,7 @@ gather_pragma_structure_reuse_for_proc(ModuleInfo, OrderPredInfo,
         PredNameModesPF = proc_pf_name_modes(PredOrFunc, PredSymName,
             ArgModes),
         proc_info_get_headvars(ProcInfo, HeadVars),
-        proc_info_get_vartypes(ProcInfo, VarTypes),
-        lookup_var_types(VarTypes, HeadVars, HeadVarTypes),
+        lookup_var_types(VarTable, HeadVars, HeadVarTypes),
         StructureReuseDomain =
             structure_reuse_domain_and_status(Reuse, _Status),
         ReuseInfo = pragma_info_structure_reuse(PredNameModesPF,
@@ -949,7 +951,8 @@ should_write_reuse_info(ModuleInfo, PredId, ProcId, PredInfo, WhatFor,
 
         % Don't write out info for reuse versions of procedures.
         pred_info_get_origin(PredInfo, PredOrigin),
-        PredOrigin \= origin_transformed(transform_structure_reuse, _, _),
+        PredOrigin \=
+            origin_pred_transform(pred_transform_structure_reuse, _, _),
 
         (
             WhatFor = for_analysis_framework

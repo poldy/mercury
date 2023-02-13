@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-2012 The University of Melbourne.
-% Copyright (C) 2013-2022 The Mercury Team.
+% Copyright (C) 2013-2023 The Mercury Team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -20,7 +20,7 @@
 
 :- import_module libs.globals.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module io.
 :- import_module list.
@@ -30,12 +30,13 @@
     % Generate a dummy globals value based on the default values of the
     % options.
     %
-:- pred generate_default_globals(globals::out, io::di, io::uo) is det.
+:- pred generate_default_globals(io.text_output_stream::in, globals::out,
+    io::di, io::uo) is det.
 
-    % handle_given_options(Args, OptionArgs, NonOptionArgs, Specs,
-    %   Globals, !IO).
+    % handle_given_options(ProgressStream, Args, OptionArgs, NonOptionArgs,
+    %   Specs, Globals, !IO).
     %
-:- pred handle_given_options(list(string)::in,
+:- pred handle_given_options(io.text_output_stream::in, list(string)::in,
     list(string)::out, list(string)::out, list(error_spec)::out,
     globals::out, io::di, io::uo) is det.
 
@@ -80,41 +81,43 @@
 :- import_module libs.trace_params.
 :- import_module mdbcomp.
 :- import_module mdbcomp.feedback.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module bool.
 :- import_module cord.
 :- import_module dir.
 :- import_module getopt.
 :- import_module int.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module library.
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
-:- import_module std_util.
 :- import_module string.
 
 %---------------------------------------------------------------------------%
 
-generate_default_globals(DefaultGlobals, !IO) :-
-    handle_given_options([], _, _, _, DefaultGlobals, !IO).
+generate_default_globals(ProgressStream, DefaultGlobals, !IO) :-
+    handle_given_options(ProgressStream, [], _, _, _, DefaultGlobals, !IO).
 
-handle_given_options(Args0, OptionArgs, Args, Specs, !:Globals, !IO) :-
+handle_given_options(ProgressStream, Args0, OptionArgs, Args, Specs,
+        !:Globals, !IO) :-
     trace [compile_time(flag("debug_handle_given_options")), io(!TIO)] (
-        io.stderr_stream(StdErr, !TIO),
-        io.write_string(StdErr, "\noriginal arguments\n", !TIO),
-        dump_arguments(StdErr, Args0, !TIO)
+        io.write_string(ProgressStream, "\noriginal arguments\n", !TIO),
+        dump_arguments(ProgressStream, Args0, !TIO)
     ),
     process_given_options(Args0, OptionArgs, Args, MaybeError, OptionTable,
         OptOptions, !IO),
     trace [compile_time(flag("debug_handle_given_options")), io(!TIO)] (
-        io.stderr_stream(StdErr, !TIO),
-        io.write_string(StdErr, "\nfinal option arguments\n", !TIO),
-        dump_arguments(StdErr, OptionArgs, !TIO),
-        io.write_string(StdErr, "\nfinal non-option arguments\n", !TIO),
-        dump_arguments(StdErr, Args, !TIO)
+        io.write_string(ProgressStream, "\nfinal option arguments\n", !TIO),
+        dump_arguments(ProgressStream, OptionArgs, !TIO),
+        io.write_string(ProgressStream, "\nfinal non-option arguments\n",
+            !TIO),
+        dump_arguments(ProgressStream, Args, !TIO)
     ),
-    convert_option_table_result_to_globals(MaybeError, OptionTable, OptOptions,
-        Specs, !:Globals, !IO),
+    convert_option_table_result_to_globals(ProgressStream, MaybeError,
+        OptionTable, OptOptions, Specs, !:Globals, !IO),
     (
         Specs = [_ | _]
         % Do NOT set the exit status. This predicate may be called before all
@@ -132,7 +135,8 @@ handle_given_options(Args0, OptionArgs, Args, Specs, !:Globals, !IO) :-
         then
             % XXX Currently smart recompilation doesn't check that all the
             % files needed to link are present and up-to-date, so disable it.
-            disable_smart_recompilation("linking", !Globals, !IO)
+            disable_smart_recompilation(ProgressStream, "linking",
+                !Globals, !IO)
         else
             true
         )
@@ -169,9 +173,9 @@ process_given_options(RawArgs, OptionArgs, NonOptionArgs, MaybeError,
     io::di, io::uo) is det.
 
 dump_arguments(_, [], !IO).
-dump_arguments(Stream, [Arg | Args], !IO) :-
-    io.format(Stream, "    <%s>\n", [s(Arg)], !IO),
-    dump_arguments(Stream, Args, !IO).
+dump_arguments(ProgressStream, [Arg | Args], !IO) :-
+    io.format(ProgressStream, "    <%s>\n", [s(Arg)], !IO),
+    dump_arguments(ProgressStream, Args, !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -179,20 +183,20 @@ dump_arguments(Stream, [Arg | Args], !IO) :-
     % and process implications among the options (i.e. situations where setting
     % one option implies setting/unsetting another one).
     %
-:- pred convert_option_table_result_to_globals(
+:- pred convert_option_table_result_to_globals(io.text_output_stream::in,
     maybe(option_error(option))::in, option_table(option)::in,
     cord(optimization_option)::in,
     list(error_spec)::out, globals::out, io::di, io::uo) is det.
 
-convert_option_table_result_to_globals(MaybeError, OptionTable0,
-        OptOptionsCord, !:Specs, Globals, !IO) :-
+convert_option_table_result_to_globals(ProgressStream, MaybeError,
+        OptionTable0, OptOptionsCord, !:Specs, Globals, !IO) :-
     (
         MaybeError = yes(Error),
         ErrorMessage = option_error_to_string(Error),
         OptionTableSpec = simplest_no_context_spec($pred, severity_error,
             phase_options, [words(ErrorMessage)]),
         !:Specs = [OptionTableSpec],
-        generate_default_globals(Globals, !IO)
+        generate_default_globals(ProgressStream, Globals, !IO)
     ;
         MaybeError = no,
         OptOptions = cord.list(OptOptionsCord),
@@ -218,8 +222,8 @@ convert_option_table_result_to_globals(MaybeError, OptionTable0,
         ),
         (
             !.Specs = [],
-            convert_options_to_globals(OptionTable, OptTuple, OpMode, Target,
-                WordSize, GC_Method, TermNorm, Term2Norm,
+            convert_options_to_globals(ProgressStream, OptionTable, OptTuple,
+                OpMode, Target, WordSize, GC_Method, TermNorm, Term2Norm,
                 TraceLevel, TraceSuppress, SSTraceLevel, MaybeThreadSafe,
                 C_CompilerType, CSharp_CompilerType,
                 ReuseStrategy, MaybeFeedbackInfo,
@@ -227,7 +231,7 @@ convert_option_table_result_to_globals(MaybeError, OptionTable0,
                 LimitErrorContextsMap, !Specs, Globals, !IO)
         ;
             !.Specs = [_ | _],
-            generate_default_globals(Globals, !IO)
+            generate_default_globals(ProgressStream, Globals, !IO)
         )
     ).
 
@@ -661,18 +665,18 @@ check_option_values(!OptionTable, Target, WordSize, GC_Method,
     % NOTE: We take two termination_norm arguments because each
     % termination analyser (the old and the new) has its own norm setting.
     %
-:- pred convert_options_to_globals(option_table::in, opt_tuple::in,
-    op_mode::in, compilation_target::in, word_size::in, gc_method::in,
-    termination_norm::in, termination_norm::in, trace_level::in,
-    trace_suppress_items::in, ssdb_trace_level::in, may_be_thread_safe::in,
-    c_compiler_type::in, csharp_compiler_type::in,
+:- pred convert_options_to_globals(io.text_output_stream::in,
+    option_table::in, opt_tuple::in, op_mode::in, compilation_target::in,
+    word_size::in, gc_method::in, termination_norm::in, termination_norm::in,
+    trace_level::in, trace_suppress_items::in, ssdb_trace_level::in,
+    may_be_thread_safe::in, c_compiler_type::in, csharp_compiler_type::in,
     reuse_strategy::in, maybe(feedback_info)::in,
     env_type::in, env_type::in, env_type::in, limit_error_contexts_map::in,
     list(error_spec)::in, list(error_spec)::out,
     globals::out, io::di, io::uo) is det.
 
-convert_options_to_globals(OptionTable0, !.OptTuple, OpMode, Target,
-        WordSize, GC_Method, TermNorm, Term2Norm,
+convert_options_to_globals(ProgressStream, OptionTable0, !.OptTuple, OpMode,
+        Target, WordSize, GC_Method, TermNorm, Term2Norm,
         TraceLevel, TraceSuppress, SSTraceLevel,
         MaybeThreadSafe, C_CompilerType, CSharp_CompilerType,
         ReuseStrategy, MaybeFeedbackInfo,
@@ -787,7 +791,7 @@ convert_options_to_globals(OptionTable0, !.OptTuple, OpMode, Target,
     % generating target language code.
     handle_opmode_implications(OpMode, !Globals),
     handle_option_to_option_implications(!Globals),
-    maybe_disable_smart_recompilation(OpMode, !Globals, !IO),
+    maybe_disable_smart_recompilation(ProgressStream, OpMode, !Globals, !IO),
 
     handle_directory_options(OpMode, !Globals),
     handle_target_compile_link_symlink_options(!Globals),
@@ -844,8 +848,8 @@ convert_options_to_globals(OptionTable0, !.OptTuple, OpMode, Target,
                 %   was implemented, and they have (yet) not been taught
                 %   about it.
                 OpMode = opm_top_args(opma_augment(Augment)),
-                ( Augment = opmau_make_opt_int
-                ; Augment = opmau_make_trans_opt_int
+                ( Augment = opmau_make_plain_opt
+                ; Augment = opmau_make_trans_opt
                 )
             ;
                 % If we are not allowed to use const structs for the
@@ -1048,7 +1052,7 @@ convert_options_to_globals(OptionTable0, !.OptTuple, OpMode, Target,
         % Don't do the unused_args optimization when making the
         % optimization interface.
         ( AllowSrcChangesDebug = do_not_allow_src_changes
-        ; OpMode = opm_top_args(opma_augment(opmau_make_opt_int))
+        ; OpMode = opm_top_args(opma_augment(opmau_make_plain_opt))
         )
     then
         OT_OptUnusedArgs = do_not_opt_unused_args
@@ -1805,6 +1809,16 @@ handle_debugging_options(Target, TraceLevel, TraceEnabled, SSTraceLevel,
                 nl],
             add_error(phase_options, TraceHLSpec, !Specs)
         ),
+        globals.lookup_bool_option(!.Globals, parallel, Parallel),
+        (
+            Parallel = no
+        ;
+            Parallel = yes,
+            ParSpec =
+                [words("Debugging is not available in parallel grades."), nl],
+            add_error(phase_options, ParSpec, !Specs)
+        ),
+
         globals.lookup_bool_option(!.Globals, trace_optimized, TraceOptimized),
         (
             TraceOptimized = bool.no,
@@ -1831,6 +1845,12 @@ handle_debugging_options(Target, TraceLevel, TraceEnabled, SSTraceLevel,
         AllowTraceTailRec = trace_level_allows_tail_rec(TraceLevel),
         (
             AllowTraceTailRec = bool.no,
+            % XXX Any code that checks the exec_trace_tail_rec option
+            % should instead check the effective trace level for whatever
+            % procedure it wants to operate on. However, at the moment,
+            % the only code that looks at this option is mark_tail_calls.m,
+            % which we invoke only in MLDS grades, which do not implement
+            % execution tracing. So this question is moot (for now).
             globals.set_option(exec_trace_tail_rec, bool(no), !Globals)
         ;
             AllowTraceTailRec = bool.yes
@@ -1874,7 +1894,7 @@ maybe_update_event_set_file_name(!Globals, !IO) :-
     globals.lookup_string_option(!.Globals, event_set_file_name,
         EventSetFileName0),
     ( if EventSetFileName0 = "" then
-        io.get_environment_var("MERCURY_EVENT_SET_FILE_NAME",
+        io.environment.get_environment_var("MERCURY_EVENT_SET_FILE_NAME",
             MaybeEventSetFileName, !IO),
         (
             MaybeEventSetFileName = maybe.yes(EventSetFileName),
@@ -1979,7 +1999,23 @@ handle_profiling_options(!Globals, Target, ProfileDeep, !:AllowSrcChangesProf,
     ( if ExpComp = "" then
         true
     else
-        !:AllowSrcChangesProf = do_not_allow_src_changes
+        !:AllowSrcChangesProf = do_not_allow_src_changes,
+        globals.lookup_bool_option(!.Globals, record_term_sizes_as_words,
+            RecordTermSizesAsWords),
+        globals.lookup_bool_option(!.Globals, record_term_sizes_as_cells,
+            RecordTermSizesAsCells),
+        ( if
+            ( RecordTermSizesAsWords = bool.yes
+            ; RecordTermSizesAsCells = bool.yes
+            )
+        then
+            true
+        else
+            ExpCompSpec =
+                [words("The --experimental-complexity option"),
+                words("requires a term size profiling grade."), nl],
+            add_error(phase_options, ExpCompSpec, !Specs)
+        )
     ).
 
 %---------------------%
@@ -2132,14 +2168,14 @@ handle_opmode_implications(OpMode, !Globals) :-
         ;
             OpModeArgs = opma_augment(OpModeAugment),
             (
-                OpModeAugment = opmau_make_opt_int,
+                OpModeAugment = opmau_make_plain_opt,
                 globals.set_option(line_numbers, bool(no), !Globals),
                 globals.lookup_bool_option(!.Globals, halt_at_warn_make_opt,
                     HaltAtWarn),
                 globals.set_option(halt_at_warn, bool(HaltAtWarn), !Globals),
                 Smart = bool.no
             ;
-                OpModeAugment = opmau_make_trans_opt_int,
+                OpModeAugment = opmau_make_trans_opt,
                 globals.set_option(transitive_optimization, bool(yes),
                     !Globals),
                 globals.set_option(line_numbers, bool(no), !Globals),
@@ -2224,9 +2260,6 @@ handle_option_to_option_implications(!Globals) :-
     option_implies(exec_trace, stack_trace, bool(yes), !Globals),
     option_implies(profile_deep, stack_trace, bool(yes), !Globals),
 
-    % Using trail segments implies the use of the trail.
-    option_implies(trail_segments, use_trail, bool(yes), !Globals),
-
     % The results of trail usage analysis assume that trail usage
     % optimization is being done, i.e. that redundant trailing
     % operations are really being eliminated.
@@ -2289,10 +2322,10 @@ handle_option_to_option_implications(!Globals) :-
     % Options updated:
     %   none
     %
-:- pred maybe_disable_smart_recompilation(op_mode::in,
-    globals::in, globals::out, io::di, io::uo) is det.
+:- pred maybe_disable_smart_recompilation(io.text_output_stream::in,
+    op_mode::in, globals::in, globals::out, io::di, io::uo) is det.
 
-maybe_disable_smart_recompilation(OpMode, !Globals, !IO) :-
+maybe_disable_smart_recompilation(ProgressStream, OpMode, !Globals, !IO) :-
     % XXX Smart recompilation does not yet work with intermodule
     % optimization, but we still want to generate version numbers
     % in interface files for users of a library compiled with
@@ -2307,13 +2340,14 @@ maybe_disable_smart_recompilation(OpMode, !Globals, !IO) :-
             globals.lookup_bool_option(!.Globals, intermodule_optimization,
                 yes)
         then
-            disable_smart_recompilation("`--intermodule-optimization'",
-                !Globals, !IO)
+            disable_smart_recompilation(ProgressStream,
+                "`--intermodule-optimization'", !Globals, !IO)
         else
             true
         ),
         ( if globals.lookup_bool_option(!.Globals, use_opt_files, yes) then
-            disable_smart_recompilation("`--use-opt-files'", !Globals, !IO)
+            disable_smart_recompilation(ProgressStream,
+                "`--use-opt-files'", !Globals, !IO)
         else
             true
         ),
@@ -2330,8 +2364,8 @@ maybe_disable_smart_recompilation(OpMode, !Globals, !IO) :-
         then
             true
         else
-            disable_smart_recompilation("`--no-target-code-only'",
-                !Globals, !IO)
+            disable_smart_recompilation(ProgressStream,
+                "`--no-target-code-only'", !Globals, !IO)
         )
     ).
 
@@ -2558,7 +2592,7 @@ handle_directory_options(OpMode, !Globals) :-
         SearchLibFilesGradeSubdirs = list.map(ToGradeSubdir,
             SearchLibFilesDirs),
         IntermodDirs3 = [GradeSubdir] ++ SearchLibFilesGradeSubdirs ++
-            list.filter(isnt(unify(dir.this_directory)), IntermodDirs2)
+            list.negated_filter(unify(dir.this_directory), IntermodDirs2)
     ;
         UseGradeSubdirs = bool.no,
         IntermodDirs3 = SearchLibFilesDirs ++ IntermodDirs2
@@ -2660,7 +2694,7 @@ handle_target_compile_link_symlink_options(!Globals) :-
 
     option_implies(target_debug, strip, bool(no), !Globals),
 
-    ( if io.have_symlinks then
+    ( if io.file.have_symlinks then
         true
     else
         globals.set_option(use_symlinks, bool(no), !Globals)
@@ -3024,10 +3058,10 @@ option_neg_implies(SourceOption, ImpliedOption, ImpliedOptionValue,
         globals.set_option(ImpliedOption, ImpliedOptionValue, !Globals)
     ).
 
-:- pred disable_smart_recompilation(string::in,
+:- pred disable_smart_recompilation(io.text_output_stream::in, string::in,
     globals::in, globals::out, io::di, io::uo) is det.
 
-disable_smart_recompilation(OptionDescr, !Globals, !IO) :-
+disable_smart_recompilation(ProgressStream, OptionDescr, !Globals, !IO) :-
     io_set_disable_smart_recompilation(disable_smart_recompilation, !IO),
     globals.set_option(smart_recompilation, bool(no), !Globals),
     globals.lookup_bool_option(!.Globals, warn_smart_recompilation, WarnSmart),
@@ -3035,8 +3069,7 @@ disable_smart_recompilation(OptionDescr, !Globals, !IO) :-
         WarnSmart = yes,
         % Disabling smart recompilation is not a module-specific thing,
         % so we cannot direct the error message to a module-specific file.
-        io.stderr_stream(StdErr, !IO),
-        io.format(StdErr,
+        io.format(ProgressStream,
             "Warning: smart recompilation does not yet work with %s.\n",
             [s(OptionDescr)], !IO),
         globals.lookup_bool_option(!.Globals, halt_at_warn, Halt),
@@ -3052,12 +3085,12 @@ disable_smart_recompilation(OptionDescr, !Globals, !IO) :-
 
 %---------------------------------------------------------------------------%
 
-display_compiler_version(Stream, !IO) :-
+display_compiler_version(ProgressStream, !IO) :-
     library.version(Version, Fullarch),
-    io.write_strings(Stream, [
+    io.write_strings(ProgressStream, [
         "Mercury Compiler, version ", Version, ", on ", Fullarch, "\n",
         "Copyright (C) 1993-2012 The University of Melbourne\n",
-        "Copyright (C) 2013-2022 The Mercury team\n"
+        "Copyright (C) 2013-2023 The Mercury team\n"
     ], !IO).
 
 usage_errors(ErrorStream, Globals, Specs, !IO) :-
@@ -3068,14 +3101,14 @@ usage_errors(ErrorStream, Globals, Specs, !IO) :-
 :- mutable(already_printed_usage, bool, no, ground,
     [untrailed, attach_to_io_state]).
 
-usage(Stream, !IO) :-
+usage(ProgressStream, !IO) :-
     % usage is called from many places; ensure that we don't print the
     % duplicate copies of the message.
     get_already_printed_usage(AlreadyPrinted, !IO),
     (
         AlreadyPrinted = no,
-        display_compiler_version(Stream, !IO),
-        io.write_strings(Stream, [
+        display_compiler_version(ProgressStream, !IO),
+        io.write_strings(ProgressStream, [
             "Usage: mmc [<options>] <arguments>\n",
             "Use `mmc --help' for more information.\n"
         ], !IO),
@@ -3084,7 +3117,7 @@ usage(Stream, !IO) :-
         AlreadyPrinted = yes
     ).
 
-long_usage(Stream, !IO) :-
+long_usage(ProgressStream, !IO) :-
     % long_usage is called from only one place, so can't print duplicate
     % copies of the long usage message. We can print both a short and along
     % usage message, but there is no simple way to avoid that.
@@ -3092,7 +3125,7 @@ long_usage(Stream, !IO) :-
     Template =
         "Name: mmc -- Melbourne Mercury Compiler, version %s on %s\n" ++
         "Copyright: Copyright (C) 1993-2012 The University of Melbourne\n" ++
-        "Copyright (C) 2013-2022 The Mercury team\n" ++
+        "Copyright (C) 2013-2023 The Mercury team\n" ++
         "Usage: mmc [<options>] <arguments>\n" ++
         "Arguments:\n" ++
         "\tArguments ending in `.m' are assumed to be source file names.\n" ++
@@ -3100,9 +3133,9 @@ long_usage(Stream, !IO) :-
             "are assumed to be module names.\n" ++
         "\tArguments in the form @file " ++
             "are replaced with the contents of the file.\n",
-    io.format(Stream, Template, [s(Version), s(Fullarch)], !IO),
-    io.write_string(Stream, "Options:\n", !IO),
-    options_help(Stream, !IO).
+    io.format(ProgressStream, Template, [s(Version), s(Fullarch)], !IO),
+    io.write_string(ProgressStream, "Options:\n", !IO),
+    options_help(ProgressStream, !IO).
 
 %---------------------------------------------------------------------------%
 

@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ts=4 sw=4 et ft=mercury
 %---------------------------------------------------------------------------%
-% Copyright (C) 2017-2018 The Mercury team.
+% Copyright (C) 2017-2021 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -245,12 +245,14 @@
     % Throws an exception if Y is not in [0, 16).
     %
 :- func (int16::in) << (int::in) = (int16::uo) is det.
+:- func (int16::in) <<u (uint::in) = (int16::uo) is det.
 
     % unchecked_left_shift(X, Y) is the same as X << Y except that the
     % behaviour is undefined if Y is not in [0, 16).
     % It will typically be implemented more efficiently than X << Y.
     %
 :- func unchecked_left_shift(int16::in, int::in) = (int16::uo) is det.
+:- func unchecked_left_ushift(int16::in, uint::in) = (int16::uo) is det.
 
     % Right shift.
     % X >> Y returns X "right shifted" by Y bits.
@@ -258,12 +260,14 @@
     % Throws an exception if Y is not in [0, 16).
     %
 :- func (int16::in) >> (int::in) = (int16::uo) is det.
+:- func (int16::in) >>u (uint::in) = (int16::uo) is det.
 
     % unchecked_right_shift(X, Y) is the same as X >> Y except that the
     % behaviour is undefined if Y is not in [0, 16).
     % It will typically be implemented more efficiently than X >> Y.
     %
 :- func unchecked_right_shift(int16::in, int::in) = (int16::uo) is det.
+:- func unchecked_right_ushift(int16::in, uint::in) = (int16::uo) is det.
 
 %---------------------------------------------------------------------------%
 %
@@ -353,6 +357,7 @@
     % Convert an int16 to a pretty_printer.doc for formatting.
     %
 :- func int16_to_doc(int16) = pretty_printer.doc.
+:- pragma obsolete(func(int16_to_doc/1), [pretty_printer.int16_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -362,7 +367,6 @@
 :- import_module exception.
 :- import_module int.
 :- import_module require.
-:- import_module string.
 :- import_module uint.
 :- import_module uint16.
 
@@ -585,7 +589,7 @@ odd(X) :-
 
 %---------------------------------------------------------------------------%
 
-% The operations unchecked_left_shift and unchecked_right_shift are builtins.
+% The unchecked shift operations are builtins.
 
 X << Y = Result :-
     ( if cast_from_int(Y) < 16u then
@@ -595,11 +599,27 @@ X << Y = Result :-
         throw(domain_error(Msg))
     ).
 
+X <<u Y = Result :-
+    ( if Y < 16u then
+        Result = unchecked_left_ushift(X, Y)
+    else
+        Msg = "int16.(<<u): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
 X >> Y = Result :-
     ( if cast_from_int(Y) < 16u then
         Result = unchecked_right_shift(X, Y)
     else
         Msg = "int16.(>>): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
+X >>u Y = Result :-
+    ( if Y < 16u then
+        Result = unchecked_right_ushift(X, Y)
+    else
+        Msg = "int16.(>>u): second operand is out of range",
         throw(domain_error(Msg))
     ).
 
@@ -665,7 +685,7 @@ max_int16 = 32_767_i16.
 
 %---------------------------------------------------------------------------%
 
-int16_to_doc(X) = str(string.int16_to_string(X)).
+int16_to_doc(I) = pretty_printer.int16_to_doc(I).
 
 %---------------------------------------------------------------------------%
 :- end_module int16.

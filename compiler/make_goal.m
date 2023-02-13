@@ -18,13 +18,13 @@
 
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.prog_type.
+:- import_module parse_tree.var_table.
 
 :- import_module char.
 :- import_module list.
-:- import_module maybe.
 
     % Return the HLDS equivalent of `true'.
     %
@@ -97,36 +97,32 @@
     prog_var::in, cons_id::in, hlds_goal::out) is det.
 
 :- pred make_int_const_construction_alloc_in_proc(int::in,
-    maybe(string)::in, hlds_goal::out, prog_var::out,
+    string::in, hlds_goal::out, prog_var::out,
     proc_info::in, proc_info::out) is det.
 :- pred make_string_const_construction_alloc_in_proc(string::in,
-    maybe(string)::in, hlds_goal::out, prog_var::out,
+    string::in, hlds_goal::out, prog_var::out,
     proc_info::in, proc_info::out) is det.
 :- pred make_float_const_construction_alloc_in_proc(float::in,
-    maybe(string)::in, hlds_goal::out, prog_var::out,
+    string::in, hlds_goal::out, prog_var::out,
     proc_info::in, proc_info::out) is det.
 :- pred make_char_const_construction_alloc_in_proc(char::in,
-    maybe(string)::in, hlds_goal::out, prog_var::out,
+    string::in, hlds_goal::out, prog_var::out,
     proc_info::in, proc_info::out) is det.
 :- pred make_const_construction_alloc_in_proc(cons_id::in, mer_type::in,
-    maybe(string)::in, hlds_goal::out, prog_var::out,
+    is_dummy_type::in, string::in, hlds_goal::out, prog_var::out,
     proc_info::in, proc_info::out) is det.
 
-:- pred make_int_const_construction_alloc(int::in, maybe(string)::in,
-    hlds_goal::out, prog_var::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
-:- pred make_string_const_construction_alloc(string::in, maybe(string)::in,
-    hlds_goal::out, prog_var::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
-:- pred make_float_const_construction_alloc(float::in, maybe(string)::in,
-    hlds_goal::out, prog_var::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
-:- pred make_char_const_construction_alloc(char::in, maybe(string)::in,
-    hlds_goal::out, prog_var::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+:- pred make_int_const_construction_alloc(int::in, string::in,
+    hlds_goal::out, prog_var::out, var_table::in, var_table::out) is det.
+:- pred make_string_const_construction_alloc(string::in, string::in,
+    hlds_goal::out, prog_var::out, var_table::in, var_table::out) is det.
+:- pred make_float_const_construction_alloc(float::in, string::in,
+    hlds_goal::out, prog_var::out, var_table::in, var_table::out) is det.
+:- pred make_char_const_construction_alloc(char::in, string::in,
+    hlds_goal::out, prog_var::out, var_table::in, var_table::out) is det.
 :- pred make_const_construction_alloc(cons_id::in, mer_type::in,
-    maybe(string)::in, hlds_goal::out, prog_var::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    is_dummy_type::in, string::in, hlds_goal::out, prog_var::out,
+    var_table::in, var_table::out) is det.
 
     % Produce a goal to construct or deconstruct a unification with a functor.
     % It fills in the non-locals, instmap_delta and determinism fields
@@ -157,8 +153,7 @@
 :- import_module parse_tree.set_of_var.
 
 :- import_module require.
-:- import_module term.
-:- import_module varset.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 
@@ -221,9 +216,8 @@ make_complicated_unify_assign(Var1, Var2, Goal) :-
     ( if Var1 = Var2 then
         Goal = true_goal
     else
-        term.context_init(Context),
         create_pure_atomic_complicated_unification(Var1, rhs_var(Var2),
-            Context, umc_explicit, [], Goal)
+            dummy_context, umc_explicit, [], Goal)
     ).
 
 %---------------------------------------------------------------------------%
@@ -280,62 +274,66 @@ make_const_construction(Context, Var, ConsId, Goal) :-
 
 %---------------------------------------------------------------------------%
 
-make_int_const_construction_alloc_in_proc(Int, MaybeName, Goal, Var,
+make_int_const_construction_alloc_in_proc(Int, Name, Goal, Var,
         !ProcInfo) :-
-    proc_info_create_var_from_type(int_type, MaybeName, Var, !ProcInfo),
-    make_int_const_construction(term.context_init, Var, Int, Goal).
+    proc_info_create_var_from_type(Name, int_type, is_not_dummy_type,
+        Var, !ProcInfo),
+    make_int_const_construction(dummy_context, Var, Int, Goal).
 
-make_string_const_construction_alloc_in_proc(String, MaybeName, Goal, Var,
+make_string_const_construction_alloc_in_proc(String, Name, Goal, Var,
         !ProcInfo) :-
-    proc_info_create_var_from_type(string_type, MaybeName, Var, !ProcInfo),
-    make_string_const_construction(term.context_init, Var, String, Goal).
+    proc_info_create_var_from_type(Name, string_type, is_not_dummy_type,
+        Var, !ProcInfo),
+    make_string_const_construction(dummy_context, Var, String, Goal).
 
-make_float_const_construction_alloc_in_proc(Float, MaybeName, Goal, Var,
+make_float_const_construction_alloc_in_proc(Float, Name, Goal, Var,
         !ProcInfo) :-
-    proc_info_create_var_from_type(float_type, MaybeName, Var, !ProcInfo),
-    make_float_const_construction(term.context_init, Var, Float, Goal).
+    proc_info_create_var_from_type(Name, float_type, is_not_dummy_type,
+        Var, !ProcInfo),
+    make_float_const_construction(dummy_context, Var, Float, Goal).
 
-make_char_const_construction_alloc_in_proc(Char, MaybeName, Goal, Var,
+make_char_const_construction_alloc_in_proc(Char, Name, Goal, Var,
         !ProcInfo) :-
-    proc_info_create_var_from_type(char_type, MaybeName, Var, !ProcInfo),
-    make_char_const_construction(term.context_init, Var, Char, Goal).
+    proc_info_create_var_from_type(Name, char_type, is_not_dummy_type, Var,
+        !ProcInfo),
+    make_char_const_construction(dummy_context, Var, Char, Goal).
 
-make_const_construction_alloc_in_proc(ConsId, Type, MaybeName, Goal, Var,
+make_const_construction_alloc_in_proc(ConsId, Type, IsDummy, Name, Goal, Var,
         !ProcInfo) :-
-    proc_info_create_var_from_type(Type, MaybeName, Var, !ProcInfo),
-    make_const_construction(term.context_init, Var, ConsId, Goal).
+    proc_info_create_var_from_type(Name, Type, IsDummy, Var, !ProcInfo),
+    make_const_construction(dummy_context, Var, ConsId, Goal).
 
 %---------------------------------------------------------------------------%
 
-make_int_const_construction_alloc(Int, MaybeName, Goal, Var,
-        !VarSet, !VarTypes) :-
-    varset.new_maybe_named_var(MaybeName, Var, !VarSet),
-    add_var_type(Var, int_type, !VarTypes),
-    make_int_const_construction(term.context_init, Var, Int, Goal).
+make_int_const_construction_alloc(Int, Name, Goal, Var,
+        !VarTable) :-
+    Entry = vte(Name, int_type, is_not_dummy_type),
+    add_var_entry(Entry, Var, !VarTable),
+    make_int_const_construction(dummy_context, Var, Int, Goal).
 
-make_string_const_construction_alloc(String, MaybeName, Goal, Var,
-        !VarSet, !VarTypes) :-
-    varset.new_maybe_named_var(MaybeName, Var, !VarSet),
-    add_var_type(Var, string_type, !VarTypes),
-    make_string_const_construction(term.context_init, Var, String, Goal).
+make_string_const_construction_alloc(String, Name, Goal, Var,
+        !VarTable) :-
+    Entry = vte(Name, string_type, is_not_dummy_type),
+    add_var_entry(Entry, Var, !VarTable),
+    make_string_const_construction(dummy_context, Var, String, Goal).
 
-make_float_const_construction_alloc(Float, MaybeName, Goal, Var,
-        !VarSet, !VarTypes) :-
-    varset.new_maybe_named_var(MaybeName, Var, !VarSet),
-    add_var_type(Var, float_type, !VarTypes),
-    make_float_const_construction(term.context_init, Var, Float, Goal).
+make_float_const_construction_alloc(Float, Name, Goal, Var,
+        !VarTable) :-
+    Entry = vte(Name, float_type, is_not_dummy_type),
+    add_var_entry(Entry, Var, !VarTable),
+    make_float_const_construction(dummy_context, Var, Float, Goal).
 
-make_char_const_construction_alloc(Char, MaybeName, Goal, Var,
-        !VarSet, !VarTypes) :-
-    varset.new_maybe_named_var(MaybeName, Var, !VarSet),
-    add_var_type(Var, char_type, !VarTypes),
-    make_char_const_construction(term.context_init, Var, Char, Goal).
+make_char_const_construction_alloc(Char, Name, Goal, Var,
+        !VarTable) :-
+    Entry = vte(Name, char_type, is_not_dummy_type),
+    add_var_entry(Entry, Var, !VarTable),
+    make_char_const_construction(dummy_context, Var, Char, Goal).
 
-make_const_construction_alloc(ConsId, Type, MaybeName, Goal, Var,
-        !VarSet, !VarTypes) :-
-    varset.new_maybe_named_var(MaybeName, Var, !VarSet),
-    add_var_type(Var, Type, !VarTypes),
-    make_const_construction(term.context_init, Var, ConsId, Goal).
+make_const_construction_alloc(ConsId, Type, IsDummyType, Name, Goal, Var,
+        !VarTable) :-
+    Entry = vte(Name, Type, IsDummyType),
+    add_var_entry(Entry, Var, !VarTable),
+    make_const_construction(dummy_context, Var, ConsId, Goal).
 
 %---------------------------------------------------------------------------%
 

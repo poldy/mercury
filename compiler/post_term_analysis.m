@@ -24,7 +24,7 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
@@ -104,7 +104,7 @@ warn_non_term_user_special_preds(ModuleInfo, !:Specs) :-
         % more accurate results when we build the .trans_opt files.
         % Any warnings this time around may be spurious.
         not (
-            OpMode = opm_top_args(opma_augment(opmau_make_opt_int)),
+            OpMode = opm_top_args(opma_augment(opmau_make_plain_opt)),
             TransIntermodOpt = yes
         )
     then
@@ -181,7 +181,7 @@ process_special_pred_for_type(ModuleInfo, SpecialPredId, TypeCtor, TypeDefn,
         % special preds is always set to terminates. Instead, we check if the
         % body of the generated wrapper predicate terminates.
 
-        ( if goal_cannot_loop(ModuleInfo, BodyGoal) then
+        ( if goal_cannot_loop_term_info(ModuleInfo, BodyGoal) then
             true
         else
             get_type_defn_context(TypeDefn, Context),

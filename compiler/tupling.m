@@ -103,7 +103,6 @@
 :- import_module check_hlds.
 :- import_module check_hlds.mode_test.
 :- import_module check_hlds.recompute_instmap_deltas.
-:- import_module check_hlds.type_util.
 :- import_module hlds.arg_info.
 :- import_module hlds.goal_path.
 :- import_module hlds.hlds_dependency_graph.
@@ -115,8 +114,8 @@
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.make_goal.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.compiler_util.
 :- import_module libs.dependency_graph.
@@ -133,13 +132,13 @@
 :- import_module mdbcomp.sym_name.
 :- import_module mdbcomp.trace_counts.
 :- import_module parse_tree.
+:- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_type.
-:- import_module parse_tree.prog_util.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
-:- import_module array.
 :- import_module assoc_list.
 :- import_module bool.
 :- import_module counter.
@@ -154,7 +153,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module unit.
 :- import_module varset.
 
@@ -266,7 +265,7 @@ maybe_tuple_scc(TraceCounts, TuningParams, DepGraph, SCC,
     (
         VeryVerbose = yes,
         trace [io(!IO)] (
-            SccStrSet = set.map(pred_proc_id_to_string(!.ModuleInfo), SCC),
+            SccStrSet = set.map(pred_proc_id_to_dev_string(!.ModuleInfo), SCC),
             SccStrs = set.to_sorted_list(SccStrSet),
             SccStr = string.join_list(", ", SccStrs),
             % XXX Here and in other trace goals, the output we generate
@@ -469,26 +468,28 @@ should_use_tupling_scheme(TuningParams,
 candidate_headvars_of_proc(ModuleInfo, PredProcId @ proc(PredId, ProcId),
         CandidateHeadVars) :-
     module_info_pred_proc_info(ModuleInfo, PredId, ProcId, _, ProcInfo),
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     proc_info_get_headvars(ProcInfo, HeadVars),
     proc_info_get_argmodes(ProcInfo, ArgModes),
     CandidateHeadVars = list.filter_map_corresponding(
-        candidate_headvars_of_proc_2(PredProcId, VarSet, VarTypes, ModuleInfo),
+        candidate_headvars_of_proc_2(ModuleInfo, PredProcId, VarTable),
         HeadVars, ArgModes).
 
-:- func candidate_headvars_of_proc_2(pred_proc_id, prog_varset, vartypes,
-    module_info, prog_var, mer_mode)
+:- func candidate_headvars_of_proc_2(module_info, pred_proc_id, var_table,
+    prog_var, mer_mode)
     = pair(string, candidate_headvar_origins) is semidet.
 
-candidate_headvars_of_proc_2(PredProcId, VarSet, VarTypes, ModuleInfo,
+candidate_headvars_of_proc_2(ModuleInfo, PredProcId, VarTable,
         HeadVar, ArgMode) = (Name - Origins) :-
     % We only tuple input arguments.
     mode_is_input(ModuleInfo, ArgMode),
     % Don't touch introduced typeinfo arguments.
-    lookup_var_type(VarTypes, HeadVar, Type),
+    lookup_var_entry(VarTable, HeadVar, Entry),
+    % XXX We should not ignore _IsDummy.
+    Entry = vte(Name, Type, _IsDummy),
     not is_introduced_type_info_type(Type),
-    varset.search_name(VarSet, HeadVar, Name),
+    % XXX We should not insist on a name,
+    Name \= "",
     Origins = map.singleton(PredProcId, HeadVar).
 
 :- pred common_candidate_headvars_of_procs(module_info::in,
@@ -585,9 +586,9 @@ find_best_tupling_scheme_2(TraceCounts, TuningParams, ModuleInfo,
     map(pred_proc_id, tupling_proposal)::out) is det.
 
 add_tupling_proposal(ModuleInfo, CandidateHeadVars, MinArgsToTuple,
-        PredProcId @ proc(PredId, ProcId), !TuplingScheme) :-
-    module_info_pred_proc_info(ModuleInfo, PredId, ProcId, _, ProcInfo),
-    proc_info_get_varset(ProcInfo, VarSet),
+        PredProcId, !TuplingScheme) :-
+    module_info_pred_proc_info(ModuleInfo, PredProcId, _, ProcInfo),
+    proc_info_get_var_table(ProcInfo, VarTable),
     proc_info_get_headvars(ProcInfo, HeadVars),
     FieldVarArgPos = list.filter_map(
         ( func(_ - Annotation) = (Var - Pos) is semidet :-
@@ -600,7 +601,9 @@ add_tupling_proposal(ModuleInfo, CandidateHeadVars, MinArgsToTuple,
         % We need a new variable to act as the cell variable while
         % counting loads/stores for a proposed tupling, but we don't
         % add that variable to the varset permanently.
-        varset.new_named_var("DummyCellVar", DummyCellVar, VarSet, _),
+        % XXX To me (zs), this seems a strange thing to do.
+        DummyVarEntry = vte("DummyCellVar", void_type, is_dummy_type),
+        add_var_entry(DummyVarEntry, DummyCellVar, VarTable, _),
         FieldVars = assoc_list.keys(FieldVarArgPos),
         TuplingProposal = tupling(DummyCellVar, FieldVars, FieldVarArgPos)
     ),
@@ -671,12 +674,12 @@ add_transformed_proc(PredProcId, tupling(_, FieldVars, _),
 
         % Create the cell variable.
         list.length(FieldVars, TupleArity),
-        proc_info_get_vartypes(!.ProcInfo, VarTypes),
-        lookup_var_types(VarTypes, FieldVars, TupleArgTypes),
+        proc_info_get_var_table(!.ProcInfo, VarTable),
+        lookup_var_types(VarTable, FieldVars, TupleArgTypes),
         construct_type(type_ctor(unqualified("{}"), TupleArity), TupleArgTypes,
             TupleConsType),
-        proc_info_create_var_from_type(TupleConsType,
-            yes("TuplingCellVar"), CellVar, !ProcInfo),
+        proc_info_create_var_from_type("TuplingCellVar", TupleConsType,
+            is_not_dummy_type, CellVar, !ProcInfo),
 
         % Get the argument positions of the parameters to be tupled.
         proc_info_get_headvars(!.ProcInfo, HeadVars),
@@ -689,11 +692,10 @@ add_transformed_proc(PredProcId, tupling(_, FieldVars, _),
 
         % Make a transformed version of the procedure and add it to
         % the module.
-        make_transformed_proc(CellVar, FieldVars, InsertMap, !ProcInfo),
-        recompute_instmap_delta_proc(recompute_atomic_instmap_deltas,
-            !ProcInfo, !ModuleInfo),
+        make_transformed_proc(InsertMap, CellVar, FieldVars, !ProcInfo),
+        recompute_instmap_delta_proc(recomp_atomics, !ProcInfo, !ModuleInfo),
         counter.allocate(Num, !Counter),
-        create_aux_pred(PredId, ProcId, PredInfo, !.ProcInfo, Num,
+        create_tupling_aux_pred(PredId, ProcId, PredInfo, !.ProcInfo, Num,
             AuxPredProcId, CallAux, !ModuleInfo),
 
         % Add an entry to the transform map for the new procedure.
@@ -704,30 +706,29 @@ add_transformed_proc(PredProcId, tupling(_, FieldVars, _),
 
 %-----------------------------------------------------------------------------%
 
-:- pred make_transformed_proc(prog_var::in, list(prog_var)::in, insert_map::in,
+:- pred make_transformed_proc(insert_map::in, prog_var::in, list(prog_var)::in,
     proc_info::in, proc_info::out) is det.
 
-make_transformed_proc(CellVar, FieldVarsList, InsertMap, !ProcInfo) :-
+make_transformed_proc(InsertMap, CellVar, FieldVarsList, !ProcInfo) :-
     % Modify the procedure's formal parameters.
     proc_info_get_headvars(!.ProcInfo, HeadVars0),
     proc_info_get_argmodes(!.ProcInfo, ArgModes0),
-    HeadVarsAndModes = list.filter_map_corresponding(
-        (func(Var, Mode) = (Var - Mode) is semidet :-
-            not list.member(Var, FieldVarsList)),
-        HeadVars0, ArgModes0),
+    list.filter_map_corresponding(
+        ( pred(Var::in, Mode::in, (Var - Mode)::out) is semidet :-
+            not list.member(Var, FieldVarsList)
+        ),
+        HeadVars0, ArgModes0, HeadVarsAndModes),
     assoc_list.keys_and_values(HeadVarsAndModes, HeadVars, ArgModes),
     proc_info_set_headvars(HeadVars ++ [CellVar], !ProcInfo),
     proc_info_set_argmodes(ArgModes ++ [in_mode], !ProcInfo),
 
     % Insert the necessary deconstruction unifications.
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     % XXX: I haven't checked if adding this feature has any effect.
     MaybeGoalFeature = yes(feature_tuple_opt),
-    record_decisions_in_goal(Goal0, Goal1, VarSet0, VarSet1,
-        VarTypes0, VarTypes1, map.init, RenameMapA, InsertMap,
-        MaybeGoalFeature),
+    record_decisions_in_goal(MaybeGoalFeature, InsertMap, Goal0, Goal1,
+        VarTable0, VarTable1, map.init, RenameMapA),
 
     % In some cases some of the field variables need to be available at
     % the very beginning of the procedure. The required deconstructions
@@ -742,28 +743,25 @@ make_transformed_proc(CellVar, FieldVarsList, InsertMap, !ProcInfo) :-
     deconstruct_tuple(CellVar, FieldVarsList, ProcStartDeconstruct),
     ProcStartInsert = insert_spec(ProcStartDeconstruct,
         set_of_var.list_to_set(FieldVarsList)),
-    insert_proc_start_deconstruction(Goal1, Goal2,
-        VarSet1, VarSet, VarTypes1, VarTypes, RenameMapB, ProcStartInsert),
+    insert_proc_start_deconstruction(ProcStartInsert, Goal1, Goal2,
+        VarTable1, VarTable, RenameMapB),
     rename_some_vars_in_goal(RenameMapB, Goal2, Goal3),
 
     map.old_merge(RenameMapA, RenameMapB, RenameMap),
     apply_headvar_correction(set_of_var.list_to_set(HeadVars), RenameMap,
         Goal3, Goal),
     proc_info_set_goal(Goal, !ProcInfo),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
-    requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo).
+    proc_info_set_var_table(VarTable, !ProcInfo),
+    requantify_proc_general(ord_nl_no_lambda, !ProcInfo).
 
-:- pred insert_proc_start_deconstruction(hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    rename_map::out, insert_spec::in) is det.
+:- pred insert_proc_start_deconstruction(insert_spec::in,
+    hlds_goal::in, hlds_goal::out, var_table::in, var_table::out,
+    rename_map::out) is det.
 
-insert_proc_start_deconstruction(Goal0, Goal, !VarSet, !VarTypes,
-        VarRename, Insert) :-
+insert_proc_start_deconstruction(Insert, Goal0, Goal, !VarTable, VarRename) :-
     % The tuple_opt feature is not used for this goal as we do want
     % other transformations to remove it if possible.
-    make_inserted_goal(!VarSet, !VarTypes, map.init, VarRename,
-        Insert, no, InsertGoal),
+    make_inserted_goal(no, Insert, InsertGoal, !VarTable, map.init, VarRename),
     Goal0 = hlds_goal(_, GoalInfo),
     conj_list_to_goal([InsertGoal, Goal0], GoalInfo, Goal).
 
@@ -779,20 +777,19 @@ insert_proc_start_deconstruction(Goal0, Goal, !VarSet, !VarTypes,
     %
     % See also create_aux_pred in loop_inv.m.
     %
-:- pred create_aux_pred(pred_id::in, proc_id::in, pred_info::in,
+:- pred create_tupling_aux_pred(pred_id::in, proc_id::in, pred_info::in,
     proc_info::in, int::in, pred_proc_id::out, hlds_goal::out,
     module_info::in, module_info::out) is det.
 
-create_aux_pred(PredId, ProcId, PredInfo, ProcInfo, Counter,
-        AuxPredProcId, CallAux, ModuleInfo0, ModuleInfo) :-
+create_tupling_aux_pred(PredId, ProcId, PredInfo, ProcInfo, SeqNum,
+        AuxPredProcId, CallAux, !ModuleInfo) :-
     proc_info_get_headvars(ProcInfo, AuxHeadVars),
     proc_info_get_goal(ProcInfo, Goal @ hlds_goal(_GoalExpr, GoalInfo)),
-    proc_info_get_initial_instmap(ModuleInfo0, ProcInfo, InitialAuxInstMap),
+    proc_info_get_initial_instmap(!.ModuleInfo, ProcInfo, InitialAuxInstMap),
     pred_info_get_typevarset(PredInfo, TVarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     pred_info_get_class_context(PredInfo, ClassContext),
     proc_info_get_rtti_varmaps(ProcInfo, RttiVarMaps),
-    proc_info_get_varset(ProcInfo, VarSet),
     proc_info_get_inst_varset(ProcInfo, InstVarSet),
     pred_info_get_markers(PredInfo, Markers),
     pred_info_get_origin(PredInfo, OrigOrigin),
@@ -802,36 +799,34 @@ create_aux_pred(PredId, ProcId, PredInfo, ProcInfo, Counter,
     PredModule = pred_info_module(PredInfo),
     PredName = pred_info_name(PredInfo),
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+    ProcNum = proc_id_to_int(ProcId), 
     Context = goal_info_get_context(GoalInfo),
-    term.context_line(Context, Line),
-    make_pred_name_with_context(PredModule, "tupling",
-        PredOrFunc, PredName, Line, Counter, AuxPredSymName0),
-    hlds_pred.proc_id_to_int(ProcId, ProcNo),
-    Suffix = string.format("_%d", [i(ProcNo)]),
-    add_sym_name_suffix(AuxPredSymName0, Suffix, AuxPredSymName),
+    LineNum = term_context.context_line(Context),
+    Transform = tn_tupling(PredOrFunc, ProcNum, lnc(LineNum, SeqNum)),
+    make_transformed_pred_sym_name(PredModule, PredName, Transform,
+        AuxPredSymName),
 
-    Origin = origin_transformed(transform_tuple(ProcNo), OrigOrigin, PredId),
+    Origin = origin_proc_transform(proc_transform_tuple(LineNum, SeqNum),
+        OrigOrigin, PredId, ProcId),
     hlds_pred.define_new_pred(
-        Origin,                 % in
-        Goal,                   % in
-        CallAux,                % out
-        AuxHeadVars,            % in
-        _ExtraArgs,             % out
-        InitialAuxInstMap,      % in
         AuxPredSymName,         % in
+        Origin,                 % in
         TVarSet,                % in
-        VarTypes,               % in
-        ClassContext,           % in
-        RttiVarMaps,            % in
-        VarSet,                 % in
         InstVarSet,             % in
+        VarTable,               % in
+        RttiVarMaps,            % in
+        ClassContext,           % in
+        InitialAuxInstMap,      % in
+        VarNameRemap,           % in
         Markers,                % in
         address_is_not_taken,   % in
         HasParallelConj,        % in
-        VarNameRemap,           % in
-        ModuleInfo0,
-        ModuleInfo,
-        AuxPredProcId
+        AuxPredProcId,          % out
+        AuxHeadVars,            % in
+        _ExtraArgs,             % out
+        Goal,                   % in
+        CallAux,                % out
+        !ModuleInfo
     ).
 
 %-----------------------------------------------------------------------------%
@@ -912,7 +907,7 @@ prepare_proc_for_counting(PredProcId, !ReverseGoalPathMapMap, !ModuleInfo) :-
             PredInfo, !:ProcInfo),
         pred_info_get_markers(PredInfo, Markers),
         pred_info_get_arg_types(PredInfo, ArgTypes),
-        generate_proc_arg_info(Markers, ArgTypes, !.ModuleInfo, !ProcInfo),
+        generate_proc_arg_info(!.ModuleInfo, Markers, ArgTypes, !ProcInfo),
 
         detect_liveness_proc(!.ModuleInfo, PredProcId, !ProcInfo),
         initial_liveness(!.ModuleInfo, PredInfo, !.ProcInfo, Liveness0),
@@ -920,9 +915,8 @@ prepare_proc_for_counting(PredProcId, !ReverseGoalPathMapMap, !ModuleInfo) :-
         body_should_use_typeinfo_liveness(PredInfo, Globals, TypeInfoLiveness),
         globals.lookup_bool_option(Globals,
             opt_no_return_calls, OptNoReturnCalls),
-        array.init(1, is_not_dummy_type, DummyDummyTypeArray),
         AllocData = alloc_data(!.ModuleInfo, !.ProcInfo, PredProcId,
-            TypeInfoLiveness, OptNoReturnCalls, DummyDummyTypeArray),
+            no_var_is_dummy, TypeInfoLiveness, OptNoReturnCalls),
         fill_goal_id_slots_in_proc(!.ModuleInfo, ContainingGoalMap, !ProcInfo),
         ReverseGoalPathMap = create_reverse_goal_path_map(ContainingGoalMap),
         map.det_insert(PredProcId, ReverseGoalPathMap,
@@ -931,7 +925,7 @@ prepare_proc_for_counting(PredProcId, !ReverseGoalPathMapMap, !ModuleInfo) :-
         OptTupleAlloc0 = opt_tuple_alloc,
         FailVars = set_of_var.init,
         NondetLiveness0 = set_of_var.init,
-        build_live_sets_in_goal_no_par_stack(Goal0, Goal, FailVars, AllocData,
+        build_live_sets_in_goal_no_par_stack(AllocData, FailVars, Goal0, Goal,
             OptTupleAlloc0, _OptTupleAlloc, Liveness0, _Liveness,
             NondetLiveness0, _NondetLiveness),
         proc_info_set_goal(Goal, !ProcInfo),
@@ -1044,7 +1038,7 @@ count_load_stores_in_proc(CountInfo, Loads, Stores) :-
     CountState0 = count_state(InitialLiveness, set_of_var.init, 0.0, 0.0),
     proc_info_get_goal(ProcInfo, Goal),
     count_load_stores_in_goal(Goal, CountInfo, CountState0, CountState1),
-    arg_info.partition_proc_args(ProcInfo, ModuleInfo, _, OutputArgs, _),
+    arg_info.partition_proc_args(ModuleInfo, ProcInfo, _, OutputArgs, _),
     cls_require_in_regs(CountInfo, set.to_sorted_list(OutputArgs),
         CountState1, CountState),
     CountState = count_state(_, _, Loads, Stores).
@@ -1100,13 +1094,12 @@ count_load_stores_in_goal(Goal, CountInfo, !CountState) :-
             _Detism),
         ModuleInfo = CountInfo ^ ci_module,
         ProcInfo = CountInfo ^ ci_proc_info,
-        proc_info_get_vartypes(ProcInfo, VarTypes),
-        lookup_var_types(VarTypes, ArgVars, ArgTypes),
-        arg_info.generic_call_arg_reg_types(ModuleInfo, VarTypes,
-            GenericCall, ArgVars, MaybeArgRegs, ArgRegTypes),
-        arg_info.compute_in_and_out_vars_sep_regs(ModuleInfo, ArgVars,
-            ArgModes, ArgTypes, ArgRegTypes, InputArgsR, InputArgsF,
-            OutputArgsR, OutputArgsF),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        arg_info.generic_call_arg_reg_types(ModuleInfo, GenericCall,
+            ArgVars, MaybeArgRegs, ArgRegTypes),
+        arg_info.compute_in_and_out_vars_sep_regs(ModuleInfo, VarTable,
+            ArgVars, ArgModes, ArgRegTypes,
+            InputArgsR, InputArgsF, OutputArgsR, OutputArgsF),
         InputArgs = InputArgsR ++ InputArgsF,
         OutputArgs = OutputArgsR ++ OutputArgsF,
 
@@ -1141,9 +1134,9 @@ count_load_stores_in_goal(Goal, CountInfo, !CountState) :-
         ArgVars = list.map(foreign_arg_var, Args),
         ExtraVars = list.map(foreign_arg_var, ExtraArgs),
         CallingProcInfo = CountInfo ^ ci_proc_info,
-        proc_info_get_vartypes(CallingProcInfo, VarTypes),
-        arg_info.partition_proc_call_args(ProcInfo, VarTypes,
-            ModuleInfo, ArgVars, InputArgVarSet, OutputArgVarSet, _),
+        proc_info_get_var_table(CallingProcInfo, VarTable),
+        arg_info.partition_proc_call_args(ModuleInfo, ProcInfo, VarTable,
+            ArgVars, InputArgVarSet, OutputArgVarSet, _),
         set.to_sorted_list(InputArgVarSet, InputArgVars),
         list.append(InputArgVars, ExtraVars, InputVars),
         ( if
@@ -1240,9 +1233,9 @@ count_load_stores_in_call_to_tupled(GoalExpr, GoalInfo, CountInfo,
     module_info_pred_proc_info(ModuleInfo, CalleePredId, CalleeProcId,
         _, CalleeProcInfo),
     CallingProcInfo = CountInfo ^ ci_proc_info,
-    proc_info_get_vartypes(CallingProcInfo, VarTypes),
-    arg_info.partition_proc_call_args(CalleeProcInfo, VarTypes,
-        ModuleInfo, ArgVars, InputArgs0, Outputs, _),
+    proc_info_get_var_table(CallingProcInfo, VarTable),
+    arg_info.partition_proc_call_args(ModuleInfo, CalleeProcInfo,
+        VarTable, ArgVars, InputArgs0, Outputs, _),
     ( if
         % If the caller is a tupled procedure, and every field variable
         % of the tuple appears as an input argument to the callee AND
@@ -1293,9 +1286,9 @@ count_load_stores_in_call_to_not_tupled(GoalExpr, GoalInfo, CountInfo,
     module_info_pred_proc_info(ModuleInfo, PredId, ProcId,
         _PredInfo, CalleeProcInfo),
     ProcInfo = CountInfo ^ ci_proc_info,
-    proc_info_get_vartypes(ProcInfo, VarTypes),
-    arg_info.partition_proc_call_args(CalleeProcInfo, VarTypes,
-        ModuleInfo, ArgVars, InputArgs, OutputArgs, _),
+    proc_info_get_var_table(ProcInfo, VarTable),
+    arg_info.partition_proc_call_args(ModuleInfo, CalleeProcInfo,
+        VarTable, ArgVars, InputArgs, OutputArgs, _),
     set.to_sorted_list(InputArgs, Inputs),
     set.to_sorted_list(OutputArgs, Outputs),
     (
@@ -1583,8 +1576,8 @@ add_branch_costs(BranchState, Weight, !CountState) :-
 
 build_interval_info(ModuleInfo, ProcInfo, IntervalInfo) :-
     proc_info_get_goal(ProcInfo, Goal),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
-    arg_info.partition_proc_args(ProcInfo, ModuleInfo,
+    proc_info_get_var_table(ProcInfo, VarTable),
+    arg_info.partition_proc_args(ModuleInfo, ProcInfo,
         _InputArgs, OutputArgs, _UnusedArgs),
     Counter0 = counter.init(1),
     counter.allocate(CurInterval, Counter0, Counter),
@@ -1593,7 +1586,7 @@ build_interval_info(ModuleInfo, ProcInfo, IntervalInfo) :-
     StartMap = map.init,
     SuccMap = map.singleton(CurIntervalId, []),
     VarsMap = map.singleton(CurIntervalId, set_to_bitset(OutputArgs)),
-    IntParams = interval_params(ModuleInfo, VarTypes, no),
+    IntParams = interval_params(ModuleInfo, VarTable, no),
     IntervalInfo0 = interval_info(IntParams, set_of_var.init,
         set_to_bitset(OutputArgs), map.init, map.init, map.init,
         CurIntervalId, Counter,
@@ -1733,23 +1726,21 @@ fix_calls_in_proc(TransformMap, proc(PredId, ProcId), !ModuleInfo) :-
         % library were made to call tupled procedures.
         pred_info_get_origin(PredInfo, Origin),
         ( if
-            Origin = origin_transformed(transform_type_specialization(_), _, _)
+            Origin = origin_pred_transform(PredTransform, _, _),
+            PredTransform = pred_transform_pragma_type_spec(_)
         then
             true
         else
             proc_info_get_goal(!.ProcInfo, Goal0),
-            proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-            proc_info_get_varset(!.ProcInfo, VarSet0),
+            proc_info_get_var_table(!.ProcInfo, VarTable0),
             proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
-            fix_calls_in_goal(Goal0, Goal, VarSet0, VarSet,
-                VarTypes0, VarTypes, RttiVarMaps0, RttiVarMaps,
-                TransformMap),
+            fix_calls_in_goal(TransformMap, Goal0, Goal,
+                VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
             proc_info_set_goal(Goal, !ProcInfo),
-            proc_info_set_varset(VarSet, !ProcInfo),
-            proc_info_set_vartypes(VarTypes, !ProcInfo),
+            proc_info_set_var_table(VarTable, !ProcInfo),
             proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
-            requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
-            recompute_instmap_delta_proc(recompute_atomic_instmap_deltas,
+            requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+            recompute_instmap_delta_proc(recomp_atomics,
                 !ProcInfo, !ModuleInfo),
             module_info_set_pred_proc_info(PredId, ProcId,
                 PredInfo, !.ProcInfo, !ModuleInfo)
@@ -1758,12 +1749,11 @@ fix_calls_in_proc(TransformMap, proc(PredId, ProcId), !ModuleInfo) :-
 
 %-----------------------------------------------------------------------------%
 
-:- pred fix_calls_in_goal(hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    rtti_varmaps::in, rtti_varmaps::out, transform_map::in) is det.
+:- pred fix_calls_in_goal(transform_map::in, hlds_goal::in, hlds_goal::out,
+    var_table::in, var_table::out,
+    rtti_varmaps::in, rtti_varmaps::out) is det.
 
-fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
-        TransformMap) :-
+fix_calls_in_goal(TransformMap, Goal0, Goal, !VarTable, !RttiVarMaps) :-
     Goal0 = hlds_goal(GoalExpr0, GoalInfo0),
     (
         ( GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _)
@@ -1781,8 +1771,9 @@ fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
             TransformedProc = transformed_proc(_, TupleConsType, ArgsToTuple,
                 hlds_goal(CallAux0, CallAuxInfo))
         then
-            varset.new_named_var("TuplingCellVarForCall", CellVar, !VarSet),
-            add_var_type(CellVar, TupleConsType, !VarTypes),
+            CellVarEntry = vte("TuplingCellVarForCall",
+                TupleConsType, is_not_dummy_type),
+            add_var_entry(CellVarEntry, CellVar, !VarTable),
             extract_tupled_args_from_list(Args0, ArgsToTuple,
                 TupledArgs, UntupledArgs),
             construct_tuple(CellVar, TupledArgs, ConstructGoal),
@@ -1796,16 +1787,15 @@ fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
             ),
             conj_list_to_goal([ConstructGoal, CallGoal], GoalInfo0, Goal1),
             RequantifyVars = set_of_var.list_to_set([CellVar | Args0]),
-            implicitly_quantify_goal_general(ordinary_nonlocals_no_lambda,
-                RequantifyVars, _, Goal1, Goal,
-                !VarSet, !VarTypes, !RttiVarMaps)
+            implicitly_quantify_goal_general(ord_nl_no_lambda,
+                RequantifyVars, _, Goal1, Goal, !VarTable, !RttiVarMaps)
         else
             Goal = hlds_goal(GoalExpr0, GoalInfo0)
         )
     ;
         GoalExpr0 = negation(SubGoal0),
-        fix_calls_in_goal(SubGoal0, SubGoal, !VarSet, !VarTypes, !RttiVarMaps,
-            TransformMap),
+        fix_calls_in_goal(TransformMap, SubGoal0, SubGoal,
+            !VarTable, !RttiVarMaps),
         GoalExpr = negation(SubGoal),
         Goal = hlds_goal(GoalExpr, GoalInfo0)
     ;
@@ -1818,8 +1808,8 @@ fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
         then
             Goal = Goal0
         else
-            fix_calls_in_goal(SubGoal0, SubGoal, !VarSet, !VarTypes,
-                !RttiVarMaps, TransformMap),
+            fix_calls_in_goal(TransformMap, SubGoal0, SubGoal,
+                !VarTable, !RttiVarMaps),
             GoalExpr = scope(Reason, SubGoal),
             Goal = hlds_goal(GoalExpr, GoalInfo0)
         )
@@ -1827,38 +1817,35 @@ fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
         GoalExpr0 = conj(ConjType, Goals0),
         (
             ConjType = plain_conj,
-            fix_calls_in_conj(Goals0, Goals, !VarSet, !VarTypes, !RttiVarMaps,
-                TransformMap)
+            fix_calls_in_conj(TransformMap, Goals0, Goals,
+                !VarTable, !RttiVarMaps)
         ;
             ConjType = parallel_conj,
             % XXX: I am not sure whether parallel conjunctions should be
             % treated with fix_calls_in_goal or fix_calls_in_goal_list.
             % At any rate, this is untested.
-            fix_calls_in_goal_list(Goals0, Goals, !VarSet, !VarTypes,
-                !RttiVarMaps, TransformMap)
+            fix_calls_in_goal_list(TransformMap, Goals0, Goals,
+                !VarTable, !RttiVarMaps)
         ),
         GoalExpr = conj(ConjType, Goals),
         Goal = hlds_goal(GoalExpr, GoalInfo0)
     ;
         GoalExpr0 = disj(Goals0),
-        fix_calls_in_goal_list(Goals0, Goals, !VarSet, !VarTypes,
-            !RttiVarMaps, TransformMap),
+        fix_calls_in_goal_list(TransformMap, Goals0, Goals,
+            !VarTable, !RttiVarMaps),
         GoalExpr = disj(Goals),
         Goal = hlds_goal(GoalExpr, GoalInfo0)
     ;
         GoalExpr0 = switch(Var, CanFail, Cases0),
-        fix_calls_in_cases(Cases0, Cases, !VarSet, !VarTypes, !RttiVarMaps,
-            TransformMap),
+        fix_calls_in_cases(TransformMap, Cases0, Cases,
+            !VarTable, !RttiVarMaps),
         GoalExpr = switch(Var, CanFail, Cases),
         Goal = hlds_goal(GoalExpr, GoalInfo0)
     ;
         GoalExpr0 = if_then_else(Vars, Cond0, Then0, Else0),
-        fix_calls_in_goal(Cond0, Cond, !VarSet, !VarTypes, !RttiVarMaps,
-            TransformMap),
-        fix_calls_in_goal(Then0, Then, !VarSet, !VarTypes, !RttiVarMaps,
-            TransformMap),
-        fix_calls_in_goal(Else0, Else, !VarSet, !VarTypes, !RttiVarMaps,
-            TransformMap),
+        fix_calls_in_goal(TransformMap, Cond0, Cond, !VarTable, !RttiVarMaps),
+        fix_calls_in_goal(TransformMap, Then0, Then, !VarTable, !RttiVarMaps),
+        fix_calls_in_goal(TransformMap, Else0, Else, !VarTable, !RttiVarMaps),
         GoalExpr = if_then_else(Vars, Cond, Then, Else),
         Goal = hlds_goal(GoalExpr, GoalInfo0)
     ;
@@ -1869,48 +1856,42 @@ fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
 
 %-----------------------------------------------------------------------------%
 
-:- pred fix_calls_in_conj(hlds_goals::in, hlds_goals::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    rtti_varmaps::in, rtti_varmaps::out, transform_map::in) is det.
+:- pred fix_calls_in_conj(transform_map::in, hlds_goals::in, hlds_goals::out,
+    var_table::in, var_table::out, rtti_varmaps::in, rtti_varmaps::out) is det.
 
-fix_calls_in_conj([], [], !VarSet, !VarTypes, !RttiVarMaps, _).
-fix_calls_in_conj([Goal0 | Goals0], Goals, !VarSet, !VarTypes,
-        !RttiVarMaps, TransformMap) :-
-    fix_calls_in_goal(Goal0, Goal1, !VarSet, !VarTypes, !RttiVarMaps,
-        TransformMap),
-    fix_calls_in_conj(Goals0, Goals1, !VarSet, !VarTypes, !RttiVarMaps,
-        TransformMap),
+fix_calls_in_conj(_, [], [], !VarTable, !RttiVarMaps).
+fix_calls_in_conj(TransformMap, [Goal0 | Goals0], Goals,
+        !VarTable, !RttiVarMaps) :-
+    fix_calls_in_goal(TransformMap, Goal0, Goal1, !VarTable, !RttiVarMaps),
+    fix_calls_in_conj(TransformMap, Goals0, Goals1, !VarTable, !RttiVarMaps),
     ( if Goal1 = hlds_goal(conj(plain_conj, ConjGoals), _) then
         Goals = ConjGoals ++ Goals1
     else
         Goals = [Goal1 | Goals1]
     ).
 
-:- pred fix_calls_in_goal_list(hlds_goals::in, hlds_goals::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    rtti_varmaps::in, rtti_varmaps::out, transform_map::in) is det.
+:- pred fix_calls_in_goal_list(transform_map::in,
+    hlds_goals::in, hlds_goals::out,
+    var_table::in, var_table::out, rtti_varmaps::in, rtti_varmaps::out) is det.
 
-fix_calls_in_goal_list([], [], !VarSet, !VarTypes, !RttiVarMaps, _).
-fix_calls_in_goal_list([Goal0 | Goals0], [Goal | Goals], !VarSet, !VarTypes,
-        !RttiVarMaps, TransformMap) :-
-    fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
-        TransformMap),
-    fix_calls_in_goal_list(Goals0, Goals, !VarSet, !VarTypes,
-        !RttiVarMaps, TransformMap).
+fix_calls_in_goal_list(_, [], [], !VarTable, !RttiVarMaps).
+fix_calls_in_goal_list(TransformMap, [Goal0 | Goals0], [Goal | Goals],
+        !VarTable, !RttiVarMaps) :-
+    fix_calls_in_goal(TransformMap, Goal0, Goal,
+        !VarTable, !RttiVarMaps),
+    fix_calls_in_goal_list(TransformMap, Goals0, Goals,
+        !VarTable, !RttiVarMaps).
 
-:- pred fix_calls_in_cases(list(case)::in, list(case)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    rtti_varmaps::in, rtti_varmaps::out, transform_map::in) is det.
+:- pred fix_calls_in_cases(transform_map::in, list(case)::in, list(case)::out,
+    var_table::in, var_table::out, rtti_varmaps::in, rtti_varmaps::out) is det.
 
-fix_calls_in_cases([], [], !VarSet, !VarTypes, !RttiVarMaps, _).
-fix_calls_in_cases([Case0 | Cases0], [Case | Cases], !VarSet, !VarTypes,
-        !RttiVarMaps, TransformMap) :-
+fix_calls_in_cases(_, [], [], !VarTable, !RttiVarMaps).
+fix_calls_in_cases(TransformMap, [Case0 | Cases0], [Case | Cases],
+        !VarTable, !RttiVarMaps) :-
     Case0 = case(MainConsId, OtherConsIds, Goal0),
-    fix_calls_in_goal(Goal0, Goal, !VarSet, !VarTypes, !RttiVarMaps,
-        TransformMap),
+    fix_calls_in_goal(TransformMap, Goal0, Goal, !VarTable, !RttiVarMaps),
     Case = case(MainConsId, OtherConsIds, Goal),
-    fix_calls_in_cases(Cases0, Cases, !VarSet, !VarTypes,
-        !RttiVarMaps, TransformMap).
+    fix_calls_in_cases(TransformMap, Cases0, Cases, !VarTable, !RttiVarMaps).
 
 %-----------------------------------------------------------------------------%
 

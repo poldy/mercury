@@ -22,10 +22,10 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 :- import_module term.
@@ -34,11 +34,11 @@
 
     % Convert a higher order pred term to a lambda goal.
     %
-:- pred convert_pred_to_lambda_goal(purity::in, lambda_eval_method::in,
+:- pred convert_pred_to_lambda_goal(module_info::in,
+    purity::in, lambda_eval_method::in,
     prog_var::in, pred_id::in, proc_id::in, list(prog_var)::in,
     list(mer_type)::in, unify_context::in, hlds_goal_info::in, context::in,
-    module_info::in, maybe1(unify_rhs)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    maybe1(unify_rhs)::out, var_table::in, var_table::out) is det.
 
     % fix_undetermined_mode_lambda_goal(ModuleInfo, ProcId, Functor0, Functor)
     %
@@ -55,12 +55,14 @@
 
 :- implementation.
 
+:- import_module check_hlds.
+:- import_module check_hlds.type_util.
 :- import_module hlds.instmap.
 :- import_module mdbcomp.
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.set_of_var.
 
@@ -68,15 +70,14 @@
 :- import_module int.
 :- import_module maybe.
 :- import_module require.
-:- import_module varset.
 
 %---------------------------------------------------------------------------%
 
-convert_pred_to_lambda_goal(Purity, EvalMethod, X0, PredId, ProcId,
-        ArgVars0, PredArgTypes, UnifyContext, GoalInfo0, Context,
-        ModuleInfo0, MaybeRHS, !VarSet, !VarTypes) :-
+convert_pred_to_lambda_goal(ModuleInfo0, Purity, EvalMethod, X0,
+        PredId, ProcId, ArgVars0, PredArgTypes, UnifyContext, GoalInfo0,
+        Context, MaybeRHS, !VarTable) :-
     % Create the new lambda-quantified variables.
-    create_fresh_vars(PredArgTypes, LambdaVars, !VarSet, !VarTypes),
+    create_fresh_vars(ModuleInfo0, PredArgTypes, LambdaVars, !VarTable),
     Args = ArgVars0 ++ LambdaVars,
 
     % Build up the hlds_goal_expr for the call that will form the lambda goal.
@@ -129,14 +130,15 @@ convert_pred_to_lambda_goal(Purity, EvalMethod, X0, PredId, ProcId,
         MaybeRHS = error1(Specs)
     ).
 
-:- pred create_fresh_vars(list(mer_type)::in, list(prog_var)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+:- pred create_fresh_vars(module_info::in, list(mer_type)::in,
+    list(prog_var)::out, var_table::in, var_table::out) is det.
 
-create_fresh_vars([], [], !VarSet, !VarTypes).
-create_fresh_vars([Type | Types], [Var | Vars], !VarSet, !VarTypes) :-
-    varset.new_var(Var, !VarSet),
-    add_var_type(Var, Type, !VarTypes),
-    create_fresh_vars(Types, Vars, !VarSet, !VarTypes).
+create_fresh_vars(_, [], [], !VarTable).
+create_fresh_vars(ModuleInfo, [Type | Types], [Var | Vars], !VarTable) :-
+    IsDummy = is_type_a_dummy(ModuleInfo, Type),
+    Entry = vte("", Type, IsDummy),
+    add_var_entry(Entry, Var, !VarTable),
+    create_fresh_vars(ModuleInfo, Types, Vars, !VarTable).
 
 fix_undetermined_mode_lambda_goal(ModuleInfo, ProcId, RHS0, MaybeRHS) :-
     RHS0 = rhs_lambda_goal(Purity, Groundness, PredOrFunc, EvalMethod,

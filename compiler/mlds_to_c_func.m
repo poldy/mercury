@@ -14,8 +14,8 @@
 :- interface.
 
 :- import_module ml_backend.mlds.
-:- import_module ml_backend.mlds_to_c_util.
 :- import_module ml_backend.mlds_to_c_type.
+:- import_module ml_backend.mlds_to_c_util.
 :- import_module ml_backend.mlds_to_target_util.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
@@ -69,7 +69,6 @@
 :- import_module int.
 :- import_module maybe.
 :- import_module string.
-:- import_module term.
 
 %---------------------------------------------------------------------------%
 
@@ -272,31 +271,37 @@ mlds_output_func(Opts, Stream, Indent, QualFuncName, Context, Params,
         FunctionBody = body_defined_here(BodyStmt),
         io.write_string(Stream, "\n", !IO),
 
-        c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
-        % XXX We should not output braces around the function body if
-        % - ProfileTime = no, and
-        % - BodyStmt = ml_stmt_block(...),
-        % because mlds_output_statement will put braces around its output
-        % anyway.
-        output_n_indents(Stream, Indent, !IO),
-        io.write_string(Stream, "{\n", !IO),
-
+        LineNumbers = Opts ^ m2co_line_numbers,
         ProfileTime = Opts ^ m2co_profile_time,
-        (
-            ProfileTime = yes,
-            mlds_output_time_profile_instr(Opts, Stream, Context, Indent + 1,
-                QualFuncName, !IO)
-        ;
-            ProfileTime = no
-        ),
-
         Signature = mlds_get_func_signature(Params),
         FuncInfo = func_info_c(QualFuncName, Signature),
-        mlds_output_statement(Opts, Stream, Indent + 1, FuncInfo,
-            BodyStmt, !IO),
-        c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
-        output_n_indents(Stream, Indent, !IO),
-        io.write_string(Stream, "}\n", !IO)    % end the function
+        ( if
+            LineNumbers = no,
+            ProfileTime = no,
+            BodyStmt = ml_stmt_block(_, _, _, _)
+        then
+            % The entire output of this call will have braces around it.
+            % mlds_output_statement puts them there to create a scope
+            % for the block, but they also work to wrap the function.
+            mlds_output_statement(Opts, Stream, Indent, FuncInfo,
+                BodyStmt, !IO)
+        else
+            c_output_context(Stream, LineNumbers, Context, !IO),
+            output_n_indents(Stream, Indent, !IO),
+            io.write_string(Stream, "{\n", !IO),    % start of the function
+            (
+                ProfileTime = yes,
+                mlds_output_time_profile_instr(Opts, Stream, Context,
+                    Indent + 1, QualFuncName, !IO)
+            ;
+                ProfileTime = no
+            ),
+            mlds_output_statement(Opts, Stream, Indent + 1, FuncInfo,
+                BodyStmt, !IO),
+            c_output_context(Stream, LineNumbers, Context, !IO),
+            output_n_indents(Stream, Indent, !IO),
+            io.write_string(Stream, "}\n", !IO)     % end of the function
+        )
     ).
 
 %---------------------------------------------------------------------------%
@@ -313,8 +318,19 @@ mlds_output_function_decl_flags(Opts, Stream, Flags, MaybeBody, !IO) :-
     Comments = Opts ^ m2co_auto_comments,
     (
         Comments = yes,
-        mlds_output_access_comment(Stream, Access, !IO),
-        mlds_output_per_instance_comment(Stream, PerInstance, !IO)
+        (
+            Access = func_public,
+            io.write_string(Stream, "/* public: */ ", !IO)
+        ;
+            Access = func_private,
+            io.write_string(Stream, "/* private: */ ", !IO)
+        ),
+        (
+            PerInstance = per_instance
+        ;
+            PerInstance = one_copy,
+            io.write_string(Stream, "/* one_copy */ ", !IO)
+        )
     ;
         Comments = no
     ),
@@ -327,21 +343,6 @@ mlds_output_function_decl_flags(Opts, Stream, Flags, MaybeBody, !IO) :-
     else
         true
     ).
-
-:- pred mlds_output_access_comment(io.text_output_stream::in,
-    function_access::in, io::di, io::uo) is det.
-
-mlds_output_access_comment(Stream, func_public, !IO) :-
-    io.write_string(Stream, "/* public: */ ", !IO).
-mlds_output_access_comment(Stream, func_private, !IO) :-
-    io.write_string(Stream, "/* private: */ ", !IO).
-
-:- pred mlds_output_per_instance_comment(io.text_output_stream::in,
-    per_instance::in, io::di, io::uo) is det.
-
-mlds_output_per_instance_comment(_, per_instance, !IO).
-mlds_output_per_instance_comment(Stream, one_copy, !IO) :-
-    io.write_string(Stream, "/* one_copy */ ", !IO).
 
 %---------------------------------------------------------------------------%
 :- end_module ml_backend.mlds_to_c_func.

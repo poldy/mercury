@@ -43,10 +43,10 @@
 :- implementation.
 
 :- import_module backend_libs.type_class_info.
-:- import_module hlds.hlds_code_util.
 :- import_module hlds.hlds_class.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
+:- import_module hlds.pred_name.
 :- import_module hlds.status.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
@@ -87,10 +87,10 @@ gen_infos_for_instances(ModuleInfo, ClassId,
     % order seems worthwhile on aesthetic grounds.
     gen_infos_for_instances(ModuleInfo, ClassId, InstanceDefns, !RttiDatas),
 
-    InstanceDefn = hlds_instance_defn(InstanceModule,
-        InstanceTypes, _OriginalTypes, ImportStatus, _TermContext,
-        _InstanceConstraints, Body, _MaybePredProcIds,
-        _Varset, _SuperClassProofs),
+    InstanceDefn = hlds_instance_defn(InstanceModule, ImportStatus,
+        _TVarset, _OriginalTypes, InstanceTypes, _InstanceConstraints,
+        _MaybeSubsumedContext, _SuperClassProofs, Body, _MaybeMethodInfos,
+        _Context),
     ( if
         Body = instance_body_concrete(_),
         % Only make the base_typeclass_info if the instance declaration
@@ -120,14 +120,15 @@ gen_body(ModuleInfo, ClassId, InstanceDefn, BaseTypeClassInfo) :-
     Constraints = InstanceDefn ^ instdefn_constraints,
     list.length(Constraints, NumConstraints),
 
-    MaybeInstancePredProcIds = InstanceDefn ^ instdefn_hlds_interface,
+    MaybeInstanceMethods = InstanceDefn ^ instdefn_maybe_method_infos,
     (
-        MaybeInstancePredProcIds = no,
+        MaybeInstanceMethods = no,
         unexpected($pred,
             "pred_proc_ids not filled in by check_typeclass.m")
     ;
-        MaybeInstancePredProcIds = yes(InstancePredProcIds)
+        MaybeInstanceMethods = yes(InstanceMethods)
     ),
+    InstancePredProcIds = method_infos_to_pred_proc_ids(InstanceMethods),
     construct_proc_labels(ModuleInfo, InstancePredProcIds, ProcLabels),
     gen_superclass_count(ClassId, ModuleInfo, SuperClassCount, ClassArity),
     list.length(ProcLabels, NumMethods),

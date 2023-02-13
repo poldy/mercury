@@ -73,10 +73,10 @@
 :- import_module backend_libs.
 :- import_module backend_libs.builtin_ops.
 :- import_module hlds.arg_info.
+:- import_module hlds.hlds_class.
 :- import_module hlds.hlds_llds.
 :- import_module hlds.hlds_module.
 :- import_module hlds.instmap.
-:- import_module hlds.vartypes.
 :- import_module libs.options.
 :- import_module ll_backend.code_util.
 :- import_module ll_backend.continuation_info.
@@ -85,7 +85,9 @@
 :- import_module mdbcomp.goal_path.
 :- import_module parse_tree.prog_data_event.
 :- import_module parse_tree.prog_event.
+:- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module cord.
@@ -172,7 +174,7 @@ generate_call(CodeModel, PredId, ProcId, ArgVars, GoalInfo, Code, !CI, !CLD) :-
 
 %---------------------------------------------------------------------------%
 
-generate_generic_call(OuterCodeModel, GenericCall, Args, Modes,
+generate_generic_call(OuterCodeModel, GenericCall, ArgVars, Modes,
         MaybeRegTypes, Det, GoalInfo, Code, !CI, !CLD) :-
     % For a generic_call, we split the arguments into inputs and outputs,
     % put the inputs in the locations expected by mercury.do_call_closure in
@@ -187,28 +189,30 @@ generate_generic_call(OuterCodeModel, GenericCall, Args, Modes,
         ( GenericCall = higher_order(_, _, _, _)
         ; GenericCall = class_method(_, _, _, _)
         ),
-        generate_main_generic_call(OuterCodeModel, GenericCall, Args, Modes,
+        generate_main_generic_call(OuterCodeModel, GenericCall, ArgVars, Modes,
             MaybeRegTypes, Det, GoalInfo, Code, !CI, !CLD)
     ;
         GenericCall = event_call(EventName),
-        generate_event_call(EventName, Args, GoalInfo, Code, !CI, !CLD)
+        generate_event_call(EventName, ArgVars, GoalInfo, Code, !CI, !CLD)
     ;
         GenericCall = cast(_),
-        ( if Args = [InputArg, OutputArg] then
-            get_module_info(!.CI, ModuleInfo),
-            get_proc_info(!.CI, ProcInfo),
-            proc_info_get_vartypes(ProcInfo, VarTypes),
-            ( if var_is_of_dummy_type(ModuleInfo, VarTypes, InputArg) then
+        ( if ArgVars = [InputArgVar, OutputArgVar] then
+            get_var_table(!.CI, VarTable),
+            lookup_var_entry(VarTable, InputArgVar, InputArgEntry),
+            InputArgVarIsDummy = InputArgEntry ^ vte_is_dummy,
+            (
+                InputArgVarIsDummy = is_dummy_type,
                 % Dummy types don't actually have values, which is
-                % normally harmless. However using the constant zero means
+                % normally harmless. However, using the constant zero means
                 % that we don't need to allocate space for an existentially
                 % typed version of a dummy type. Using the constant zero
                 % also avoids keeping pointers to memory that could be freed.
-                Rval = int_const(0)
-            else
-                Rval = leaf(InputArg)
+                InputArgRval = int_const(0)
+            ;
+                InputArgVarIsDummy = is_not_dummy_type,
+                InputArgRval = leaf(InputArgVar)
             ),
-            generate_assign_builtin(OutputArg, Rval, Code, !CLD)
+            generate_assign_builtin(OutputArgVar, InputArgRval, Code, !CLD)
         else
             unexpected($pred, "invalid type/inst cast call")
         )
@@ -219,15 +223,14 @@ generate_generic_call(OuterCodeModel, GenericCall, Args, Modes,
     determinism::in, hlds_goal_info::in, llds_code::out,
     code_info::in, code_info::out, code_loc_dep::in, code_loc_dep::out) is det.
 
-generate_main_generic_call(_OuterCodeModel, GenericCall, Args, Modes,
+generate_main_generic_call(_OuterCodeModel, GenericCall, ArgVars, Modes,
         MaybeRegTypes, Det, GoalInfo, Code, !CI, !CLD) :-
     get_module_info(!.CI, ModuleInfo),
-    get_vartypes(!.CI, VarTypes),
-    lookup_var_types(VarTypes, Args, Types),
-    arg_info.generic_call_arg_reg_types(ModuleInfo, VarTypes, GenericCall,
-        Args, MaybeRegTypes, ArgRegTypes),
-    arg_info.compute_in_and_out_vars_sep_regs(ModuleInfo, Args, Modes, Types,
-        ArgRegTypes, InVarsR, InVarsF, OutVarsR, OutVarsF),
+    arg_info.generic_call_arg_reg_types(ModuleInfo, GenericCall,
+        ArgVars, MaybeRegTypes, ArgRegTypes),
+    get_var_table(!.CI, VarTable),
+    arg_info.compute_in_and_out_vars_sep_regs(ModuleInfo, VarTable,
+        ArgVars, Modes, ArgRegTypes, InVarsR, InVarsF, OutVarsR, OutVarsF),
     module_info_get_globals(ModuleInfo, Globals),
     generic_call_info(Globals, GenericCall, length(InVarsR), length(InVarsF),
         CodeAddr, SpecifierArgInfos, FirstImmInputR, HoCallVariant),
@@ -484,11 +487,13 @@ generic_call_nonvar_setup(class_method(_, Method, _, _), HoCallVariant,
         InVarsF = [_ | _],
         sorry($pred, "float input reg")
     ),
+    Method = method_proc_num(MethodNum),
+    MethodNumConst = const(llconst_int(MethodNum)),
     (
         HoCallVariant = ho_call_known_num,
         clobber_reg(reg(reg_r, 2), !CLD),
         Code = singleton(
-            llds_instr(assign(reg(reg_r, 2), const(llconst_int(Method))),
+            llds_instr(assign(reg(reg_r, 2), MethodNumConst),
                 "Index of class method in typeclass info")
         )
     ;
@@ -499,7 +504,7 @@ generic_call_nonvar_setup(class_method(_, Method, _, _), HoCallVariant,
         NumInVarsF = 0,
         NumInVars = encode_num_generic_call_vars(NumInVarsR, NumInVarsF),
         Code = from_list([
-            llds_instr(assign(reg(reg_r, 2), const(llconst_int(Method))),
+            llds_instr(assign(reg(reg_r, 2), MethodNumConst),
                 "Index of class method in typeclass info"),
             llds_instr(assign(reg(reg_r, 3), const(llconst_int(NumInVars))),
                 "Assign number of immediate regular input arguments")

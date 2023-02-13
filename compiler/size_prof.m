@@ -88,6 +88,8 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 
+:- import_module io.
+
 %-----------------------------------------------------------------------------%
 
     % Specifies how term sizes are to be measured.
@@ -98,8 +100,9 @@
 
     % Perform the transformation on the specified predicate.
     %
-:- pred size_prof_process_proc_msg(construct_transform::in, pred_proc_id::in,
-    proc_info::in, proc_info::out, module_info::in, module_info::out) is det.
+:- pred size_prof_process_proc_msg(io.text_output_stream::in,
+    construct_transform::in, pred_proc_id::in, proc_info::in, proc_info::out,
+    module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -122,7 +125,6 @@
 :- import_module hlds.passes_aux.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
@@ -132,6 +134,7 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.term_norm.
 
 :- import_module assoc_list.
@@ -142,7 +145,6 @@
 :- import_module maybe.
 :- import_module pair.
 :- import_module require.
-:- import_module string.
 :- import_module term.
 :- import_module varset.
 
@@ -207,22 +209,22 @@
 
 :- type size_prof_info
     --->    size_prof_info(
+                spi_module_info             :: module_info,
                 spi_type_ctor_map           :: type_ctor_map,
                 spi_type_info_map           :: type_info_map,
                 spi_rev_type_ctor_map       :: rev_type_ctor_map,
                 spi_rev_type_info_map       :: rev_type_info_map,
                 spi_target_type_info_map    :: type_info_map,
                 spi_known_size_map          :: known_size_map,
-                spi_varset                  :: prog_varset,
-                spi_vartypes                :: vartypes,
+                spi_var_table               :: var_table,
                 spi_transform_op            :: construct_transform,
-                spi_rtti_varmaps            :: rtti_varmaps,
-                spi_module_info             :: module_info
+                spi_rtti_varmaps            :: rtti_varmaps
             ).
 
-size_prof_process_proc_msg(Transform, PredProcId, !ProcInfo, !ModuleInfo) :-
+size_prof_process_proc_msg(ProgressStream, Transform, PredProcId,
+        !ProcInfo, !ModuleInfo) :-
     trace [io(!IO)] (
-        write_proc_progress_message(!.ModuleInfo,
+        maybe_write_proc_progress_message(ProgressStream, !.ModuleInfo,
             "Size profiling", PredProcId, !IO)
     ),
     size_prof_process_proc(Transform, PredProcId, !ProcInfo, !ModuleInfo).
@@ -235,11 +237,11 @@ size_prof_process_proc(Transform, proc(PredId, ProcId), !ProcInfo,
         !ModuleInfo) :-
     module_info_get_globals(!.ModuleInfo, Globals),
     SimplifyTasks = list_to_simplify_tasks(Globals, []),
-    simplify_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo, !ProcInfo),
+    simplify_proc(maybe.no, SimplifyTasks, PredId, ProcId,
+        !ModuleInfo, !ProcInfo),
 
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InstMap0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
     % The with_types are needed to avoid a combinatorial explosion
@@ -250,10 +252,9 @@ size_prof_process_proc(Transform, proc(PredId, ProcId), !ProcInfo,
     RevTypeInfoMap0 = map.init : rev_type_info_map,
     TargetTypeInfoMap0 = map.init : type_info_map,
     KnownSizeMap0 = map.init : known_size_map,
-    Info0 = size_prof_info(TypeCtorMap0, TypeInfoMap0,
+    Info0 = size_prof_info(!.ModuleInfo, TypeCtorMap0, TypeInfoMap0,
         RevTypeCtorMap0, RevTypeInfoMap0, TargetTypeInfoMap0,
-        KnownSizeMap0, VarSet0, VarTypes0, Transform, RttiVarMaps0,
-        !.ModuleInfo),
+        KnownSizeMap0, VarTable0, Transform, RttiVarMaps0),
     rtti_varmaps_tvars(RttiVarMaps0, TVars),
     list.foldl(record_typeinfo_in_type_info_varmap(RttiVarMaps0), TVars,
         Info0, Info1),
@@ -263,15 +264,14 @@ size_prof_process_proc(Transform, proc(PredId, ProcId), !ProcInfo,
     % the nonlocal vars and the non-atomic instmap deltas.
     proc_info_get_headvars(!.ProcInfo, HeadVars),
     proc_info_get_inst_varset(!.ProcInfo, InstVarSet),
-    implicitly_quantify_clause_body_general(ordinary_nonlocals_no_lambda,
+    implicitly_quantify_clause_body_general(ord_nl_no_lambda,
         HeadVars, _Warnings, Goal1, Goal2,
-        Info ^ spi_varset, VarSet, Info ^ spi_vartypes, VarTypes,
+        Info ^ spi_var_table, VarTable,
         Info ^ spi_rtti_varmaps, RttiVarMaps),
-    recompute_instmap_delta(do_not_recompute_atomic_instmap_deltas,
-        Goal2, Goal, VarTypes, InstVarSet, InstMap0, !ModuleInfo),
+    recompute_instmap_delta(no_recomp_atomics,
+        VarTable, InstVarSet, InstMap0, Goal2, Goal, !ModuleInfo),
     proc_info_set_goal(Goal, !ProcInfo),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo).
 
 :- pred size_prof_process_goal(hlds_goal::in, hlds_goal::out,
@@ -624,7 +624,7 @@ size_prof_process_switch(First0, First, Later0, Later, !Info,
 
 size_prof_process_construct(LHS, RHS, UniMode, UnifyContext, Var, ConsId,
         Args, ArgModes, How, Unique, GoalInfo, GoalExpr, !Info) :-
-    lookup_var_type(!.Info ^ spi_vartypes, Var, VarType),
+    lookup_var_type(!.Info ^ spi_var_table, Var, VarType),
     type_to_ctor_det(VarType, VarTypeCtor),
     type_ctor_module_name_arity(VarTypeCtor,
         VarTypeCtorModule, VarTypeCtorName, _),
@@ -684,7 +684,7 @@ size_prof_process_construct(LHS, RHS, UniMode, UnifyContext, Var, ConsId,
 
 size_prof_process_deconstruct(Var, ConsId, Args, ArgModes, Goal0, GoalExpr,
         !Info) :-
-    lookup_var_type(!.Info ^ spi_vartypes, Var, VarType),
+    lookup_var_type(!.Info ^ spi_var_table, Var, VarType),
     type_to_ctor_det(VarType, VarTypeCtor),
     type_ctor_module_name_arity(VarTypeCtor, VarTypeCtorModule,
         VarTypeCtorName, _),
@@ -776,10 +776,10 @@ size_prof_process_cons_deconstruct(Var, Args, ArgModes, UnifyGoal, GoalExpr,
         % The increment_size primitive doesn't need Var's type_info,
         % so we make it a no_type_info_builtin.
         TermSizeProfBuiltin = mercury_term_size_prof_builtin_module,
-        generate_simple_call(!.Info ^ spi_module_info,
-            TermSizeProfBuiltin, "increment_size", pf_predicate, only_mode,
-            detism_det, purity_impure, [Var, SizeVar], [],
-            instmap_delta_bind_no_var, Context, UpdateGoal),
+        generate_plain_call(!.Info ^ spi_module_info, pf_predicate,
+            TermSizeProfBuiltin, "increment_size",
+            [], [Var, SizeVar], instmap_delta_bind_no_var, only_mode,
+            detism_det, purity_impure, [], Context, UpdateGoal),
         % Put UnifyGoal first in case it fails.
         Goals = [UnifyGoal] ++ ArgGoals ++ SizeGoals ++ [UpdateGoal],
         GoalExpr = conj(plain_conj, Goals)
@@ -803,7 +803,7 @@ size_prof_process_cons_deconstruct(Var, Args, ArgModes, UnifyGoal, GoalExpr,
 size_prof_process_args([], !KnownSize, !MaybeSizeVar, _, [], !Info).
 size_prof_process_args([Arg | Args], !KnownSize, !MaybeSizeVar, Context, Goals,
         !Info) :-
-    lookup_var_type(!.Info ^ spi_vartypes, Arg, Type),
+    lookup_var_type(!.Info ^ spi_var_table, Arg, Type),
     ( if map.search(!.Info ^ spi_known_size_map, Arg, ArgSize) then
         !:KnownSize = !.KnownSize + ArgSize,
         ArgGoals = []
@@ -835,19 +835,18 @@ generate_size_var(SizeVar0, KnownSize, Context, SizeVar, Goals, !Info) :-
         SizeVar = SizeVar0,
         Goals = []
     else
-        VarSet0 = !.Info ^ spi_varset,
-        VarTypes0 = !.Info ^ spi_vartypes,
-        make_int_const_construction_alloc(KnownSize,
-            yes("KnownSize"), KnownSizeGoal, KnownSizeVar,
-            VarSet0, VarSet1, VarTypes0, VarTypes1),
-        !Info ^ spi_varset := VarSet1,
-        !Info ^ spi_vartypes := VarTypes1,
-        get_new_var(int_type, "FinalSizeVar", SizeVar, !Info),
+        VarTable0 = !.Info ^ spi_var_table,
+        make_int_const_construction_alloc(KnownSize, "KnownSize",
+            KnownSizeGoal, KnownSizeVar, VarTable0, VarTable1),
+        !Info ^ spi_var_table := VarTable1,
+        get_new_var("FinalSizeVar", int_type, is_not_dummy_type, SizeVar,
+            !Info),
         TermSizeProfModule = mercury_term_size_prof_builtin_module,
-        generate_simple_call(!.Info ^ spi_module_info,
-            TermSizeProfModule, "term_size_plus", pf_function, mode_no(0),
-            detism_det, purity_pure, [SizeVar0, KnownSizeVar, SizeVar], [],
-            instmap_delta_bind_var(SizeVar), Context, AddGoal),
+        generate_plain_call(!.Info ^ spi_module_info, pf_function,
+            TermSizeProfModule, "term_size_plus",
+            [], [SizeVar0, KnownSizeVar, SizeVar],
+            instmap_delta_bind_var(SizeVar), mode_no(0),
+            detism_det, purity_pure, [], Context, AddGoal),
         Goals = [KnownSizeGoal, AddGoal]
     ).
 
@@ -888,29 +887,25 @@ make_type_info(Context, Type, TypeInfoVar, TypeInfoGoals, !Info) :-
         ;
             TVarLocn = typeclass_info(TypeClassInfoVar, Slot),
             TargetTypeInfoMap = !.Info ^ spi_target_type_info_map,
-            VarSet0 = !.Info ^ spi_varset,
-            VarTypes0 = !.Info ^ spi_vartypes,
+            VarTable0 = !.Info ^ spi_var_table,
             ( if map.search(TargetTypeInfoMap, Type, TargetVar) then
                 TypeInfoVar = TargetVar,
-                VarSet1 = VarSet0,
-                VarTypes1 = VarTypes0
+                VarTable1 = VarTable0
             else
                 RttiVarMaps0 = !.Info ^ spi_rtti_varmaps,
-                new_type_info_var_raw(Type, type_info,
-                    TypeInfoVar, VarSet0, VarSet1, VarTypes0, VarTypes1,
-                    RttiVarMaps0, RttiVarMaps),
+                new_type_info_var_vt(Type, type_info, TypeInfoVar,
+                    VarTable0, VarTable1, RttiVarMaps0, RttiVarMaps),
                 !Info ^ spi_rtti_varmaps := RttiVarMaps
             ),
-            make_int_const_construction_alloc(Slot, yes("TypeClassInfoSlot"),
-                SlotGoal, SlotVar, VarSet1, VarSet, VarTypes1, VarTypes),
-            !Info ^ spi_varset := VarSet,
-            !Info ^ spi_vartypes := VarTypes,
+            make_int_const_construction_alloc(Slot, "TypeClassInfoSlot",
+                SlotGoal, SlotVar, VarTable1, VarTable),
+            !Info ^ spi_var_table := VarTable,
             PrivateBuiltin = mercury_private_builtin_module,
-            generate_simple_call(!.Info ^ spi_module_info,
-                PrivateBuiltin, "type_info_from_typeclass_info", pf_predicate,
-                only_mode, detism_det, purity_pure,
-                [TypeClassInfoVar, SlotVar, TypeInfoVar], [],
-                instmap_delta_bind_var(TypeInfoVar), Context, ExtractGoal),
+            generate_plain_call(!.Info ^ spi_module_info, pf_predicate,
+                PrivateBuiltin, "type_info_from_typeclass_info",
+                [], [TypeClassInfoVar, SlotVar, TypeInfoVar],
+                instmap_delta_bind_var(TypeInfoVar), only_mode,
+                detism_det, purity_pure, [], Context, ExtractGoal),
             record_type_info_var(Type, TypeInfoVar, !Info),
             TypeInfoGoals = [SlotGoal, ExtractGoal]
         )
@@ -939,12 +934,10 @@ construct_type_info(Context, Type, TypeCtor, ArgTypes, CtorIsVarArity,
     (
         CtorIsVarArity = yes,
         list.length(ArgTypes, Arity),
-        VarSet0 = !.Info ^ spi_varset,
-        VarTypes0 = !.Info ^ spi_vartypes,
-        make_int_const_construction_alloc(Arity, yes("TupleArity"), ArityGoal,
-            ArityVar, VarSet0, VarSet1, VarTypes0, VarTypes1),
-        !Info ^ spi_varset := VarSet1,
-        !Info ^ spi_vartypes := VarTypes1,
+        VarTable0 = !.Info ^ spi_var_table,
+        make_int_const_construction_alloc(Arity, "TupleArity", ArityGoal,
+            ArityVar, VarTable0, VarTable1),
+        !Info ^ spi_var_table := VarTable1,
         FrontGoals = list.append(TypeCtorGoals, [ArityGoal]),
         ArgVars = [TypeCtorVar, ArityVar | ArgTypeInfoVars]
     ;
@@ -952,20 +945,21 @@ construct_type_info(Context, Type, TypeCtor, ArgTypes, CtorIsVarArity,
         FrontGoals = TypeCtorGoals,
         ArgVars = [TypeCtorVar | ArgTypeInfoVars]
     ),
-    VarSet2 = !.Info ^ spi_varset,
-    VarTypes2 = !.Info ^ spi_vartypes,
-    RttiVarMaps0 = !.Info ^ spi_rtti_varmaps,
+    VarTable2 = !.Info ^ spi_var_table,
+    RttiVarMaps2 = !.Info ^ spi_rtti_varmaps,
     TargetTypeInfoMap = !.Info ^ spi_target_type_info_map,
-    ( if map.search(TargetTypeInfoMap, Type, PrefTIVar) then
-        MaybePreferredVar = yes(PrefTIVar)
+    ( if map.search(TargetTypeInfoMap, Type, TypeInfoVarPrime) then
+        TypeInfoVar = TypeInfoVarPrime,
+        VarTable = VarTable2,
+        RttiVarMaps3 = RttiVarMaps2
     else
-        MaybePreferredVar = no
+        new_type_info_var_vt(Type, type_info, TypeInfoVar,
+            VarTable2, VarTable, RttiVarMaps2, RttiVarMaps3)
     ),
-    init_type_info_var(Type, ArgVars, MaybePreferredVar,
-        TypeInfoVar, TypeInfoGoal, VarSet2, VarSet, VarTypes2, VarTypes,
-        RttiVarMaps0, RttiVarMaps),
-    !Info ^ spi_varset := VarSet,
-    !Info ^ spi_vartypes := VarTypes,
+    init_type_info_var(Type, ArgVars, TypeInfoVar, TypeInfoGoal,
+        RttiVarMaps3, RttiVarMaps),
+
+    !Info ^ spi_var_table := VarTable,
     !Info ^ spi_rtti_varmaps := RttiVarMaps,
     TypeInfoGoals = ArgTypeInfoGoals ++ FrontGoals ++ [TypeInfoGoal].
 
@@ -992,15 +986,12 @@ make_type_ctor_info(TypeCtor, TypeArgs, TypeCtorVar, TypeCtorGoals, !Info) :-
         else
             construct_type(TypeCtor, [], Type)
         ),
-        VarSet0 = !.Info ^ spi_varset,
-        VarTypes0 = !.Info ^ spi_vartypes,
+        VarTable0 = !.Info ^ spi_var_table,
         RttiVarMaps0 = !.Info ^ spi_rtti_varmaps,
-        init_const_type_ctor_info_var(Type, TypeCtor,
-            TypeCtorVar, _, TypeCtorGoal, VarSet0, VarSet, VarTypes0, VarTypes,
-            RttiVarMaps0, RttiVarMaps),
+        init_const_type_ctor_info_var(Type, TypeCtor, TypeCtorVar, _ConsId,
+            TypeCtorGoal, VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
         TypeCtorGoals = [TypeCtorGoal],
-        !Info ^ spi_varset := VarSet,
-        !Info ^ spi_vartypes := VarTypes,
+        !Info ^ spi_var_table := VarTable,
         !Info ^ spi_rtti_varmaps := RttiVarMaps
     ).
 
@@ -1021,20 +1012,21 @@ make_type_ctor_info(TypeCtor, TypeArgs, TypeCtorVar, TypeCtorGoals, !Info) :-
 
 make_size_goal(TypeInfoVar, Arg, Context, SizeGoal,
         MaybeSizeVar0, MaybeSizeVar, !Info) :-
-    get_new_var(int_type, "SizeVar", SizeVar, !Info),
+    get_new_var("SizeVar", int_type, is_not_dummy_type, SizeVar, !Info),
     (
         MaybeSizeVar0 = yes(SizeVar0),
         Pred = "measure_size_acc",
-        Args = [TypeInfoVar, Arg, SizeVar0, SizeVar]
+        ArgVars = [Arg, SizeVar0, SizeVar]
     ;
         MaybeSizeVar0 = no,
         Pred = "measure_size",
-        Args = [TypeInfoVar, Arg, SizeVar]
+        ArgVars = [Arg, SizeVar]
     ),
     TermSizeProfBuiltin = mercury_term_size_prof_builtin_module,
-    generate_simple_call(!.Info ^ spi_module_info, TermSizeProfBuiltin, Pred,
-        pf_predicate, only_mode, detism_det, purity_pure, Args, [],
-        instmap_delta_bind_var(SizeVar), Context, SizeGoal),
+    generate_plain_call(!.Info ^ spi_module_info, pf_predicate,
+        TermSizeProfBuiltin, Pred,
+        [TypeInfoVar], ArgVars, instmap_delta_bind_var(SizeVar), only_mode,
+        detism_det, purity_pure, [], Context, SizeGoal),
     MaybeSizeVar = yes(SizeVar).
 
 %---------------------------------------------------------------------------%
@@ -1042,20 +1034,14 @@ make_size_goal(TypeInfoVar, Arg, Context, SizeGoal,
     % Create a new variable with a name constructed from Prefix and the
     % variable number.
     %
-:- pred get_new_var(mer_type::in, string::in, prog_var::out,
+:- pred get_new_var(string::in, mer_type::in, is_dummy_type::in, prog_var::out,
     size_prof_info::in, size_prof_info::out) is det.
 
-get_new_var(Type, Prefix, Var, !Info) :-
-    VarSet0 = !.Info ^ spi_varset,
-    VarTypes0 = !.Info ^ spi_vartypes,
-    varset.new_var(Var, VarSet0, VarSet1),
-    term.var_to_int(Var, VarNum),
-    string.int_to_string(VarNum, VarNumStr),
-    string.append(Prefix, VarNumStr, Name),
-    varset.name_var(Var, Name, VarSet1,  VarSet),
-    add_var_type(Var, Type, VarTypes0, VarTypes),
-    !Info ^ spi_varset := VarSet,
-    !Info ^ spi_vartypes := VarTypes.
+get_new_var(Prefix, Type, IsDummy, Var, !Info) :-
+    VarTable0 = !.Info ^ spi_var_table,
+    add_prefix_number_var_entry(Prefix, Type, IsDummy, Var,
+        VarTable0, VarTable),
+    !Info ^ spi_var_table := VarTable.
 
 %---------------------------------------------------------------------------%
 

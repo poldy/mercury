@@ -191,7 +191,7 @@
 :- import_module backend_libs.name_mangle.
 :- import_module backend_libs.proc_label.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.special_pred.
+:- import_module hlds.pred_name.
 :- import_module libs.
 :- import_module libs.trace_params.
 :- import_module ll_backend.llds_out.llds_out_code_addr.
@@ -199,7 +199,6 @@
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_event.
@@ -213,8 +212,7 @@
 :- import_module pair.
 :- import_module require.
 :- import_module string.
-:- import_module term.
-:- import_module varset.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -1293,7 +1291,7 @@ output_proc_static_slot(Info, Stream, ProcStatic, !Slot, !IO) :-
     ;
         AutoComments = no_auto_comments
     ),
-    quote_and_write_string(Stream, FileName, !IO),
+    output_quoted_string_c(Stream, FileName, !IO),
     io.write_string(Stream, ",", !IO),
     io.write_int(Stream, LineNumber, !IO),
     io.write_string(Stream, ",", !IO),
@@ -1624,7 +1622,7 @@ output_exec_trace_slot(Info, Stream, ExecTrace, !Slot, !IO) :-
     io.write_string(Stream, ",", !IO),
     write_maybe_slot_num(Stream, MaybeCallTableSlot, !IO),
     io.write_string(Stream, ",", !IO),
-    io.write_string(Stream, trace_level_rep(EffTraceLevel), !IO),
+    io.write_string(Stream, eff_trace_level_rep(EffTraceLevel), !IO),
     io.write_string(Stream, ",\n  ", !IO),
     io.write_int(Stream, Flags, !IO),
     io.write_string(Stream, ",", !IO),
@@ -1724,7 +1722,7 @@ output_threadscope_string_table_slot(Info, Stream, String, !Slot, !IO) :-
         AutoComments = no_auto_comments
     ),
     io.write_string(Stream, "{ ", !IO),
-    quote_and_write_string(Stream, String, !IO),
+    output_quoted_string_c(Stream, String, !IO),
     io.write_string(Stream, ", 0},\n", !IO).
 
 %-----------------------------------------------------------------------------%
@@ -1749,17 +1747,17 @@ output_alloc_sites_array(Info, Stream, AllocSites, !IO) :-
 
 output_alloc_site_slot(_Info, Stream, AllocSite, !Slot, !IO) :-
     AllocSite = alloc_site_info(ProcLabel, Context, TypeMsg, Words),
-    term.context_file(Context, FileName),
-    term.context_line(Context, LineNumber),
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
     io.write_string(Stream, "\t{ ", !IO),
     io.write_string(Stream,
         proc_label_to_c_string(add_label_prefix, ProcLabel), !IO),
     io.write_string(Stream, ", ", !IO),
-    quote_and_write_string(Stream, FileName, !IO),
+    output_quoted_string_c(Stream, FileName, !IO),
     io.write_string(Stream, ", ", !IO),
     io.write_int(Stream, LineNumber, !IO),
     io.write_string(Stream, ", ", !IO),
-    quote_and_write_string(Stream, TypeMsg, !IO),
+    output_quoted_string_c(Stream, TypeMsg, !IO),
     io.write_string(Stream, ", ", !IO),
     io.write_int(Stream, Words, !IO),
     io.write_string(Stream, "},\n", !IO).
@@ -1772,24 +1770,22 @@ output_layout_name_decl(Stream, LayoutName, !IO) :-
     io.write_string(Stream, ";\n", !IO).
 
 output_maybe_layout_name_decl(Stream, LayoutName, !DeclSet, !IO) :-
-    ( if decl_set_is_member(decl_layout_id(LayoutName), !.DeclSet) then
-        true
+    ( if decl_set_insert_new(decl_layout_id(LayoutName), !DeclSet) then
+        output_layout_name_decl(Stream, LayoutName, !IO)
     else
-        output_layout_name_decl(Stream, LayoutName, !IO),
-        decl_set_insert(decl_layout_id(LayoutName), !DeclSet)
+        true
     ).
 
 :- pred output_layout_decl(io.text_output_stream::in, layout_name::in,
     decl_set::in, decl_set::out, io::di, io::uo) is det.
 
 output_layout_decl(Stream, LayoutName, !DeclSet, !IO) :-
-    ( if decl_set_is_member(decl_layout_id(LayoutName), !.DeclSet) then
-        true
-    else
+    ( if decl_set_insert_new(decl_layout_id(LayoutName), !DeclSet) then
         output_layout_name_storage_type_name(Stream, LayoutName,
             not_being_defined, !IO),
-        io.write_string(Stream, ";\n", !IO),
-        decl_set_insert(decl_layout_id(LayoutName), !DeclSet)
+        io.write_string(Stream, ";\n", !IO)
+    else
+        true
     ).
 
 output_layout_array_name(Stream, UseMacro, ModuleName, ArrayName, !IO) :-
@@ -2466,13 +2462,13 @@ output_closure_layout_data_defn(_Info, Stream, ClosureData, !DeclSet, !IO) :-
     io.write_string(Stream, " = {\n{\n", !IO),
     output_proc_id(Stream, ClosureProcLabel, PredOrigin, !IO),
     io.write_string(Stream, "},\n", !IO),
-    quote_and_write_string(Stream, sym_name_to_string(ModuleName), !IO),
+    output_quoted_string_c(Stream, sym_name_to_string(ModuleName), !IO),
     io.write_string(Stream, ",\n", !IO),
-    quote_and_write_string(Stream, FileName, !IO),
+    output_quoted_string_c(Stream, FileName, !IO),
     io.write_string(Stream, ",\n", !IO),
     io.write_int(Stream, LineNumber, !IO),
     io.write_string(Stream, ",\n", !IO),
-    quote_and_write_string(Stream, GoalPath, !IO),
+    output_quoted_string_c(Stream, GoalPath, !IO),
     io.write_string(Stream, "\n};\n", !IO),
     decl_set_insert(decl_layout_id(LayoutName), !DeclSet).
 
@@ -2483,16 +2479,16 @@ output_proc_id(Stream, ProcLabel, Origin, !IO) :-
     (
         ProcLabel = ordinary_proc_label(DefiningModule, PredOrFunc,
             DeclaringModule, PredName0, Arity, ModeNum),
-        PredName = origin_name(Origin, PredName0),
+        PredName = layout_origin_name(Origin, PredName0),
         io.write_string(Stream, mr_pred_or_func_to_string(PredOrFunc), !IO),
         io.write_string(Stream, ",\n", !IO),
-        quote_and_write_string(Stream,
+        output_quoted_string_c(Stream,
             sym_name_to_string(DeclaringModule), !IO),
         io.write_string(Stream, ",\n", !IO),
-        quote_and_write_string(Stream,
+        output_quoted_string_c(Stream,
             sym_name_to_string(DefiningModule), !IO),
         io.write_string(Stream, ",\n", !IO),
-        quote_and_write_string(Stream, PredName, !IO),
+        output_quoted_string_c(Stream, PredName, !IO),
         io.write_string(Stream, ",\n", !IO),
         io.write_int(Stream, Arity, !IO),
         io.write_string(Stream, ",\n", !IO),
@@ -2502,124 +2498,22 @@ output_proc_id(Stream, ProcLabel, Origin, !IO) :-
         ProcLabel = special_proc_label(DefiningModule, SpecialPredId,
             TypeModule, TypeName, TypeArity, ModeNum),
         TypeCtor = type_ctor(qualified(TypeModule, TypeName), TypeArity),
-        PredName0 = special_pred_name(SpecialPredId, TypeCtor),
-        PredName = origin_name(Origin, PredName0),
-        quote_and_write_string(Stream, TypeName, !IO),
+        PredName0 = uci_pred_name(SpecialPredId, TypeCtor),
+        PredName = layout_origin_name(Origin, PredName0),
+        output_quoted_string_c(Stream, TypeName, !IO),
         io.write_string(Stream, ",\n", !IO),
-        quote_and_write_string(Stream, sym_name_to_string(TypeModule), !IO),
+        output_quoted_string_c(Stream, sym_name_to_string(TypeModule), !IO),
         io.write_string(Stream, ",\n", !IO),
-        quote_and_write_string(Stream,
+        output_quoted_string_c(Stream,
             sym_name_to_string(DefiningModule), !IO),
         io.write_string(Stream, ",\n", !IO),
-        quote_and_write_string(Stream, PredName, !IO),
+        output_quoted_string_c(Stream, PredName, !IO),
         io.write_string(Stream, ",\n", !IO),
         io.write_int(Stream, TypeArity, !IO),
         io.write_string(Stream, ",\n", !IO),
         io.write_int(Stream, ModeNum, !IO),
         io.write_string(Stream, "\n", !IO)
     ).
-
-:- func origin_name(pred_origin, string) = string.
-
-origin_name(Origin, Name0) = Name :-
-    (
-        Origin = origin_lambda(FileName0, LineNum, SeqNo),
-        ( if string.append("IntroducedFrom", _, Name0) then
-            string.replace_all(FileName0, ".", "_", FileName),
-            ( if SeqNo > 1 then
-                string.format("lambda%d_%s_%d",
-                    [i(SeqNo), s(FileName), i(LineNum)], Name)
-            else
-                string.format("lambda_%s_%d", [s(FileName), i(LineNum)], Name)
-            )
-        else
-            % If the lambda pred has a meaningful name, use it.
-            % This happens when the lambda is a partial application
-            % that happens to supply zero arguments.
-            Name = Name0
-        )
-    ;
-        Origin = origin_special_pred(_SpecialPredId, _TypeCtor),
-        Name = Name0
-        % We can't use the following code until we have adapted the
-        % code in the runtime and trace directories to handle the names
-        % of special preds the same way as we do user-defined names.
-%       (
-%           SpecialPredId = unify,
-%           SpecialName = "unify"
-%       ;
-%           SpecialPredId = compare,
-%           SpecialName = "compare"
-%       ;
-%           SpecialPredId = index,
-%           SpecialName = "index"
-%       ),
-%       TypeCtor = TypeSymName - TypeArity,
-%       TypeName = sym_name_to_string(TypeSymName),
-%       string.format("%s_for_%s_%d",
-%           [s(SpecialName), s(TypeName), i(TypeArity)], Name)
-    ;
-        Origin = origin_transformed(Transform, OldOrigin, _),
-        OldName = origin_name(OldOrigin, ""),
-        ( if OldName = "" then
-            Name = Name0
-        else
-            Name = OldName ++ "_" ++ pred_transform_name(Transform)
-        )
-    ;
-        ( Origin = origin_instance_method(_, _)
-        ; Origin = origin_class_method(_, _)
-        ; Origin = origin_created(_)
-        ; Origin = origin_assertion(_, _)
-        ; Origin = origin_solver_type(_, _, _)
-        ; Origin = origin_tabling(_, _)
-        ; Origin = origin_mutable(_, _, _)
-        ; Origin = origin_initialise
-        ; Origin = origin_finalise
-        ; Origin = origin_user(_)
-        ),
-        Name = Name0
-    ).
-
-:- func pred_transform_name(pred_transformation) = string.
-
-pred_transform_name(transform_higher_order_specialization(Seq)) =
-    "ho" ++ int_to_string(Seq).
-pred_transform_name(transform_higher_order_type_specialization(Proc)) =
-    "hoproc" ++ int_to_string(Proc).
-pred_transform_name(transform_type_specialization(Substs)) =
-    string.join_list("_", list.map(subst_to_name, Substs)).
-pred_transform_name(transform_unused_argument_elimination(Posns)) =
-    "ua_" ++ string.join_list("_", list.map(int_to_string, Posns)).
-pred_transform_name(transform_accumulator(Posns)) = "acc_" ++
-    string.join_list("_", list.map(int_to_string, Posns)).
-pred_transform_name(transform_loop_invariant(Proc)) =
-    "inv_" ++ int_to_string(Proc).
-pred_transform_name(transform_tuple(Proc)) = "tup_" ++ int_to_string(Proc).
-pred_transform_name(transform_untuple(Proc)) = "untup_" ++ int_to_string(Proc).
-pred_transform_name(transform_dependent_parallel_conjunction) =
-    "dep_par_conj_".
-pred_transform_name(transform_parallel_loop_control) = "par_lc".
-pred_transform_name(transform_return_via_ptr(ProcId, ArgPos)) =
-    "retptr_" ++ int_to_string(proc_id_to_int(ProcId)) ++ "_args"
-        ++ ints_to_string(ArgPos).
-pred_transform_name(transform_table_generator) = "table_gen".
-pred_transform_name(transform_stm_expansion) = "stm_expansion".
-pred_transform_name(transform_dnf(N)) = "dnf_" ++ int_to_string(N).
-pred_transform_name(transform_structure_reuse) = "structure_reuse".
-pred_transform_name(transform_source_to_source_debug) = "ssdebug".
-pred_transform_name(transform_direct_arg_in_out) = "daio".
-
-:- func ints_to_string(list(int)) = string.
-
-ints_to_string([]) = "".
-ints_to_string([N | Ns]) = "_" ++ int_to_string(N) ++ ints_to_string(Ns).
-
-:- func subst_to_name(pair(int, mer_type)) = string.
-
-subst_to_name(TVar - Type) = Str :-
-    TypeStr = mercury_type_to_string(varset.init, print_name_only, Type),
-    Str = string.format("%d/%s", [i(TVar), s(TypeStr)]).
 
 %-----------------------------------------------------------------------------%
 
@@ -2693,8 +2587,8 @@ output_module_layout_data_defn(Info, Stream, Data, !DeclSet, !IO) :-
         output_file_layout_data_defns(Info, Stream, ModuleName,
             0, FileLayouts, FileLayoutNames, !DeclSet, !IO),
         list.length(FileLayouts, FileLayoutVectorLengthA),
-        output_file_layout_vector_data_defn(Stream, ModuleName, FileLayoutNames,
-            FileLayoutVectorNameA, !DeclSet, !IO),
+        output_file_layout_vector_data_defn(Stream, ModuleName,
+            FileLayoutNames, FileLayoutVectorNameA, !DeclSet, !IO),
 
         io.write_string(Stream, "\n", !IO),
         LabelExecCountNameA = module_layout_label_exec_count(ModuleName,
@@ -2739,7 +2633,7 @@ output_module_layout_data_defn(Info, Stream, Data, !DeclSet, !IO) :-
     io.write_string(Stream, " = {\n", !IO),
     io.write_int(Stream, layout_version_number, !IO),
     io.write_string(Stream, ",\n", !IO),
-    quote_and_write_string(Stream, sym_name_to_string(ModuleName), !IO),
+    output_quoted_string_c(Stream, sym_name_to_string(ModuleName), !IO),
     io.write_string(Stream, ",\n", !IO),
     io.write_int(Stream, StringTableSize, !IO),
     io.write_string(Stream, ",\n", !IO),
@@ -2803,7 +2697,7 @@ output_module_layout_data_defn(Info, Stream, Data, !DeclSet, !IO) :-
         ;
             MaybeEventInfoB = yes({EventSetNameB, MaxNumAttrB, NumEventSpecsB,
                 EventSetDescLayoutNameB, EventSpecsLayoutNameB}),
-            quote_and_write_string(Stream, EventSetNameB, !IO),
+            output_quoted_string_c(Stream, EventSetNameB, !IO),
             io.write_string(Stream, ",\n", !IO),
             output_layout_name(Stream, EventSetDescLayoutNameB, !IO),
             io.write_string(Stream, ",\n", !IO),
@@ -3074,7 +2968,8 @@ output_module_string_table(Stream, ModuleName, _StringTableSize,
         string_with_0s(StringTable0), !DeclSet, !IO) :-
     TableName = module_layout_string_table(ModuleName),
     io.write_string(Stream, "\n", !IO),
-    output_layout_name_storage_type_name(Stream, TableName, being_defined, !IO),
+    output_layout_name_storage_type_name(Stream, TableName,
+        being_defined, !IO),
     io.write_string(Stream, " = {", !IO),
 
     % The string table cannot be zero size; it must contain at least an
@@ -3105,9 +3000,7 @@ output_module_string_table_chars(Stream, CurIndex, Count, String, !IO) :-
             char.to_int(Char, Int),
             Int =< 0x7f
         then
-            io.write_char(Stream, '''', !IO),
-            c_util.output_quoted_char(Stream, Char, !IO),
-            io.write_char(Stream, '''', !IO),
+            output_quoted_char_c(Stream, Char, !IO),
             io.write_string(Stream, ", ", !IO)
         else if
             char.to_utf8(Char, Codes)
@@ -3125,9 +3018,7 @@ output_module_string_table_chars(Stream, CurIndex, Count, String, !IO) :-
                 Count + 1, String, !IO)
         )
     else
-        io.write_char(Stream, '''', !IO),
-        c_util.output_quoted_char(Stream, char.det_from_int(0), !IO),
-        io.write_char(Stream, '''', !IO)
+        output_quoted_char_c(Stream, char.det_from_int(0), !IO)
     ).
 
 :- pred output_multi_byte_char_codes(io.text_output_stream::in, list(int)::in,
@@ -3202,7 +3093,7 @@ output_file_layout_data_defn(Info, Stream, ModuleName, FileNum, FileLayout,
     output_layout_name_storage_type_name(Stream, FileLayoutName,
         being_defined, !IO),
     io.write_string(Stream, " = {\n", !IO),
-    quote_and_write_string(Stream, FileName, !IO),
+    output_quoted_string_c(Stream, FileName, !IO),
     io.write_string(Stream, ",\n", !IO),
     io.write_int(Stream, VectorLengths, !IO),
     io.write_string(Stream, ",\n", !IO),
@@ -3453,14 +3344,6 @@ output_layout_name_in_vector(Stream, Prefix, Name, !IO) :-
     io.write_string(Stream, Prefix, !IO),
     output_layout_name(Stream, Name, !IO),
     io.write_string(Stream, ",\n", !IO).
-
-:- pred quote_and_write_string(io.text_output_stream::in, string::in,
-    io::di, io::uo) is det.
-
-quote_and_write_string(Stream, String, !IO) :-
-    io.write_string(Stream, """", !IO),
-    c_util.output_quoted_string(Stream, String, !IO),
-    io.write_string(Stream, """", !IO).
 
 :- pred long_length(list(T)::in, int::out) is det.
 

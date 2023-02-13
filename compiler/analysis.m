@@ -22,16 +22,17 @@
 :- module analysis.
 :- interface.
 
-:- import_module libs.
-:- import_module libs.globals.
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
+:- import_module libs.
+:- import_module libs.globals.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.file_names.
+:- import_module parse_tree.prog_data.
 
 :- import_module bool.
 :- import_module io.
@@ -170,7 +171,7 @@
     --->    func_id(
                 fid_pf      :: pred_or_func,
                 fid_name    :: string,
-                fid_arity   :: int,
+                fid_arity   :: pred_form_arity,
                 fid_mode    :: proc_id
             ).
 
@@ -330,6 +331,7 @@
 
 :- import_module map.
 :- import_module require.
+:- import_module term_context.
 :- import_module type_desc.
 :- import_module univ.
 
@@ -449,7 +451,7 @@
 ].
 :- instance to_term(any_call) where [
     ( to_term(any_call) = Term :-
-        Term = term.functor(atom("any"), [], context_init)
+        Term = term.functor(atom("any"), [], dummy_context)
     ),
     ( from_term(Term, any_call) :-
         Term = term.functor(atom("any"), [], _)

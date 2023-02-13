@@ -14,7 +14,7 @@
 :- module parse_tree.parse_type_name.
 :- interface.
 
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.prog_data.
 
@@ -55,13 +55,13 @@
     is semidet.
 
 :- pred parse_type(allow_ho_inst_info::in, varset::in,
-    cord(format_component)::in, term::in, maybe1(mer_type)::out) is det.
+    cord(format_piece)::in, term::in, maybe1(mer_type)::out) is det.
 
 :- pred maybe_parse_types(allow_ho_inst_info::in, list(term)::in,
     list(mer_type)::out) is semidet.
 
 :- pred parse_types(allow_ho_inst_info::in, varset::in,
-    cord(format_component)::in, list(term)::in,
+    cord(format_piece)::in, list(term)::in,
     maybe1(list(mer_type))::out) is det.
 
 %---------------------%
@@ -74,7 +74,7 @@
     --->    dont_require_tm_mode
     ;       require_tm_mode.
 
-:- type arg_context_func == (func(int) = cord(format_component)).
+:- type arg_context_func == (func(int) = cord(format_piece)).
 
 :- pred parse_type_and_modes(maybe_constrain_inst_vars::in,
     maybe_require_tm_mode::in, why_no_ho_inst_info::in,
@@ -84,7 +84,7 @@
 
 :- pred parse_type_and_mode(maybe_constrain_inst_vars::in,
     maybe_require_tm_mode::in, why_no_ho_inst_info::in,
-    varset::in, cord(format_component)::in,
+    varset::in, cord(format_piece)::in,
     term::in, maybe1(type_and_mode)::out) is det.
 
 %---------------------%
@@ -107,11 +107,12 @@
 :- import_module int.
 :- import_module maybe.
 :- import_module require.
+:- import_module string.
 
 %---------------------------------------------------------------------------%
 
-:- func arg_context_pieces(cord(format_component), pred_or_func, int) =
-    cord(format_component).
+:- func arg_context_pieces(cord(format_piece), pred_or_func, int) =
+    cord(format_piece).
 
 arg_context_pieces(ContextPieces, PorF, ArgNum) =
     ContextPieces ++ cord.from_list([lower_case_next_if_not_first,
@@ -199,7 +200,7 @@ parse_type(AllowHOInstInfo, VarSet, ContextPieces, Term, Result) :-
     ).
 
 :- pred parse_compound_type(allow_ho_inst_info::in, term::in, varset::in,
-    cord(format_component)::in, known_compound_type_kind(term)::in,
+    cord(format_piece)::in, known_compound_type_kind(term)::in,
     maybe1(mer_type)::out) is det.
 
 parse_compound_type(AllowHOInstInfo, Term, VarSet, ContextPieces,
@@ -360,7 +361,8 @@ parse_compound_type(AllowHOInstInfo, Term, VarSet, ContextPieces,
                 quote("func(<arg_types>) = <ret_type>")],
             AllowPieces =
                 [quote("pred(<arg_types_modes>) is <detism>"), nl,
-                quote("func(<arg_types_modes>) = <ret_type_mode> is <detism>")],
+                quote("func(<arg_types_modes>) = " ++
+                    "<ret_type_mode> is <detism>")],
             (
                 AllowHOInstInfo = allow_ho_inst_info,
                 FormPieces = AlwaysPieces ++ [nl | AllowPieces]
@@ -379,7 +381,7 @@ parse_compound_type(AllowHOInstInfo, Term, VarSet, ContextPieces,
         )
     ).
 
-:- pred parse_ho_type_and_inst(varset::in, cord(format_component)::in,
+:- pred parse_ho_type_and_inst(varset::in, cord(format_piece)::in,
     term::in, term::in, purity::in, maybe1(mer_type)::out) is det.
 
 parse_ho_type_and_inst(VarSet, ContextPieces, BeforeIsTerm, AfterIsTerm,
@@ -424,7 +426,7 @@ parse_ho_type_and_inst(VarSet, ContextPieces, BeforeIsTerm, AfterIsTerm,
         MaybeType = error1([HOSpec])
     ).
 
-:- pred parse_ho_type_and_inst_2(varset::in, cord(format_component)::in,
+:- pred parse_ho_type_and_inst_2(varset::in, cord(format_piece)::in,
     purity::in, list(type_and_mode)::in, list(error_spec)::in,
     maybe(maybe1(type_and_mode))::in, maybe1(determinism)::in,
     maybe1(mer_type)::out) is det.
@@ -505,7 +507,7 @@ parse_types_no_modes(AllowHOInstInfo, Varset, ArgContextFunc, [Term | Terms],
     ).
 
 :- pred parse_type_no_mode(allow_ho_inst_info::in, varset::in,
-    cord(format_component)::in, term::in, maybe1(mer_type)::out) is det.
+    cord(format_piece)::in, term::in, maybe1(mer_type)::out) is det.
 
 parse_type_no_mode(AllowHOInstInfo, Varset, ContextPieces, Term, MaybeType) :-
     ( if Term = term.functor(term.atom("::"), [_, _], _) then
@@ -541,7 +543,7 @@ parse_types(AllowHOInstInfo, VarSet, ContextPieces, Terms, Result) :-
     ).
 
 :- pred parse_types_acc(allow_ho_inst_info::in, varset::in,
-    cord(format_component)::in, list(term)::in,
+    cord(format_piece)::in, list(term)::in,
     list(mer_type)::in, list(mer_type)::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
@@ -788,7 +790,7 @@ is_known_type_name_args(Name, Args, KnownType) :-
         KnownType = known_type_compound(kctk_apply(Args))
     ).
 
-:- func no_ho_inst_allowed_result(cord(format_component), why_no_ho_inst_info,
+:- func no_ho_inst_allowed_result(cord(format_piece), why_no_ho_inst_info,
     varset, term) = maybe1(mer_type).
 
 no_ho_inst_allowed_result(ContextPieces, Why, VarSet, Term) = Result :-

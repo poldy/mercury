@@ -50,8 +50,8 @@
 
     % Transform the given procedure if it is in the complexity map.
     %
-:- pred complexity_process_proc_msg(int::in, complexity_proc_map::in,
-    pred_proc_id::in, proc_info::in, proc_info::out,
+:- pred complexity_process_proc_msg(io.text_output_stream::in, int::in,
+    complexity_proc_map::in, pred_proc_id::in, proc_info::in, proc_info::out,
     module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
@@ -68,7 +68,6 @@
 :- import_module hlds.instmap.
 :- import_module hlds.passes_aux.
 :- import_module hlds.pred_table.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
@@ -84,6 +83,7 @@
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.term_norm.
 
 :- import_module assoc_list.
@@ -94,7 +94,6 @@
 :- import_module require.
 :- import_module string.
 :- import_module term.
-:- import_module varset.
 
 %-----------------------------------------------------------------------------%
 
@@ -167,7 +166,7 @@ complexity_proc_name(ModuleInfo, PredId, ProcId) = FullName :-
 
 %-----------------------------------------------------------------------------%
 
-complexity_process_proc_msg(NumProcs, ProcMap, PredProcId,
+complexity_process_proc_msg(ProgressStream, NumProcs, ProcMap, PredProcId,
         !ProcInfo, !ModuleInfo) :-
     PredProcId = proc(PredId, ProcId),
     IsInMap = is_in_complexity_proc_map(ProcMap, !.ModuleInfo,
@@ -180,9 +179,9 @@ complexity_process_proc_msg(NumProcs, ProcMap, PredProcId,
         (
             Verbose = yes,
             trace [io(!IO)] (
-                write_proc_progress_message(!.ModuleInfo,
+                maybe_write_proc_progress_message(ProgressStream, !.ModuleInfo,
                     "Applying complexity experiment transformation to",
-                    PredId, ProcId, !IO)
+                    PredProcId, !IO)
             )
         ;
             Verbose = no
@@ -267,8 +266,7 @@ complexity_process_proc(NumProcs, ProcNum, FullName, PredId,
     determinism_to_code_model(Detism, CodeModel),
     proc_info_get_headvars(!.ProcInfo, HeadVars),
     proc_info_get_argmodes(!.ProcInfo, ArgModes),
-    proc_info_get_varset(!.ProcInfo, VarSet),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes),
+    proc_info_get_var_table(!.ProcInfo, VarTable),
     proc_info_get_goal(!.ProcInfo, OrigGoal),
     Context = goal_info_get_context(OrigGoalInfo),
     % Even if the original goal doesn't use all of the headvars, the code
@@ -281,9 +279,10 @@ complexity_process_proc(NumProcs, ProcNum, FullName, PredId,
     goal_info_set_purity(purity_impure, OrigGoalInfo, ImpureOrigGoalInfo),
 
     IsActiveVarName = "IsActive",
-    generate_new_var(IsActiveVarName, is_active_type, !ProcInfo, IsActiveVar),
+    generate_new_var(IsActiveVarName, is_active_type, is_not_dummy_type,
+        IsActiveVar, !ProcInfo),
 
-    classify_args(HeadVars, ArgModes, !.ModuleInfo, VarSet, VarTypes,
+    classify_complexity_args(!.ModuleInfo, VarTable, HeadVars, ArgModes,
         VarInfos),
     allocate_slot_numbers_cl(VarInfos, 0, NumberedProfiledVars),
     list.length(NumberedProfiledVars, NumProfiledVars),
@@ -307,28 +306,28 @@ complexity_process_proc(NumProcs, ProcNum, FullName, PredId,
         int_to_string(NumProfiledVars) ++ ", " ++
         IsActiveVarName ++ ");\n",
 
-    complexity_generate_foreign_proc(IsActivePred, detism_det,
+    complexity_generate_call_foreign_proc(IsActivePred, detism_det,
         [IsActiveOutputArg], [], IsActiveStr, [IsActiveVar],
         !.ModuleInfo, Context, IsActiveGoal),
 
     ExitPred = "complexity_exit_proc",
     ExitStr = "\tMR_" ++ ExitPred ++ "(" ++
         ProcNumStr ++ ", " ++ slot_var_name ++ ");\n",
-    complexity_generate_foreign_proc(ExitPred, detism_det,
+    complexity_generate_call_foreign_proc(ExitPred, detism_det,
         [SlotInputArg], [], ExitStr, [],
         !.ModuleInfo, Context, ExitGoal),
 
     FailPred = "complexity_fail_proc",
     FailStr = "\tMR_" ++ FailPred ++ "(" ++
         ProcNumStr ++ ", " ++ slot_var_name ++ ");\n",
-    complexity_generate_foreign_proc(FailPred, detism_failure,
+    complexity_generate_call_foreign_proc(FailPred, detism_failure,
         [SlotInputArg], [], FailStr, [],
         !.ModuleInfo, Context, FailGoal),
 
     RedoPred = "complexity_redo_proc",
     RedoStr = "\tMR_" ++ RedoPred ++ "(" ++
         ProcNumStr ++ ", " ++ slot_var_name ++ ");\n",
-    complexity_generate_foreign_proc(RedoPred, detism_failure,
+    complexity_generate_call_foreign_proc(RedoPred, detism_failure,
         [SlotInputArg], [], RedoStr, [],
         !.ModuleInfo, Context, RedoGoal0),
 
@@ -418,7 +417,8 @@ complexity_process_proc(NumProcs, ProcNum, FullName, PredId,
 generate_slot_goals(ProcNum, NumberedVars, NumProfiledVars, Context, PredId,
         !ProcInfo, !ModuleInfo, SlotVar, SlotVarName, Goals) :-
     SlotVarName = slot_var_name,
-    generate_new_var(SlotVarName, int_type, !ProcInfo, SlotVar),
+    generate_new_var(SlotVarName, int_type, is_not_dummy_type,
+        SlotVar, !ProcInfo),
     ProcVarName = "proc",
     generate_size_goals(NumberedVars, Context, NumProfiledVars,
         ProcVarName, SlotVarName, PredId, !ProcInfo, !ModuleInfo,
@@ -432,7 +432,7 @@ generate_slot_goals(ProcNum, NumberedVars, NumProfiledVars, Context, PredId,
         int_to_string(ProcNum) ++ ", " ++ SlotVarName ++ ");\n",
     ProcStr = "\t" ++ ProcVarName ++ " = &MR_complexity_procs[" ++
         int_to_string(ProcNum) ++ "];\n",
-    complexity_generate_foreign_proc(PredName, detism_det, [SlotVarArg],
+    complexity_generate_call_foreign_proc(PredName, detism_det, [SlotVarArg],
         ForeignArgs, DeclCodeStr ++ PredCodeStr ++ ProcStr ++ FillCodeStr,
         [SlotVar], !.ModuleInfo, Context, CallGoal),
     list.append(PrefixGoals, [CallGoal], Goals).
@@ -462,14 +462,17 @@ generate_size_goals([Var - VarSeqNum | NumberedVars], Context, NumProfiledVars,
 generate_size_goal(ArgVar, VarSeqNum, Context, NumProfiledVars, ProcVarName,
         SlotVarName, PredId, !ProcInfo, !ModuleInfo, Goals,
         ForeignArgs, CodeStr) :-
-    proc_info_get_vartypes(!.ProcInfo, VarTypes1),
-    lookup_var_type(VarTypes1, ArgVar, VarType),
+    % XXX We should pass around !VarTables, not !ProcInfos.
+    proc_info_get_var_table(!.ProcInfo, VarTable1),
+    lookup_var_type(VarTable1, ArgVar, VarType),
     MacroName = "MR_complexity_fill_size_slot",
+    % XXX This call is overkill; we can get a new type_info var
+    % without updating !ProcInfo, much less !ModuleInfo.
     make_type_info_var(VarType, Context, PredId, !ProcInfo, !ModuleInfo,
         TypeInfoVar, Goals),
     % Since we just created TypeInfoVar, it isn't in VarTypes1.
-    proc_info_get_vartypes(!.ProcInfo, VarTypes2),
-    lookup_var_type(VarTypes2, TypeInfoVar, TypeInfoType),
+    proc_info_get_var_table(!.ProcInfo, VarTable2),
+    lookup_var_type(VarTable2, TypeInfoVar, TypeInfoType),
     ArgName = "arg" ++ int_to_string(VarSeqNum),
     TypeInfoArgName = "input_typeinfo" ++ int_to_string(VarSeqNum),
     ForeignArg = foreign_arg(ArgVar,
@@ -489,55 +492,59 @@ generate_size_goal(ArgVar, VarSeqNum, Context, NumProfiledVars, ProcVarName,
 
 %-----------------------------------------------------------------------------%
 
-:- pred generate_new_var(string::in, mer_type::in,
-    proc_info::in, proc_info::out, prog_var::out) is det.
+:- pred generate_new_var(string::in, mer_type::in, is_dummy_type::in,
+    prog_var::out, proc_info::in, proc_info::out) is det.
 
-generate_new_var(Name, Type, !ProcInfo, Var) :-
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-    varset.new_named_var(Name, Var, VarSet0, VarSet),
-    add_var_type(Var, Type, VarTypes0, VarTypes),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo).
+generate_new_var(Name, Type, IsDummy, Var, !ProcInfo) :-
+    Entry = vte(Name, Type, IsDummy),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
+    add_var_entry(Entry, Var, VarTable0, VarTable),
+    proc_info_set_var_table(VarTable, !ProcInfo).
 
-:- pred complexity_generate_foreign_proc(string::in, determinism::in,
+:- pred complexity_generate_call_foreign_proc(string::in, determinism::in,
     list(foreign_arg)::in, list(foreign_arg)::in, string::in,
     list(prog_var)::in, module_info::in, term.context::in, hlds_goal::out)
     is det.
 
-complexity_generate_foreign_proc(PredName, Detism, Args, ExtraArgs,
+complexity_generate_call_foreign_proc(PredName, Detism, Args, ExtraArgs,
         Code, BoundVars, ModuleInfo, Context, Goal) :-
     BuiltinModule = mercury_term_size_prof_builtin_module,
     Attrs0 = default_attributes(lang_c),
     set_may_call_mercury(proc_will_not_call_mercury, Attrs0, Attrs),
     MaybeTraceRuntimeCond = no,
-    goal_util.generate_foreign_proc(ModuleInfo, BuiltinModule, PredName,
-        pf_predicate, only_mode, Detism, purity_impure, Attrs, Args, ExtraArgs,
-        MaybeTraceRuntimeCond, Code, [], instmap_delta_bind_vars(BoundVars),
-        Context, Goal).
+    generate_call_foreign_proc(ModuleInfo, pf_predicate,
+        BuiltinModule, PredName,
+        [], Args, ExtraArgs, instmap_delta_bind_vars(BoundVars),
+        only_mode, Detism, purity_impure, [], Attrs,
+        MaybeTraceRuntimeCond, Code, Context, Goal).
 
 %-----------------------------------------------------------------------------%
 
-:- pred classify_args(list(prog_var)::in, list(mer_mode)::in, module_info::in,
-    prog_varset::in, vartypes::in,
+:- pred classify_complexity_args(module_info::in, var_table::in,
+    list(prog_var)::in, list(mer_mode)::in,
     assoc_list(prog_var, complexity_arg_info)::out) is det.
 
-classify_args([], [], _, _, _, []).
-classify_args([_ | _], [], _, _, _, _) :-
+classify_complexity_args(_, _, [], [], []).
+classify_complexity_args(_, _, [_ | _], [], _) :-
     unexpected($pred, "lists not same length").
-classify_args([], [_ | _], _, _, _, _) :-
+classify_complexity_args(_, _, [], [_ | _], _) :-
     unexpected($pred, "lists not same length").
-classify_args([Var | Vars], [Mode | Modes], ModuleInfo, VarSet, VarTypes,
+classify_complexity_args(ModuleInfo, VarTable, [Var | Vars], [Mode | Modes],
         [Var - complexity_arg_info(MaybeName, Kind) | VarInfos]) :-
-    classify_args(Vars, Modes, ModuleInfo, VarSet, VarTypes, VarInfos),
-    ( if varset.search_name(VarSet, Var, Name) then
-        MaybeName = yes(Name)
-    else
+    classify_complexity_args(ModuleInfo, VarTable, Vars, Modes, VarInfos),
+    lookup_var_entry(VarTable, Var, Entry),
+    Entry = vte(Name, VarType, IsDummy),
+    ( if Name = "" then
         MaybeName = no
+    else
+        MaybeName = yes(Name)
     ),
     ( if mode_is_fully_input(ModuleInfo, Mode) then
-        lookup_var_type(VarTypes, Var, VarType),
-        ( if zero_size_type(ModuleInfo, VarType) then
+        ( if
+            ( IsDummy = is_dummy_type
+            ; zero_size_type(ModuleInfo, VarType)
+            )
+        then
             Kind = complexity_input_fixed_size
         else
             Kind = complexity_input_variable_size
@@ -585,7 +592,7 @@ is_active_type = Type :-
 make_type_info_var(Type, Context, PredId, !ProcInfo, !ModuleInfo,
         TypeInfoVar, TypeInfoGoals) :-
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
-    polymorphism_make_type_info_var_raw(Type, Context,
+    polymorphism_make_type_info_var_mi(Type, Context,
         TypeInfoVar, TypeInfoGoals, !ModuleInfo,
         PredInfo0, PredInfo, !ProcInfo),
     expect(unify(PredInfo0, PredInfo), $pred, "modified pred_info").

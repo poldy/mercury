@@ -36,6 +36,7 @@
 :- type char == character.
 
 :- instance enum(character).
+:- instance uenum(character).
 
     % `to_int'/1 and `to_int(in, out)' convert a character to its
     % corresponding numerical code (integer value).
@@ -70,6 +71,19 @@
     %
 :- func det_from_int(int) = char.
 :- pred det_from_int(int::in, char::out) is det.
+
+    % Converts a character to its numerical character code (unsigned integer).
+    %
+:- func to_uint(char) = uint.
+
+    % Converts an unsigned integer to its corresponding character, if any.
+    %
+:- pred from_uint(uint::in, char::out) is semidet.
+
+    % Converts an unsigned integer to its corresponding character.
+    % Throws an exception if there isn't one.
+    %
+:- func det_from_uint(uint) = char.
 
     % Returns the minimum numerical character code.
     %
@@ -355,6 +369,7 @@
     % Convert a char to a pretty_printer.doc for formatting.
     %
 :- func char_to_doc(char) = pretty_printer.doc.
+:- pragma obsolete(func(char_to_doc/1), [pretty_printer.char_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 
@@ -390,7 +405,6 @@
 
 :- import_module int.
 :- import_module require.
-:- import_module term_io.
 :- import_module uint.
 :- import_module uint16.
 :- import_module uint8.
@@ -400,6 +414,11 @@
         to_int(X, Y)),
     (from_int(X) = Y :-
         to_int(Y, X))
+].
+
+:- instance uenum(character) where [
+    func(to_uint/1) is char.to_uint,
+    pred(from_uint/2) is char.from_uint
 ].
 
 :- pragma foreign_decl("C", "#include <limits.h>").
@@ -486,6 +505,43 @@ det_from_int(Int) = Char :-
 
 det_from_int(Int, Char) :-
     ( if from_int(Int, CharPrime) then
+        Char = CharPrime
+    else
+        unexpected($pred, "conversion failed")
+    ).
+
+%---------------------------------------------------------------------------%
+
+to_uint(Char) = UInt :-
+    UInt = uint.cast_from_int(char.to_int(Char)).
+
+:- pragma foreign_proc("C",
+    from_uint(UInt::in, Character::out),
+    [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
+        does_not_affect_liveness],
+"
+    Character = (MR_UnsignedChar) UInt;
+    SUCCESS_INDICATOR = (UInt <= 0x10ffff);
+").
+
+:- pragma foreign_proc("C#",
+    from_uint(UInt::in, Character::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Character = (int) UInt;
+    SUCCESS_INDICATOR = (UInt <= 0x10ffff);
+").
+
+:- pragma foreign_proc("Java",
+    from_uint(UInt::in, Character::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Character = UInt;
+    SUCCESS_INDICATOR = ((UInt & 0xffffffffL) <= (0x10ffff & 0xffffffffL));
+").
+
+det_from_uint(UInt) = Char :-
+    ( if char.from_uint(UInt, CharPrime) then
         Char = CharPrime
     else
         unexpected($pred, "conversion failed")
@@ -636,67 +692,19 @@ is_alnum_or_underscore(Char) :-
     %       is_alpha_or_underscore(Char)
     %   ).
 
-    ( Char = '0'
-    ; Char = '1'
-    ; Char = '2'
-    ; Char = '3'
-    ; Char = '4'
-    ; Char = '5'
-    ; Char = '6'
-    ; Char = '7'
-    ; Char = '8'
-    ; Char = '9'
-    ; Char = 'a'
-    ; Char = 'b'
-    ; Char = 'c'
-    ; Char = 'd'
-    ; Char = 'e'
-    ; Char = 'f'
-    ; Char = 'g'
-    ; Char = 'h'
-    ; Char = 'i'
-    ; Char = 'j'
-    ; Char = 'k'
-    ; Char = 'l'
-    ; Char = 'm'
-    ; Char = 'n'
-    ; Char = 'o'
-    ; Char = 'p'
-    ; Char = 'q'
-    ; Char = 'r'
-    ; Char = 's'
-    ; Char = 't'
-    ; Char = 'u'
-    ; Char = 'v'
-    ; Char = 'w'
-    ; Char = 'x'
-    ; Char = 'y'
+    ( Char = '0' ; Char = '1' ; Char = '2' ; Char = '3' ; Char = '4'
+    ; Char = '5' ; Char = '6' ; Char = '7' ; Char = '8' ; Char = '9'
+    ; Char = 'a' ; Char = 'b' ; Char = 'c' ; Char = 'd' ; Char = 'e'
+    ; Char = 'f' ; Char = 'g' ; Char = 'h' ; Char = 'i' ; Char = 'j'
+    ; Char = 'k' ; Char = 'l' ; Char = 'm' ; Char = 'n' ; Char = 'o'
+    ; Char = 'p' ; Char = 'q' ; Char = 'r' ; Char = 's' ; Char = 't'
+    ; Char = 'u' ; Char = 'v' ; Char = 'w' ; Char = 'x' ; Char = 'y'
     ; Char = 'z'
-    ; Char = 'A'
-    ; Char = 'B'
-    ; Char = 'C'
-    ; Char = 'D'
-    ; Char = 'E'
-    ; Char = 'F'
-    ; Char = 'G'
-    ; Char = 'H'
-    ; Char = 'I'
-    ; Char = 'J'
-    ; Char = 'K'
-    ; Char = 'L'
-    ; Char = 'M'
-    ; Char = 'N'
-    ; Char = 'O'
-    ; Char = 'P'
-    ; Char = 'Q'
-    ; Char = 'R'
-    ; Char = 'S'
-    ; Char = 'T'
-    ; Char = 'U'
-    ; Char = 'V'
-    ; Char = 'W'
-    ; Char = 'X'
-    ; Char = 'Y'
+    ; Char = 'A' ; Char = 'B' ; Char = 'C' ; Char = 'D' ; Char = 'E'
+    ; Char = 'F' ; Char = 'G' ; Char = 'H' ; Char = 'I' ; Char = 'J'
+    ; Char = 'K' ; Char = 'L' ; Char = 'M' ; Char = 'N' ; Char = 'O'
+    ; Char = 'P' ; Char = 'Q' ; Char = 'R' ; Char = 'S' ; Char = 'T'
+    ; Char = 'U' ; Char = 'V' ; Char = 'W' ; Char = 'X' ; Char = 'Y'
     ; Char = 'Z'
     ; Char = '_'
     ).
@@ -1135,7 +1143,7 @@ is_private_use(Char) :-
     ; 0x100000 =< Int, Int =< 0x10fffd % Supplemental Private Use Area-B.
     ).
 
-char_to_doc(C) = str(term_io.quoted_char(C)).
+char_to_doc(C) = pretty_printer.char_to_doc(C).
 
 %---------------------------------------------------------------------------%
 

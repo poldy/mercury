@@ -63,6 +63,7 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_inst_mode.
 :- import_module hlds.hlds_pred.
+:- import_module hlds.pred_name.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
@@ -78,7 +79,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -102,8 +103,8 @@ write_hlds_defns(Stream, ModuleInfo, !IO) :-
     gather_local_mode_names(ModuleName, ModeCtors,
         set.init, ModeNameArities),
 
-    module_info_get_preds(ModuleInfo, Preds),
-    map.to_sorted_assoc_list(Preds, PredDefns),
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+    map.to_sorted_assoc_list(PredIdTable, PredDefns),
     gather_local_pred_names(ModuleName, PredDefns,
         set.init, FuncNameArities, set.init, PredNameArities),
 
@@ -217,7 +218,7 @@ gather_local_pred_names(ModuleName, [PredDefn | PredDefns],
     pred_info_get_origin(PredInfo, Origin),
     ( if
         PredModuleName = ModuleName,
-        Origin = origin_user(_)
+        Origin = origin_user(user_made_pred(_, _, _))
     then
         pred_info_get_name(PredInfo, PredName),
         PredArity = pred_info_orig_arity(PredInfo),
@@ -278,8 +279,8 @@ gather_local_instance_names(ModuleName, [InstancePair | InstancePairs],
 gather_local_instance_names_for_class(_, _, [], !InstanceDescs).
 gather_local_instance_names_for_class(ModuleName, ClassId,
         [InstanceDefn | InstanceDefns], !InstanceDescs) :-
-    InstanceDefn = hlds_instance_defn(InstanceModuleName, _Types, OrigTypes,
-        _Status, _Context, _Constraints, _Body, _Interface, _TVarSet, _Proofs),
+    InstanceModuleName = InstanceDefn ^ instdefn_module,
+    OrigTypes = InstanceDefn ^ instdefn_orig_types,
     ( if InstanceModuleName = ModuleName then
         ClassId = class_id(ClassSymName, ClassArity),
         ClassName = unqualify_name(ClassSymName),
@@ -335,8 +336,8 @@ output_prefixed_strings(Stream, Prefix, [Str | Strs], !IO) :-
 write_hlds_defn_line_counts(Stream, ModuleInfo, !IO) :-
     module_info_get_name(ModuleInfo, ModuleName),
 
-    module_info_get_preds(ModuleInfo, Preds),
-    map.values(Preds, PredInfos),
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+    map.values(PredIdTable, PredInfos),
     list.foldl(gather_pred_line_counts(ModuleName), PredInfos,
         [], PredLineCounts),
 
@@ -350,8 +351,8 @@ write_hlds_defn_line_counts(Stream, ModuleInfo, !IO) :-
 write_hlds_defn_extents(Stream, ModuleInfo, !IO) :-
     module_info_get_name(ModuleInfo, ModuleName),
 
-    module_info_get_preds(ModuleInfo, Preds),
-    map.values(Preds, PredInfos),
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+    map.values(PredIdTable, PredInfos),
     list.foldl(gather_pred_line_counts(ModuleName), PredInfos,
         [], PredLineCounts),
 
@@ -381,7 +382,7 @@ gather_pred_line_counts(ModuleName, PredInfo, !PredLineCounts) :-
     pred_info_get_origin(PredInfo, Origin),
     ( if
         PredModuleName = ModuleName,
-        Origin = origin_user(_)
+        Origin = origin_user(user_made_pred(_, _, _))
     then
         pred_info_get_clauses_info(PredInfo, ClausesInfo),
         clauses_info_get_clauses_rep(ClausesInfo, ClausesRep, _ItemNumbers),

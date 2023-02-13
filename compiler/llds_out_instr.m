@@ -83,8 +83,6 @@
 :- import_module backend_libs.c_util.
 :- import_module backend_libs.export.
 :- import_module backend_libs.name_mangle.
-:- import_module check_hlds.
-:- import_module check_hlds.type_util.
 :- import_module hlds.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_pred.
@@ -605,18 +603,18 @@ output_instruction(Info, Stream, Instr, LabelOutputInfo, !IO) :-
             FrameInfo = ordinary_frame(Msg, Num),
             (
                 MaybeFailCont = yes(FailCont),
-                io.write_string(Stream, "\tMR_mkframe(""", !IO),
-                c_util.output_quoted_string(Stream, Msg, !IO),
-                io.write_string(Stream, """, ", !IO),
+                io.write_string(Stream, "\tMR_mkframe(", !IO),
+                output_quoted_string_c(Stream, Msg, !IO),
+                io.write_string(Stream, ", ", !IO),
                 io.write_int(Stream, Num, !IO),
                 io.write_string(Stream, ",\n\t\t", !IO),
                 output_code_addr(Stream, FailCont, !IO),
                 io.write_string(Stream, ");\n", !IO)
             ;
                 MaybeFailCont = no,
-                io.write_string(Stream, "\tMR_mkframe_no_redoip(""", !IO),
-                c_util.output_quoted_string(Stream, Msg, !IO),
-                io.write_string(Stream, """, ", !IO),
+                io.write_string(Stream, "\tMR_mkframe_no_redoip(", !IO),
+                output_quoted_string_c(Stream, Msg, !IO),
+                io.write_string(Stream, ", ", !IO),
                 io.write_int(Stream, Num, !IO),
                 io.write_string(Stream, ");\n", !IO)
             )
@@ -727,7 +725,8 @@ output_instruction(Info, Stream, Instr, LabelOutputInfo, !IO) :-
                     output_lval_as_word(Info, Stream, FlagLval, !IO)
                 ;
                     MaybeFlagLval = no,
-                    io.write_string(Stream, "MR_tag_reuse_or_alloc_heap(", !IO),
+                    io.write_string(Stream,
+                        "MR_tag_reuse_or_alloc_heap(", !IO),
                     output_lval_as_word(Info, Stream, Lval, !IO),
                     io.write_string(Stream, ", ", !IO),
                     output_ptag(Stream, Ptag, !IO)
@@ -854,7 +853,8 @@ output_instruction(Info, Stream, Instr, LabelOutputInfo, !IO) :-
             io.write_string(Stream, "\tMR_use_region_ite_else_nondet", !IO)
         ;
             UseOp = region_ite_nondet_cond_fail,
-            io.write_string(Stream, "\tMR_use_region_ite_nondet_cond_fail", !IO)
+            io.write_string(Stream, "\tMR_use_region_ite_nondet_cond_fail",
+                !IO)
         ;
             UseOp = region_disj_later,
             io.write_string(Stream, "\tMR_use_region_disj_later", !IO)
@@ -915,16 +915,15 @@ output_instruction(Info, Stream, Instr, LabelOutputInfo, !IO) :-
         (
             Kind = stack_incr_leaf,
             ( if N < max_leaf_stack_frame_size then
-                io.write_string(Stream, "\tMR_incr_sp_leaf(", !IO)
+                IncrSp = "MR_incr_sp_leaf"
             else
-                io.write_string(Stream, "\tMR_incr_sp(", !IO)
+                IncrSp = "MR_incr_sp"
             )
         ;
             Kind = stack_incr_nonleaf,
-            io.write_string(Stream, "\tMR_incr_sp(", !IO)
+            IncrSp = "MR_incr_sp"
         ),
-        io.write_int(Stream, N, !IO),
-        io.write_string(Stream, ");\n", !IO)
+        io.format(Stream, "\t%s(%d);\n", [s(IncrSp), i(N)], !IO)
         % Use the code below instead of the code above if you want to run
         % tools/framesize on the output of the compiler.
         % io.write_string(Stream, "\tMR_incr_sp_push_msg(", !IO),
@@ -934,14 +933,10 @@ output_instruction(Info, Stream, Instr, LabelOutputInfo, !IO) :-
         % io.write_string(Stream, """);\n", !IO)
     ;
         Instr = decr_sp(N),
-        io.write_string(Stream, "\tMR_decr_sp(", !IO),
-        io.write_int(Stream, N, !IO),
-        io.write_string(Stream, ");\n", !IO)
+        io.format(Stream, "\tMR_decr_sp(%d);\n", [i(N)], !IO)
     ;
         Instr = decr_sp_and_return(N),
-        io.write_string(Stream, "\tMR_decr_sp_and_return(", !IO),
-        io.write_int(Stream, N, !IO),
-        io.write_string(Stream, ");\n", !IO)
+        io.format(Stream, "\tMR_decr_sp_and_return(%d);\n", [i(N)], !IO)
     ;
         Instr = foreign_proc_code(Decls, Components, _, _, _, _, _,
             MaybeDefLabel, _, _),
@@ -1370,12 +1365,8 @@ output_live_value_type(Stream, live_value_unwanted, !IO) :-
     io.write_string(Stream, "unwanted", !IO).
 output_live_value_type(Stream, live_value_var(Var, Name, Type, _LldsInst),
         !IO) :-
-    io.write_string(Stream, "var(", !IO),
     term.var_to_int(Var, VarInt),
-    io.write_int(Stream, VarInt, !IO),
-    io.write_string(Stream, ", ", !IO),
-    io.write_string(Stream, Name, !IO),
-    io.write_string(Stream, ", ", !IO),
+    io.format(Stream, "var(%d, %s, ", [i(VarInt), s(Name)], !IO),
     % XXX Fake type varset.
     varset.init(NewTVarset),
     mercury_output_type(NewTVarset, print_name_only, Type, Stream, !IO),
@@ -1980,23 +1971,18 @@ output_foreign_proc_input(Info, Stream, Input, !IO) :-
             then
                 % Note that for this cast to be correct the foreign
                 % type must be a word sized integer or pointer type.
-                io.write_string(Stream, VarName, !IO),
-                io.write_string(Stream, " = ", !IO),
-                io.write_string(Stream, "(" ++ ForeignType ++ ") ", !IO),
+                io.format(Stream, "%s = (%s) ",
+                    [s(VarName), s(ForeignType)], !IO),
                 output_rval_as_type(Info, Rval, lt_word, Stream, !IO)
             else
-                io.write_string(Stream, "MR_MAYBE_UNBOX_FOREIGN_TYPE(", !IO),
-                io.write_string(Stream, ForeignType, !IO),
-                io.write_string(Stream, ", ", !IO),
+                io.format(Stream, "MR_MAYBE_UNBOX_FOREIGN_TYPE(%s, ",
+                    [s(ForeignType)], !IO),
                 output_rval_as_type(Info, Rval, lt_word, Stream, !IO),
-                io.write_string(Stream, ", ", !IO),
-                io.write_string(Stream, VarName, !IO),
-                io.write_string(Stream, ")", !IO)
+                io.format(Stream, ", %s)", [s(VarName)], !IO)
             )
         ;
             MaybeForeignTypeInfo = no,
-            io.write_string(Stream, VarName, !IO),
-            io.write_string(Stream, " = ", !IO),
+            io.format(Stream, "%s = ", [s(VarName)], !IO),
             ( if OrigType = builtin_type(BuiltinType) then
                 (
                     BuiltinType = builtin_type_string,
@@ -2114,23 +2100,19 @@ output_foreign_proc_output(Info, Stream, Output, !IO) :-
                     llds.lval_type(Lval, ActualType),
                     ( if ActualType = lt_float then
                         output_lval(Info, Stream, Lval, !IO),
-                        io.write_string(Stream, " = ", !IO),
-                        io.write_string(Stream, VarName, !IO)
+                        io.format(Stream, " = %s", [s(VarName)], !IO)
                     else
                         output_lval_as_word(Info, Stream, Lval, !IO),
-                        io.write_string(Stream, " = ", !IO),
-                        io.write_string(Stream, "MR_float_to_word(", !IO),
-                        io.write_string(Stream, VarName, !IO),
-                        io.write_string(Stream, ")", !IO)
+                        io.format(Stream, " = MR_float_to_word(%s)",
+                            [s(VarName)], !IO)
                     )
                 ;
                     BuiltinType = builtin_type_char,
                     output_lval_as_word(Info, Stream, Lval, !IO),
-                    io.write_string(Stream, " = ", !IO),
                     % Characters must be cast to MR_UnsignedChar to
                     % prevent sign-extension.
-                    io.write_string(Stream, "(MR_UnsignedChar) ", !IO),
-                    io.write_string(Stream, VarName, !IO)
+                    io.format(Stream, " = (MR_UnsignedChar) %s",
+                        [s(VarName)], !IO)
                 ;
                     BuiltinType = builtin_type_int(IntType),
                     (
@@ -2144,42 +2126,34 @@ output_foreign_proc_output(Info, Stream, Output, !IO) :-
                         ; IntType = int_type_uint32
                         ),
                         output_lval_as_word(Info, Stream, Lval, !IO),
-                        io.write_string(Stream, " = ", !IO),
-                        io.write_string(Stream, VarName, !IO)
+                        io.format(Stream, " = %s", [s(VarName)], !IO)
                     ;
                         IntType = int_type_int64,
                         llds.lval_type(Lval, ActualType),
                         ( if ActualType = lt_int(int_type_int64) then
                             output_lval(Info, Stream, Lval, !IO),
-                            io.write_string(Stream, " = ", !IO),
-                            io.write_string(Stream, VarName, !IO)
+                            io.format(Stream, " = %s", [s(VarName)], !IO)
                         else
                             output_lval_as_word(Info, Stream, Lval, !IO),
-                            io.write_string(Stream, " = ", !IO),
-                            io.write_string(Stream, "MR_int64_to_word(", !IO),
-                            io.write_string(Stream, VarName, !IO),
-                            io.write_string(Stream, ")", !IO)
+                            io.format(Stream, " = MR_int64_to_word(%s)",
+                                [s(VarName)], !IO)
                         )
                     ;
                         IntType = int_type_uint64,
                         llds.lval_type(Lval, ActualType),
                         ( if ActualType = lt_int(int_type_uint64) then
                             output_lval(Info, Stream, Lval, !IO),
-                            io.write_string(Stream, " = ", !IO),
-                            io.write_string(Stream, VarName, !IO)
+                            io.format(Stream, " = %s", [s(VarName)], !IO)
                         else
                             output_lval_as_word(Info, Stream, Lval, !IO),
-                            io.write_string(Stream, " = ", !IO),
-                            io.write_string(Stream, "MR_uint64_to_word(", !IO),
-                            io.write_string(Stream, VarName, !IO),
-                            io.write_string(Stream, ")", !IO)
+                            io.format(Stream, " = MR_uint64_to_word(%s)",
+                                [s(VarName)], !IO)
                         )
                     )
                 )
             else
                 output_lval_as_word(Info, Stream, Lval, !IO),
-                io.write_string(Stream, " = ", !IO),
-                io.write_string(Stream, VarName, !IO)
+                io.format(Stream, " = %s", [s(VarName)], !IO)
             )
         )
     ),

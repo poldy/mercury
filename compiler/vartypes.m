@@ -11,10 +11,9 @@
 %
 %---------------------------------------------------------------------------%
 
-:- module hlds.vartypes.
+:- module parse_tree.vartypes.
 :- interface.
 
-:- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 
 :- import_module assoc_list.
@@ -64,10 +63,10 @@
 
 :- pred vartypes_from_sorted_assoc_list(assoc_list(prog_var, mer_type)::in,
     vartypes::out) is det.
+:- pred vartypes_from_rev_sorted_assoc_list(assoc_list(prog_var, mer_type)::in,
+    vartypes::out) is det.
 
 :- pred vartypes_add_corresponding_lists(list(prog_var)::in,
-    list(mer_type)::in, vartypes::in, vartypes::out) is det.
-:- pred vartypes_overlay_corresponding_lists(list(prog_var)::in,
     list(mer_type)::in, vartypes::in, vartypes::out) is det.
 
 :- pred delete_var_type(prog_var::in,
@@ -96,10 +95,6 @@
 :- type prog_var_set_types
     --->    prog_var_set_types(prog_varset, vartypes).
 
-:- type maybe_vartypes
-    --->    varset_vartypes(tvarset, vartypes)
-    ;       no_varset_vartypes.
-
 %---------------------------------------------------------------------------%
 
 :- implementation.
@@ -107,7 +102,6 @@
 :- import_module parse_tree.prog_type_subst.
 
 :- import_module map.
-:- import_module require.
 
 :- type vartypes == map(prog_var, mer_type).
 
@@ -169,18 +163,11 @@ vartypes_from_corresponding_lists(Vars, Types, VarTypes) :-
 vartypes_from_sorted_assoc_list(AssocList, VarTypes) :-
     map.from_sorted_assoc_list(AssocList, VarTypes).
 
+vartypes_from_rev_sorted_assoc_list(RevAssocList, VarTypes) :-
+    map.from_rev_sorted_assoc_list(RevAssocList, VarTypes).
+
 vartypes_add_corresponding_lists(Vars, Types, !VarTypes) :-
     map.det_insert_from_corresponding_lists(Vars, Types, !VarTypes).
-
-vartypes_overlay_corresponding_lists([], [], !VarTypes).
-vartypes_overlay_corresponding_lists([], [_ | _], !VarTypes) :-
-    unexpected($pred, "mismatched list lengths").
-vartypes_overlay_corresponding_lists([_ | _], [], !VarTypes) :-
-    unexpected($pred, "mismatched list lengths").
-vartypes_overlay_corresponding_lists([Var | Vars], [Type | Types],
-        !VarTypes) :-
-    map.set(Var, Type, !VarTypes),
-    vartypes_overlay_corresponding_lists(Vars, Types, !VarTypes).
 
 delete_var_type(Var, !VarTypes) :-
     map.delete(Var, !VarTypes).
@@ -213,5 +200,5 @@ foldl_var_types(Pred, VarTypes, !Acc) :-
     map.foldl_values(Pred, VarTypes, !Acc).
 
 %---------------------------------------------------------------------------%
-:- end_module hlds.vartypes.
+:- end_module parse_tree.vartypes.
 %---------------------------------------------------------------------------%

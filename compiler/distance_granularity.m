@@ -23,91 +23,75 @@
 % To see how the distance granularity transformation works, consider
 % this parallel version of the double recursive fibonacci predicate:
 %
-% :- pred fibonacci(int::in, int::out) is det.
+% :- pred fib(int::in, int::out) is det.
 %
-% fibonacci(X, Y) :-
+% fib(X, Y) :-
 %     ( if X = 0 then
 %         Y = 0
+%     else if X = 1 then
+%         Y = 1
+%     else if X > 1 then
+%         J = X - 1,
+%         K = X - 2,
+%         (
+%             fib(J, Jout)
+%         &
+%             fib(K, Kout)
+%         ),
+%         Y = Jout + Kout
 %     else
-%         ( if X = 1 then
-%             Y = 1
-%         else
-%             ( if X > 1 then
-%                 J = X - 1,
-%                 K = X - 2,
-%                 (
-%                     fibonacci(J, Jout)
-%                 &
-%                     fibonacci(K, Kout)
-%                 ),
-%                 Y = Jout + Kout
-%             else
-%                 error("fibonacci: wrong value")
-%             )
-%         )
+%         error("fib: wrong value")
 %     ).
 %
 % Assuming that the distance metric specified during compilation is 10,
 % this module creates this specialized version of the above predicate:
 %
-% :- pred DistanceGranularityFor__pred__fibonacci__10(int::in, int::out,
+% :- pred DistanceGranularityFor__pred__fib__10(int::in, int::out,
 %     int::in) is det.
 %
-% DistanceGranularityFor__pred__fibonacci__10(X, Y, Distance) :-
+% DistanceGranularityFor__pred__fib__10(X, Y, Distance) :-
 %     ( if X = 0 then
 %         Y = 0
-%     else
-%         ( if X = 1 then
-%             Y = 1
-%         else
-%             ( if X > 1 then
-%                 J = X - 1,
-%                 K = X - 2,
-%                 ( if Distance = 0 then
-%                     (
-%                         DistanceGranularityFor__pred__fibonacci__10(J, Jout,
-%                             10)
-%                     &
-%                         DistanceGranularityFor__pred__fibonacci__10(K, Kout,
-%                             10)
-%                     )
-%                 else
-%                     DistanceGranularityFor__pred__fibonacci__10(J, Jout,
-%                         Distance - 1),
-%                     DistanceGranularityFor__pred__fibonacci__10(K, Kout,
-%                         Distance - 1)
-%                 ),
-%                 Y = Jout + Kout
-%             else
-%                 error("fibonacci: wrong value")
+%     else if X = 1 then
+%         Y = 1
+%     else if X > 1 then
+%         J = X - 1,
+%         K = X - 2,
+%         ( if Distance = 0 then
+%             (
+%                 DistanceGranularityFor__pred__fib__10(J, Jout, 10)
+%             &
+%                 DistanceGranularityFor__pred__fib__10(K, Kout, 10)
 %             )
-%         )
+%         else
+%             DistanceGranularityFor__pred__fib__10(J, Jout, Distance - 1),
+%             DistanceGranularityFor__pred__fib__10(K, Kout, Distance - 1)
+%         ),
+%         Y = Jout + Kout
+%     else
+%         error("fib: wrong value")
 %     ).
 %
 % After which, the original version becomes:
 %
-% :- pred fibonacci(int::in, int::out) is det.
+% :- pred fib(int::in, int::out) is det.
 %
-% fibonacci(X, Y) :-
+% fib(X, Y) :-
 %     ( if X = 0 then
 %         Y = 0
+%     else if X = 1 then
+%         Y = 1
+%     else if X > 1 then
+%         J = X - 1,
+%         K = X - 2,
+%         (
+%             DistanceGranularityFor__pred__fib__10(J, Jout, 10)
+%         &
+%             DistanceGranularityFor__pred__fib__10(K, Kout, 10)
+%         ),
+%         Y = Jout + Kout
 %     else
-%         ( if X = 1 then
-%             Y = 1
-%         else
-%             ( if X > 1 then
-%                 J = X - 1,
-%                 K = X - 2,
-%                 (
-%                     DistanceGranularityFor__pred__fibonacci__10(J, Jout, 10)
-%                 &
-%                     DistanceGranularityFor__pred__fibonacci__10(K, Kout, 10)
-%                 ),
-%                 Y = Jout + Kout
-%             else
-%                 error("fibonacci: wrong value")
-%             )
-%         )
+%         error("fib: wrong value")
 %     ).
 %
 % The second part of the transformation makes the granularity control
@@ -150,10 +134,11 @@
 :- import_module hlds.goal_util.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.pred_table.
-:- import_module hlds.quantification.
 :- import_module hlds.instmap.
 :- import_module hlds.make_goal.
+:- import_module hlds.pred_name.
+:- import_module hlds.pred_table.
+:- import_module hlds.quantification.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
@@ -161,17 +146,16 @@
 :- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_mode.
-:- import_module parse_tree.prog_util.
+:- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
 
 :- import_module bool.
 :- import_module int.
 :- import_module list.
-:- import_module pair.
 :- import_module maybe.
+:- import_module pair.
 :- import_module require.
-:- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 %
@@ -191,65 +175,69 @@ control_distance_granularity(!ModuleInfo, Distance) :-
     module_info::in, module_info::out) is det.
 
 apply_dg_to_preds([], _Distance, !ModuleInfo).
-apply_dg_to_preds([PredId | PredIdList], Distance, !ModuleInfo) :-
-    module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
+apply_dg_to_preds([PredId | PredIds], Distance, !ModuleInfo) :-
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     % We need to know what the pred_id will be for the specified predicate
     % before we actually clone it (this avoids doing one more pass to update
     % the pred_id in the recursive plain calls).
     module_info_get_predicate_table(!.ModuleInfo, PredicateTable),
-    get_next_pred_id(PredicateTable, NewPredId),
+    get_next_pred_id(PredicateTable, ClonePredId),
 
     % Create the new sym_name for the recursive plain calls.
-    ModuleName = pred_info_module(PredInfo),
-    Prefix = granularity_prefix,
-    MaybePredOrFunc = yes(pf_predicate),
-    NewPredIdGranularity = newpred_distance_granularity(Distance),
-    PredName0 = pred_info_name(PredInfo),
-    make_pred_name(ModuleName, Prefix, MaybePredOrFunc, PredName0,
-        NewPredIdGranularity, NewCallSymName),
+    module_info_get_name(!.ModuleInfo, ModuleName),
+    PredName0 = pred_info_name(PredInfo0),
+    % XXX *Always* passing pf_predicate here seems to be a bug.
+    Transform = tn_par_distance_granularity(pf_predicate, Distance),
+    make_transformed_pred_name(PredName0, Transform, ClonePredName),
+    ClonePredSymName = qualified(ModuleName, ClonePredName),
 
-    ProcIds = pred_info_valid_non_imported_procids(PredInfo),
-    apply_dg_to_procs(PredId, ProcIds, Distance, NewPredId, NewCallSymName,
-        PredInfo, PredInfoClone0, no, Specialized, !ModuleInfo),
-    (
-        Specialized = yes,
-        % The predicate has been specialized as it contains recursive calls.
+    ProcIds = pred_info_valid_non_imported_procids(PredInfo0),
+    some [!ClonePredInfo] (
+        !:ClonePredInfo = PredInfo0,
+        apply_dg_to_procs(PredId, ProcIds, Distance, ClonePredId,
+            ClonePredSymName, no, Specialized, !ClonePredInfo, !ModuleInfo),
+        (
+            Specialized = yes,
+            % The predicate has been specialized, as it contains
+            % recursive calls.
 
-        % Create the name of the specialized predicate out of the name of the
-        % original one.
-        create_specialized_pred_name(Prefix, Distance, PredName0, PredName),
-        pred_info_set_name(PredName, PredInfoClone0, PredInfoClone1),
+            pred_info_set_module_name(ModuleName, !ClonePredInfo),
+            pred_info_set_name(ClonePredName, !ClonePredInfo),
 
-        % If the original predicate was a function then the specialized version
-        % is a predicate.
-        pred_info_set_is_pred_or_func(pf_predicate, PredInfoClone1,
-            PredInfoClone2),
+            % Even if the original predicate was a function, the specialized
+            % version is a predicate.
+            pred_info_set_is_pred_or_func(pf_predicate,
+                !ClonePredInfo),
 
-        % The arity and the argument types of the specialized predicate must be
-        % modified.
-        Arity = pred_info_orig_arity(PredInfoClone2),
-        pred_info_set_orig_arity(Arity + 1, PredInfoClone2, PredInfoClone3),
-        pred_info_get_arg_types(PredInfoClone3, ArgTypes0),
-        list.append(ArgTypes0, [int_type], ArgTypes),
-        pred_info_get_typevarset(PredInfoClone3, Tvarset),
-        pred_info_get_exist_quant_tvars(PredInfoClone3, ExistqTvars),
-        pred_info_set_arg_types(Tvarset, ExistqTvars, ArgTypes,
-            PredInfoClone3, PredInfoClone),
+            % The arity and the argument types of the specialized predicate
+            % must be modified.
+            Arity = pred_info_orig_arity(!.ClonePredInfo),
+            pred_info_set_orig_arity(Arity + 1, !ClonePredInfo),
+            pred_info_get_typevarset(!.ClonePredInfo, TypeVarSet),
+            pred_info_get_exist_quant_tvars(!.ClonePredInfo, ExistQTypeVars),
+            pred_info_get_arg_types(!.ClonePredInfo, ArgTypes0),
+            ArgTypes = ArgTypes0 ++ [int_type],
+            pred_info_set_arg_types(TypeVarSet, ExistQTypeVars, ArgTypes,
+                !ClonePredInfo),
 
-        % Add the specialized predicate to the predicate table.
-        module_info_get_predicate_table(!.ModuleInfo, PredicateTable0),
-        predicate_table_insert(PredInfoClone, _, PredicateTable0,
-            PredicateTable1),
-        module_info_set_predicate_table(PredicateTable1, !ModuleInfo),
+            % Add the specialized predicate to the predicate table.
+            module_info_get_predicate_table(!.ModuleInfo, PredicateTable0),
+            predicate_table_insert(!.ClonePredInfo, InsertedPredId,
+                PredicateTable0, PredicateTable1),
+            expect(unify(ClonePredId, InsertedPredId), $pred,
+                "ClonePredId != InsertedPredId"),
+            module_info_set_predicate_table(PredicateTable1, !ModuleInfo),
 
-        update_original_predicate_procs(PredId, ProcIds, Distance, NewPredId,
-            NewCallSymName, PredInfo, PredInfoUpdated, !ModuleInfo),
-        module_info_set_pred_info(PredId, PredInfoUpdated, !ModuleInfo)
-    ;
-        Specialized = no
-        % The predicate has not been specialized.
+            update_original_predicate_procs(PredId, ProcIds, Distance,
+                ClonePredId, ClonePredSymName, PredInfo0, PredInfo,
+                !ModuleInfo),
+            module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
+        ;
+            Specialized = no
+            % The predicate has not been specialized.
+        )
     ),
-    apply_dg_to_preds(PredIdList, Distance, !ModuleInfo).
+    apply_dg_to_preds(PredIds, Distance, !ModuleInfo).
 
     % Apply the distance granularity transformation to each procedure in the
     % list.
@@ -257,45 +245,47 @@ apply_dg_to_preds([PredId | PredIdList], Distance, !ModuleInfo) :-
     % SymNameSpecialized is the sym_name of the predicate to be specialized.
     %
 :- pred apply_dg_to_procs(pred_id::in, list(proc_id)::in, int::in,
-    pred_id::in, sym_name::in, pred_info::in, pred_info::out,
-    bool::in, bool::out, module_info::in, module_info::out) is det.
+    pred_id::in, sym_name::in, bool::in, bool::out,
+    pred_info::in, pred_info::out, module_info::in, module_info::out) is det.
 
-apply_dg_to_procs(_PredId, [], _Distance, _PredIdSpecialized,
-        _SymNameSpecialized, !PredInfo, !Specialized, !ModuleInfo).
-apply_dg_to_procs(PredId, [ProcId | ProcIds], Distance, PredIdSpecialized,
-        SymNameSpecialized, !PredInfo, !Specialized, !ModuleInfo) :-
-    module_info_proc_info(!.ModuleInfo, proc(PredId, ProcId), ProcInfo0),
-    proc_info_get_has_parallel_conj(ProcInfo0, HasParallelConj),
-    (
-        HasParallelConj = has_parallel_conj,
-        % The procedure contains parallel conjunction(s).
-
-        proc_info_get_goal(ProcInfo0, Body),
-        apply_dg_to_goal(Body, BodyClone, PredId, ProcId, PredIdSpecialized,
-            SymNameSpecialized, ProcInfo0, ProcInfo1, !ModuleInfo,
-            Distance, no, no, MaybeGranularityVar, _),
+apply_dg_to_procs(_PredId, [], _Distance, _ClonePredId, _ClonePredSymName,
+        !Specialized, !PredInfo, !ModuleInfo).
+apply_dg_to_procs(PredId, [ProcId | ProcIds], Distance,
+        ClonePredId, ClonePredSymName, !Specialized, !PredInfo, !ModuleInfo) :-
+    some [!ProcInfo] (
+        module_info_proc_info(!.ModuleInfo, PredId, ProcId, !:ProcInfo),
+        proc_info_get_has_parallel_conj(!.ProcInfo, HasParallelConj),
         (
-            MaybeGranularityVar = yes(_),
-            % The granularity variable has been created while the procedure was
-            % processed. That means that the predicate must be specialized.
-            !:Specialized = yes,
-            proc_info_set_goal(BodyClone, ProcInfo1, ProcInfo2),
-            requantify_proc_general(ordinary_nonlocals_no_lambda,
-                ProcInfo2, ProcInfo3),
-            recompute_instmap_delta_proc(
-                do_not_recompute_atomic_instmap_deltas, ProcInfo3, ProcInfo,
-                !ModuleInfo),
-            pred_info_set_proc_info(ProcId, ProcInfo, !PredInfo)
+            HasParallelConj = has_parallel_conj,
+            % The procedure contains parallel conjunction(s).
+
+            proc_info_get_goal(!.ProcInfo, Body),
+            apply_dg_to_goal(Body, BodyClone, PredId, ProcId,
+                ClonePredId, ClonePredSymName, !ProcInfo, !ModuleInfo,
+                Distance, no, no, MaybeGranularityVar, _),
+            (
+                MaybeGranularityVar = yes(_),
+                % The granularity variable has been created while the
+                % procedure was processed. That means that the predicate
+                % must be specialized.
+                !:Specialized = yes,
+                proc_info_set_goal(BodyClone, !ProcInfo),
+                requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+                recompute_instmap_delta_proc(
+                    no_recomp_atomics,
+                    !ProcInfo, !ModuleInfo),
+                pred_info_set_proc_info(ProcId, !.ProcInfo, !PredInfo)
+            ;
+                MaybeGranularityVar = no
+            )
         ;
-            MaybeGranularityVar = no
+            HasParallelConj = has_no_parallel_conj
+            % No need to apply the distance granularity transformation to this
+            % procedure as it does not contain any parallel conjunctions.
         )
-    ;
-        HasParallelConj = has_no_parallel_conj
-        % No need to apply the distance granularity transformation to this
-        % procedure as it does not contain any parallel conjunctions.
     ),
-    apply_dg_to_procs(PredId, ProcIds, Distance, PredIdSpecialized,
-        SymNameSpecialized, !PredInfo, !Specialized, !ModuleInfo).
+    apply_dg_to_procs(PredId, ProcIds, Distance, ClonePredId, ClonePredSymName,
+        !Specialized, !PredInfo, !ModuleInfo).
 
     % Apply the distance granularity transformation to a goal.
     % CallerPredId and CallerProcId are those of the original predicate.
@@ -429,8 +419,8 @@ apply_dg_to_plain_call(!GoalExpr, CallerPredId, PredIdSpecialized,
         ;
             !.MaybeGranularityVar = no,
             % Add the variable Granularity to ProcInfo.
-            proc_info_create_var_from_type(int_type, no, GranularityVar,
-                !ProcInfo),
+            proc_info_create_var_from_type("", int_type, is_not_dummy_type,
+                GranularityVar, !ProcInfo),
             !:MaybeGranularityVar = yes(GranularityVar),
 
             % XXX Check if the int module is imported (that is why
@@ -501,8 +491,9 @@ apply_dg_to_conj([Goal0 | Goals], !GoalsAcc, CallerPredId, CallerProcId,
 create_if_then_else_goal(GoalsInConj, ConjInfo, MaybeGranularityVar,
         PredIdSpecialized, CallerProcId, Distance, IfThenElseGoal, !ProcInfo,
         ModuleInfo) :-
-    proc_info_create_var_from_type(int_type, no, Var, !ProcInfo),
-    make_int_const_construction(term.context_init, Var, 0, UnifyGoal),
+    proc_info_create_var_from_type("", int_type, is_not_dummy_type, Var,
+        !ProcInfo),
+    make_int_const_construction(dummy_context, Var, 0, UnifyGoal),
     (
         MaybeGranularityVar = yes(GranularityVar),
         % Create the condition.
@@ -574,9 +565,9 @@ apply_dg_to_then2(!GoalExpr, !IndexInConj, GranularityVar, CallerPredId,
                     % That is a recursive plain call.
 
                     % Create granularity variable containing value Distance.
-                    proc_info_create_var_from_type(int_type, no,
-                        Var, !ProcInfo),
-                    make_int_const_construction(term.context_init,
+                    proc_info_create_var_from_type("", int_type,
+                        is_not_dummy_type, Var, !ProcInfo),
+                    make_int_const_construction(dummy_context,
                         Var, Distance, UnifyGoal),
 
                     % Use that variable as the last argument of the call.
@@ -687,23 +678,23 @@ apply_dg_to_else2(!GoalExpr, !IndexInConj, GranularityVar, CallerPredId,
                     % That is a recursive plain call.
 
                     % Create an int variable containing the value 1.
-                    proc_info_create_var_from_type(int_type, no,
-                        Var, !ProcInfo),
-                    make_int_const_construction(term.context_init,
+                    proc_info_create_var_from_type("", int_type,
+                        is_not_dummy_type, Var, !ProcInfo),
+                    make_int_const_construction(dummy_context,
                         Var, 1, UnifyGoal),
 
                     % Create a variable which will contain the decremented
                     % granularity distance.
-                    proc_info_create_var_from_type(int_type, no,
-                        VarResult, !ProcInfo),
+                    proc_info_create_var_from_type("", int_type,
+                        is_not_dummy_type, VarResult, !ProcInfo),
 
                     % Decrement GranularityVar before the call.
                     lookup_builtin_pred_proc_id(ModuleInfo,
-                        unqualified("int"), "minus", pf_function, 2, only_mode,
-                        MinusPredId, MinusProcId),
+                        unqualified("int"), "minus", pf_function,
+                        user_arity(2), only_mode, MinusPredId, MinusProcId),
                     MinusCallArgs = [GranularityVar, Var, VarResult],
                     MinusCallBuiltin = inline_builtin,
-                    MinusCallSymName = qualified(unqualified("int"), "-"),
+                    MinusCallSymName = qualified(unqualified("int"), "minus"),
                     ConsId =
                         cons(MinusCallSymName, 2, cons_id_dummy_type_ctor),
                     Rhs = rhs_functor(ConsId, is_not_exist_constr,
@@ -730,8 +721,8 @@ apply_dg_to_else2(!GoalExpr, !IndexInConj, GranularityVar, CallerPredId,
                     Context = goal_info_get_context(FirstGoalInfo),
                     goal_info_init(NonLocals, InstMapDeltaDecrement, Detism,
                         Purity, Context, DecrementGoalInfo),
-                    DecrementGoal = hlds_goal(DecrementGoalExpr,
-                        DecrementGoalInfo),
+                    DecrementGoal =
+                        hlds_goal(DecrementGoalExpr, DecrementGoalInfo),
 
                     % Use the decremented value of GranularityVar as the
                     % last argument of the call.
@@ -740,7 +731,7 @@ apply_dg_to_else2(!GoalExpr, !IndexInConj, GranularityVar, CallerPredId,
                     % If the original predicate is a function then the
                     % specialized version is a predicate. Therefore, there is
                     % no need for the unify context anymore.
-                    CallUnifyContext = no,
+                    CallUnifyContext = maybe.no,
 
                     GoalExpr = plain_call(CalleePredId, CalleeProcId, CallArgs,
                         CallBuiltin, CallUnifyContext, CallSymName),
@@ -823,22 +814,6 @@ apply_dg_to_switch([Case | Cases], !CasesAcc, CallerPredId, CallerProcId,
         PredIdSpecialized, SymNameSpecialized, !ProcInfo, !ModuleInfo,
         Distance, !MaybeGranularityVar).
 
-    % Create the string name of the specialized predicate (same format as
-    % make_pred_name in prog_util) out of the name of the original one.
-    %
-:- pred create_specialized_pred_name(string::in, int::in,
-    string::in, string::out) is det.
-
-create_specialized_pred_name(Prefix, Distance, !PredName) :-
-    PFS = "pred",
-    int_to_string(Distance, PredIdStr),
-    string.format("%s__%s__%s__%s",
-        [s(Prefix), s(PFS), s(!.PredName), s(PredIdStr)], !:PredName).
-
-:-func granularity_prefix = string.
-
-granularity_prefix = "DistanceGranularityFor".
-
 %-----------------------------------------------------------------------------%
 %
 % This section contains predicates that make the granularity control
@@ -854,21 +829,21 @@ granularity_prefix = "DistanceGranularityFor".
     int::in, pred_id::in, sym_name::in, pred_info::in, pred_info::out,
     module_info::in, module_info::out) is det.
 
-update_original_predicate_procs(_PredId, [], _Distance, _PredIdSpecialized,
-        _SymNameSpecialized, !PredInfo, !ModuleInfo).
+update_original_predicate_procs(_PredId, [], _Distance,
+        _PredIdSpecialized, _SymNameSpecialized, !PredInfo, !ModuleInfo).
 update_original_predicate_procs(PredId, [ProcId | ProcIds], Distance,
-        PredIdSpecialized, SymNameSpecialized, !PredInfo,
-        !ModuleInfo) :-
-    module_info_proc_info(!.ModuleInfo, proc(PredId, ProcId), ProcInfo0),
-    proc_info_get_goal(ProcInfo0, Body0),
-    update_original_predicate_goal(Body0, Body, PredId, ProcId,
-        PredIdSpecialized, SymNameSpecialized, ProcInfo0, ProcInfo1, Distance),
-    proc_info_set_goal(Body, ProcInfo1, ProcInfo2),
-    requantify_proc_general(ordinary_nonlocals_no_lambda,
-        ProcInfo2, ProcInfo3),
-    recompute_instmap_delta_proc(do_not_recompute_atomic_instmap_deltas,
-        ProcInfo3, ProcInfo, !ModuleInfo),
-    pred_info_set_proc_info(ProcId, ProcInfo, !PredInfo),
+        PredIdSpecialized, SymNameSpecialized, !PredInfo, !ModuleInfo) :-
+    some [!ProcInfo] (
+        module_info_proc_info(!.ModuleInfo, proc(PredId, ProcId), !:ProcInfo),
+        proc_info_get_goal(!.ProcInfo, Body0),
+        update_original_predicate_goal(Body0, Body, PredId, ProcId,
+            PredIdSpecialized, SymNameSpecialized, !ProcInfo, Distance),
+        proc_info_set_goal(Body, !ProcInfo),
+        requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+        recompute_instmap_delta_proc(no_recomp_atomics,
+            !ProcInfo, !ModuleInfo),
+        pred_info_set_proc_info(ProcId, !.ProcInfo, !PredInfo)
+    ),
     update_original_predicate_procs(PredId, ProcIds, Distance,
         PredIdSpecialized, SymNameSpecialized, !PredInfo, !ModuleInfo).
 
@@ -982,9 +957,9 @@ update_original_predicate_plain_call(!Goal, CallerPredId, CallerProcId,
 
         % Create the int variable which will be used as the last argument of
         % the call.
-        proc_info_create_var_from_type(int_type, no, Var, !ProcInfo),
-        make_int_const_construction(term.context_init,
-            Var, Distance, UnifyGoal),
+        proc_info_create_var_from_type("", int_type, is_not_dummy_type, Var,
+            !ProcInfo),
+        make_int_const_construction(dummy_context, Var, Distance, UnifyGoal),
         list.append(CallArgs0, [Var], CallArgs),
 
         % If the original predicate is a function then the specialized

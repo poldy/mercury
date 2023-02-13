@@ -1,18 +1,18 @@
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % Copyright (C) 1994-2001, 2003-2012 The University of Melbourne.
 % Copyright (C) 2014-2017 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % File: prog_util.
 % Main author: fjh.
 %
 % Various utility predicates acting on the parse tree data structure.
 %
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- module parse_tree.prog_util.
 :- interface.
@@ -21,7 +21,6 @@
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.prog_data.
-:- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_item.
 
 :- import_module integer.
@@ -30,7 +29,7 @@
 :- import_module term.
 :- import_module varset.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Given a possible module qualified sym_name and a list of argument types
     % and a context, construct a term. This is used to construct types.
@@ -40,7 +39,7 @@
 :- pred construct_qualified_term_with_context(sym_name::in, list(term(T))::in,
     prog_context::in, term(T)::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % adjust_func_arity(PredOrFunc, FuncArity, PredArity).
     %
@@ -56,43 +55,7 @@
 :- mode user_arity_pred_form_arity(in, in, out) is det.
 :- mode user_arity_pred_form_arity(in, out, in) is det.
 
-%-----------------------------------------------------------------------------%
-
-:- type new_pred_id
-    --->    newpred_counter(int, int)                   % Line number, Counter
-    ;       newpred_type_subst(tvarset, type_subst)
-    ;       newpred_unused_args(list(int))
-    ;       newpred_parallel_args(list(int))
-    ;       newpred_parallel_loop_control
-    ;       newpred_structure_reuse(int, list(int))     % Mode, no-clobber
-                                                        % arguments.
-    ;       newpred_distance_granularity(int).          % Distance
-
-    % make_pred_name_with_context(ModuleName, Prefix, PredOrFunc,
-    %   PredName, Line, Counter, SymName):
-    %
-    % Create a predicate name and return it as SymName. Create the name
-    % based on the Prefix, the PredOrFunc, the base name PredName,
-    % and the line number Line.
-    %
-    % For use in cases where we create more than one predicate for the
-    % same line, we also include the per-line distinguishing Counter
-    % in the name.
-    %
-:- pred make_pred_name_with_context(module_name::in, string::in,
-    pred_or_func::in, string::in, int::in, int::in, sym_name::out) is det.
-
-    % make_pred_name_with_context(ModuleName, Prefix, MaybePredOrFunc,
-    %   PredName, NewPredId, SymName):
-    %
-    % Create a predicate name and return it as SymName. Create the name
-    % based on the Prefix, the (maybe) PredOrFunc, the base name PredName,
-    % and the pred-name-suffix generating scheme described by NewPredId.
-    %
-:- pred make_pred_name(module_name::in, string::in, maybe(pred_or_func)::in,
-    string::in, new_pred_id::in, sym_name::out) is det.
-
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % A pred declaration may contains just types, as in
     %   :- pred list.append(list(T), list(T), list(T)).
@@ -108,13 +71,13 @@
 :- pred split_type_and_mode(type_and_mode::in, mer_type::out,
     maybe(mer_mode)::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Perform a substitution on a goal.
     %
 :- pred rename_in_goal(prog_var::in, prog_var::in, goal::in, goal::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Various predicates for accessing the cons_id type.
 
@@ -154,7 +117,7 @@
 :- pred source_integer_to_int(integer_base::in, integer::in, int::out)
     is semidet.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Strip the module qualifier from the given cons_id or sym_name.
     %
@@ -169,13 +132,34 @@
 :- pred strip_builtin_qualifier_from_sym_name(sym_name::in, sym_name::out)
     is det.
 
-%-----------------------------------------------------------------------------%
+    % Specify whether strip_module_names_from_{cons_id,sym_name} below
+    % should delete the module qualifier from a sym_name only when that
+    % qualifier is the public builtin module, or whether it should remove
+    % all module qualifiers.
+    %
+    % The latter can introduce ambiguity by replacing both "module_a.foo"
+    % and "module_b.foo" with just "foo". It is therefore suitable only for
+    % use cases in which we print out the stripped output of these predicates
+    % only for orientation, and not because the entity whose name we are
+    % removing module qualifiers from is the focus of e.g. an error message.
+:- type strip_what_module_names
+    --->    strip_builtin_module_name
+    ;       strip_all_module_names.
 
-    % make_n_fresh_vars(Name, N, VarSet0, Vars, VarSet):
-    %   `Vars' is a list of `N' fresh variables allocated from
-    %   `VarSet0'.  The variables will be named "<Name>1", "<Name>2",
-    %   "<Name>3", and so on, where <Name> is the value of `Name'.
-    %   `VarSet' is the resulting varset.
+    % Strip the specified set of module names from the given cons_id
+    % or sym_name.
+    %
+:- pred strip_module_names_from_cons_id(strip_what_module_names::in,
+    cons_id::in, cons_id::out) is det.
+:- pred strip_module_names_from_sym_name(strip_what_module_names::in,
+    sym_name::in, sym_name::out) is det.
+
+%---------------------------------------------------------------------------%
+
+    % make_n_fresh_vars(Name, N, Vars, !VarSet):
+    %
+    % Allocate N fresh vars from !VarSet, and return them as Vars.
+    % The variables will be named "<Name>1", "<Name>2", "<Name>3", and so on.
     %
 :- pred make_n_fresh_vars(string::in, int::in, list(var(T))::out,
     varset(T)::in, varset(T)::out) is det.
@@ -196,7 +180,7 @@
     %
 :- pred get_state_args_det(list(T)::in, list(T)::out, T::out, T::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Add new type variables for those introduced by a type qualification.
     %
@@ -204,33 +188,32 @@
     tvar_name_map::in, tvar_name_map::out,
     tvar_renaming::in, tvar_renaming::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % Convert a list of goals into a conjunction.
     %
 :- func goal_list_to_conj(prog_context, list(goal)) = goal.
 
-%-----------------------------------------------------------------------------%
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- implementation.
 
 :- import_module mdbcomp.builtin_modules.
-:- import_module parse_tree.mercury_to_mercury.
-:- import_module parse_tree.prog_out.
 
-:- import_module bool.
 :- import_module int.
 :- import_module map.
-:- import_module pair.
 :- import_module require.
 :- import_module string.
+:- import_module term_context.
+:- import_module term_int.
+:- import_module term_subst.
 
-%-----------------------------------------------------------------------------%
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 construct_qualified_term(SymName, ArgTerms, Term) :-
-    term.context_init(Context),
+    Context = dummy_context,
     construct_qualified_term_with_context(SymName, ArgTerms, Context, Term).
 
 construct_qualified_term_with_context(SymName, ArgTerms, Context, Term) :-
@@ -246,7 +229,7 @@ construct_qualified_term_with_context(SymName, ArgTerms, Context, Term) :-
         Term = term.functor(term.atom(Name), ArgTerms, Context)
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 adjust_func_arity(pf_predicate, Arity, Arity).
 adjust_func_arity(pf_function, Arity - 1, Arity).
@@ -254,113 +237,48 @@ adjust_func_arity(pf_function, Arity - 1, Arity).
 user_arity_pred_form_arity(pf_predicate, user_arity(A), pred_form_arity(A)).
 user_arity_pred_form_arity(pf_function, user_arity(A - 1), pred_form_arity(A)).
 
-%-----------------------------------------------------------------------------%
-
-make_pred_name_with_context(ModuleName, Prefix, PredOrFunc, PredName,
-        Line, Counter, SymName) :-
-    make_pred_name(ModuleName, Prefix, yes(PredOrFunc), PredName,
-        newpred_counter(Line, Counter), SymName).
-
-make_pred_name(ModuleName, Prefix, MaybePredOrFunc, PredName,
-        NewPredId, SymName) :-
-    (
-        MaybePredOrFunc = yes(PredOrFunc),
-        PFS = pred_or_func_to_str(PredOrFunc)
-    ;
-        MaybePredOrFunc = no,
-        PFS = "pred_or_func"
-    ),
-    (
-        NewPredId = newpred_counter(Line, Counter),
-        string.format("%d__%d", [i(Line), i(Counter)], PredIdStr)
-    ;
-        NewPredId = newpred_type_subst(VarSet, TypeSubst),
-        SubstToString = (pred(SubstElem::in, SubstStr::out) is det :-
-            SubstElem = Var - Type,
-            varset.lookup_name(VarSet, Var, VarName),
-            TypeString = mercury_type_to_string(VarSet, print_name_only, Type),
-            string.append_list([VarName, " = ", TypeString], SubstStr)
-        ),
-        list_to_string(SubstToString, TypeSubst, PredIdStr)
-    ;
-        ( NewPredId = newpred_unused_args(Args)
-        ; NewPredId = newpred_parallel_args(Args)
-        ),
-        list_to_string(int_to_string, Args, PredIdStr)
-    ;
-        NewPredId = newpred_structure_reuse(ModeNum, Args),
-        int_to_string(ModeNum, ModeStr),
-        list_to_string(int_to_string, Args, ArgsStr),
-        PredIdStr = ModeStr ++ "__" ++ ArgsStr
-    ;
-        NewPredId = newpred_distance_granularity(Distance),
-        int_to_string(Distance, PredIdStr)
-    ;
-        NewPredId = newpred_parallel_loop_control,
-        PredIdStr = ""
-    ),
-
-    string.format("%s__%s__%s__%s",
-        [s(Prefix), s(PFS), s(PredName), s(PredIdStr)], Name),
-    SymName = qualified(ModuleName, Name).
-
-:- pred list_to_string(pred(T, string)::in(pred(in, out) is det),
-    list(T)::in, string::out) is det.
-
-list_to_string(Pred, List, String) :-
-    list_to_string_2(Pred, List, ["]"], Strings),
-    string.append_list(["[" | Strings], String).
-
-:- pred list_to_string_2(pred(T, string)::in(pred(in, out) is det),
-    list(T)::in, list(string)::in, list(string)::out) is det.
-
-list_to_string_2(_, [], !Strings).
-list_to_string_2(Pred, [T | Ts], !Strings) :-
-    (
-        Ts = []
-    ;
-        Ts = [_ | _],
-        list_to_string_2(Pred, Ts, !Strings),
-        !:Strings = [", " | !.Strings]
-    ),
-    call(Pred, T, String),
-    !:Strings = [String | !.Strings].
-
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 split_types_and_modes(TypesAndModes, Types, MaybeModes) :-
-    split_types_and_modes_2(TypesAndModes, yes, Types, Modes, Result),
-    (
-        Result = yes,
-        MaybeModes = yes(Modes)
-    ;
-        Result = no,
-        MaybeModes = no
-    ).
-
-:- pred split_types_and_modes_2(list(type_and_mode)::in, bool::in,
-    list(mer_type)::out, list(mer_mode)::out, bool::out) is det.
-
-    % T = type, M = mode, TM = combined type and mode
-split_types_and_modes_2([], Result, [], [], Result).
-split_types_and_modes_2([TM | TMs], Result0, [T | Ts], [M | Ms], Result) :-
-    split_type_and_mode(TM, Result0, T, M, Result1),
-    split_types_and_modes_2(TMs, Result1, Ts, Ms, Result).
-
+    split_types_and_modes_loop(TypesAndModes, Types, Modes,
+        no_missing_modes, MaybeMissingModes),
     % If a pred declaration specifies modes for some but not all of the
     % arguments, then the modes are ignored - should this be an error instead?
     % trd: this should never happen because the parser will detect these cases.
-    %
-:- pred split_type_and_mode(type_and_mode::in, bool::in,
-    mer_type::out, mer_mode::out, bool::out) is det.
+    (
+        MaybeMissingModes = no_missing_modes,
+        MaybeModes = yes(Modes)
+    ;
+        MaybeMissingModes = some_missing_modes,
+        MaybeModes = no
+    ).
 
-split_type_and_mode(type_only(T), _, T, from_to_mode(free, free), no).
-split_type_and_mode(type_and_mode(T, M), R, T, M, R).
+:- type maybe_missing_modes
+    --->    no_missing_modes
+    ;       some_missing_modes.
+
+:- pred split_types_and_modes_loop(list(type_and_mode)::in,
+    list(mer_type)::out, list(mer_mode)::out,
+    maybe_missing_modes::in, maybe_missing_modes::out) is det.
+
+    % T = type, M = mode, TM = combined type and mode
+split_types_and_modes_loop([], [], [], !MaybeMissingModes).
+split_types_and_modes_loop([TM | TMs], [T | Ts], [M | Ms],
+        !MaybeMissingModes) :-
+    (
+        TM = type_only(T),
+        % This value of M will be ignored by split_types_and_modes.
+        M = from_to_mode(free, free),
+        !:MaybeMissingModes = some_missing_modes
+    ;
+        TM = type_and_mode(T, M)
+    ),
+    split_types_and_modes_loop(TMs, Ts, Ms, !MaybeMissingModes).
 
 split_type_and_mode(type_only(T), T, no).
 split_type_and_mode(type_and_mode(T, M), T, yes(M)).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 rename_in_goal(OldVar, NewVar, Goal0, Goal) :-
     (
@@ -369,20 +287,21 @@ rename_in_goal(OldVar, NewVar, Goal0, Goal) :-
         ),
         Goal = Goal0
     ;
-        Goal0 = conj_expr(Context, SubGoalA0, SubGoalB0),
+        Goal0 = conj_expr(Context, SubGoalA0, SubGoalsB0),
         rename_in_goal(OldVar, NewVar, SubGoalA0, SubGoalA),
-        rename_in_goal(OldVar, NewVar, SubGoalB0, SubGoalB),
-        Goal = conj_expr(Context, SubGoalA, SubGoalB)
+        rename_in_goals(OldVar, NewVar, SubGoalsB0, SubGoalsB),
+        Goal = conj_expr(Context, SubGoalA, SubGoalsB)
     ;
-        Goal0 = par_conj_expr(Context, SubGoalA0, SubGoalB0),
+        Goal0 = par_conj_expr(Context, SubGoalA0, SubGoalsB0),
         rename_in_goal(OldVar, NewVar, SubGoalA0, SubGoalA),
-        rename_in_goal(OldVar, NewVar, SubGoalB0, SubGoalB),
-        Goal = par_conj_expr(Context, SubGoalA, SubGoalB)
+        rename_in_goals(OldVar, NewVar, SubGoalsB0, SubGoalsB),
+        Goal = par_conj_expr(Context, SubGoalA, SubGoalsB)
     ;
-        Goal0 = disj_expr(Context, SubGoalA0, SubGoalB0),
+        Goal0 = disj_expr(Context, SubGoalA0, SubGoalB0, SubGoals0),
         rename_in_goal(OldVar, NewVar, SubGoalA0, SubGoalA),
         rename_in_goal(OldVar, NewVar, SubGoalB0, SubGoalB),
-        Goal = disj_expr(Context, SubGoalA, SubGoalB)
+        rename_in_goals(OldVar, NewVar, SubGoals0, SubGoals),
+        Goal = disj_expr(Context, SubGoalA, SubGoalB, SubGoals)
     ;
         Goal0 = not_expr(Context, SubGoal0),
         rename_in_goal(OldVar, NewVar, SubGoal0, SubGoal),
@@ -480,7 +399,7 @@ rename_in_goal(OldVar, NewVar, Goal0, Goal) :-
             MaybeVars = yes(TransVars)
         ),
         rename_in_goal(OldVar, NewVar, MainGoal0, MainGoal),
-        list.map(rename_in_goal(OldVar, NewVar), OrElseGoal0, OrElseGoal),
+        rename_in_goals(OldVar, NewVar, OrElseGoal0, OrElseGoal),
         Goal = atomic_expr(Context, InVars, OutVars, MaybeVars,
             MainGoal, OrElseGoal)
     ;
@@ -531,18 +450,26 @@ rename_in_goal(OldVar, NewVar, Goal0, Goal) :-
             Cond, Then, Else)
     ;
         Goal0 = event_expr(Context, Name, Terms0),
-        term.rename_var_in_terms(OldVar, NewVar, Terms0, Terms),
+        term_subst.rename_var_in_terms(OldVar, NewVar, Terms0, Terms),
         Goal = event_expr(Context, Name, Terms)
     ;
         Goal0 = call_expr(Context, SymName, Terms0, Purity),
-        term.rename_var_in_terms(OldVar, NewVar, Terms0, Terms),
+        term_subst.rename_var_in_terms(OldVar, NewVar, Terms0, Terms),
         Goal = call_expr(Context, SymName, Terms, Purity)
     ;
         Goal0 = unify_expr(Context, TermA0, TermB0, Purity),
-        term.rename_var_in_term(OldVar, NewVar, TermA0, TermA),
-        term.rename_var_in_term(OldVar, NewVar, TermB0, TermB),
+        term_subst.rename_var_in_term(OldVar, NewVar, TermA0, TermA),
+        term_subst.rename_var_in_term(OldVar, NewVar, TermB0, TermB),
         Goal = unify_expr(Context, TermA, TermB, Purity)
     ).
+
+:- pred rename_in_goals(prog_var::in, prog_var::in,
+    list(goal)::in, list(goal)::out) is det.
+
+rename_in_goals(_, _, [], []).
+rename_in_goals(OldVar, NewVar, [Goal0 | Goals0], [Goal | Goals]) :-
+    rename_in_goal(OldVar, NewVar, Goal0, Goal),
+    rename_in_goals(OldVar, NewVar, Goals0, Goals).
 
 :- pred rename_in_atomic_varlist(prog_var::in, prog_var::in,
     atomic_component_state::in, atomic_component_state::out) is det.
@@ -617,51 +544,51 @@ rename_in_maybe_var(OldVar, NewVar, MaybeVar0, MaybeVar) :-
 
 rename_in_catch_expr(OldVar, NewVar, Catch0, Catch) :-
     Catch0 = catch_expr(Term0, Goal0),
-    term.rename_var_in_term(OldVar, NewVar, Term0, Term),
+    term_subst.rename_var_in_term(OldVar, NewVar, Term0, Term),
     rename_in_goal(OldVar, NewVar, Goal0, Goal),
     Catch = catch_expr(Term, Goal).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 cons_id_and_args_to_term(some_int_const(IntConst), [], Term) :-
     (
         IntConst = int_const(Int),
-        Term = int_to_decimal_term(Int, term.context_init)
+        Term = term_int.int_to_decimal_term(Int, dummy_context)
     ;
         IntConst = int8_const(Int8),
-        Term = int8_to_decimal_term(Int8, term.context_init)
+        Term = term_int.int8_to_decimal_term(Int8, dummy_context)
     ;
         IntConst = int16_const(Int16),
-        Term = int16_to_decimal_term(Int16, term.context_init)
+        Term = term_int.int16_to_decimal_term(Int16, dummy_context)
     ;
         IntConst = int32_const(Int32),
-        Term = int32_to_decimal_term(Int32, term.context_init)
+        Term = term_int.int32_to_decimal_term(Int32, dummy_context)
     ;
         IntConst = int64_const(Int64),
-        Term = int64_to_decimal_term(Int64, term.context_init)
+        Term = term_int.int64_to_decimal_term(Int64, dummy_context)
     ;
         IntConst = uint_const(UInt),
-        Term = uint_to_decimal_term(UInt, term.context_init)
+        Term = term_int.uint_to_decimal_term(UInt, dummy_context)
     ;
         IntConst = uint8_const(UInt8),
-        Term = uint8_to_decimal_term(UInt8, term.context_init)
+        Term = term_int.uint8_to_decimal_term(UInt8, dummy_context)
     ;
         IntConst = uint16_const(UInt16),
-        Term = uint16_to_decimal_term(UInt16, term.context_init)
+        Term = term_int.uint16_to_decimal_term(UInt16, dummy_context)
     ;
         IntConst = uint32_const(UInt32),
-        Term = uint32_to_decimal_term(UInt32, term.context_init)
+        Term = term_int.uint32_to_decimal_term(UInt32, dummy_context)
     ;
         IntConst = uint64_const(UInt64),
-        Term = uint64_to_decimal_term(UInt64, term.context_init)
+        Term = term_int.uint64_to_decimal_term(UInt64, dummy_context)
     ).
 cons_id_and_args_to_term(float_const(Float), [], Term) :-
-    Term = term.functor(term.float(Float), [], term.context_init).
+    Term = term.functor(term.float(Float), [], dummy_context).
 cons_id_and_args_to_term(char_const(Char), [], Term) :-
     SymName = unqualified(string.from_char(Char)),
     construct_qualified_term(SymName, [], Term).
 cons_id_and_args_to_term(string_const(String), [], Term) :-
-    Term = term.functor(term.string(String), [], term.context_init).
+    Term = term.functor(term.string(String), [], dummy_context).
 cons_id_and_args_to_term(tuple_cons(_Arity), Args, Term) :-
     SymName = unqualified("{}"),
     construct_qualified_term(SymName, Args, Term).
@@ -738,7 +665,7 @@ source_integer_to_int(Base, Integer, Int) :-
         )
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 strip_module_qualifier_from_cons_id(ConsId0, ConsId) :-
     ( if ConsId0 = cons(Name0, Arity, TypeCtor) then
@@ -775,10 +702,28 @@ strip_builtin_qualifier_from_sym_name(SymName0, SymName) :-
         SymName = SymName0
     ).
 
-%-----------------------------------------------------------------------------%
+strip_module_names_from_cons_id(StripWhat, ConsId0, ConsId) :-
+    (
+        StripWhat = strip_builtin_module_name,
+        strip_builtin_qualifier_from_cons_id(ConsId0, ConsId)
+    ;
+        StripWhat = strip_all_module_names,
+        strip_module_qualifier_from_cons_id(ConsId0, ConsId)
+    ).
 
-make_n_fresh_vars(BaseName, N, Vars, VarSet0, VarSet) :-
-    make_n_fresh_vars_loop(BaseName, 1, N, Vars, VarSet0, VarSet).
+strip_module_names_from_sym_name(StripWhat, SymName0, SymName) :-
+    (
+        StripWhat = strip_builtin_module_name,
+        strip_builtin_qualifier_from_sym_name(SymName0, SymName)
+    ;
+        StripWhat = strip_all_module_names,
+        strip_module_qualifier_from_sym_name(SymName0, SymName)
+    ).
+
+%---------------------------------------------------------------------------%
+
+make_n_fresh_vars(BaseName, N, Vars, !VarSet) :-
+    make_n_fresh_vars_loop(BaseName, 1, N, Vars, !VarSet).
 
 :- pred make_n_fresh_vars_loop(string::in, int::in, int::in, list(var(T))::out,
     varset(T)::in, varset(T)::out) is det.
@@ -792,6 +737,8 @@ make_n_fresh_vars_loop(BaseName, Cur, Max, Vars, !VarSet) :-
         make_n_fresh_vars_loop(BaseName, Cur + 1, Max, TailVars, !VarSet),
         Vars = [HeadVar | TailVars]
     ).
+
+%---------------------%
 
 pred_args_to_func_args(PredArgs, FuncArgs, FuncReturn) :-
     ( if list.split_last(PredArgs, FuncArgsPrime, FuncReturnPrime) then
@@ -815,7 +762,7 @@ get_state_args_det(Args0, Args, State0, State) :-
         unexpected($pred, "get_state_args failed")
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 get_new_tvars([], _,  !TVarSet, !TVarNameMap, !TVarRenaming).
 get_new_tvars([TVar | TVars], VarSet, !TVarSet, !TVarNameMap, !TVarRenaming) :-
@@ -838,18 +785,12 @@ get_new_tvars([TVar | TVars], VarSet, !TVarSet, !TVarNameMap, !TVarRenaming) :-
     ),
     get_new_tvars(TVars, VarSet, !TVarSet, !TVarNameMap, !TVarRenaming).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 goal_list_to_conj(Context, []) = true_expr(Context).
 goal_list_to_conj(Context, [Goal | Goals]) =
-    goal_list_to_conj_2(Context, Goal, Goals).
+    conj_expr(Context, Goal, Goals).
 
-:- func goal_list_to_conj_2(prog_context, goal, list(goal)) = goal.
-
-goal_list_to_conj_2(_, Goal, []) = Goal.
-goal_list_to_conj_2(Context, Goal0, [Goal1 | Goals]) =
-    conj_expr(Context, Goal0, goal_list_to_conj_2(Context, Goal1, Goals)).
-
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 :- end_module parse_tree.prog_util.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%

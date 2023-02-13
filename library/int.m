@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-2012 The University of Melbourne.
-% Copyright (C) 2013-2018, 2020 The Mercury team.
+% Copyright (C) 2013-2018, 2020-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -31,6 +31,7 @@
 %---------------------------------------------------------------------------%
 
 :- instance enum(int).
+:- instance uenum(int).
 
 %---------------------------------------------------------------------------%
 
@@ -195,6 +196,7 @@
     % Throws an exception if Y is not in [0, bits_per_int).
     %
 :- func (int::in) << (int::in) = (int::uo) is det.
+:- func (int::in) <<u (uint::in) = (int::uo) is det.
 
     % unchecked_left_shift(X, Y) is the same as X << Y
     % except that the behaviour is undefined if Y is negative,
@@ -202,6 +204,7 @@
     % It will typically be implemented more efficiently than X << Y.
     %
 :- func unchecked_left_shift(int::in, int::in) = (int::uo) is det.
+:- func unchecked_left_ushift(int::in, uint::in) = (int::uo) is det.
 
     % Right shift.
     % X >> Y returns X "right shifted" by Y bits.
@@ -209,6 +212,7 @@
     % Throws an exception if Y is not in [0, bits_per_int).
     %
 :- func (int::in) >> (int::in) = (int::uo) is det.
+:- func (int::in) >>u (uint::in) = (int::uo) is det.
 
     % unchecked_right_shift(X, Y) is the same as X >> Y
     % except that the behaviour is undefined if Y is negative,
@@ -216,6 +220,7 @@
     % It will typically be implemented more efficiently than X >> Y.
     %
 :- func unchecked_right_shift(int::in, int::in) = (int::uo) is det.
+:- func unchecked_right_ushift(int::in, uint::in) = (int::uo) is det.
 
 %---------------------------------------------------------------------------%
 
@@ -250,10 +255,13 @@
 :- func min_int = int.
 :- pred min_int(int::out) is det.
 
-    % bits_per_int is the number of bits in an int on this machine.
+    % bits_per_int and ubits_per_int both return the number of bits
+    % in an int on this machine, as an int and as a uint respectively.
     %
 :- func bits_per_int = int.
 :- pred bits_per_int(int::out) is det.
+:- func ubits_per_int = uint.
+:- pred ubits_per_int(uint::out) is det.
 
 %---------------------------------------------------------------------------%
 
@@ -446,6 +454,7 @@
     % Convert an int to a pretty_printer.doc for formatting.
     %
 :- func int_to_doc(int) = pretty_printer.doc.
+:- pragma obsolete(func(int_to_doc/1), [pretty_printer.int_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %
@@ -486,7 +495,7 @@
     % floor_to_multiple_of_bits_per_int(Int):
     %
     % Returns the largest multiple of bits_per_int which is less than or
-    % equal to `Int'.
+    % equal to Int.
     %
     % Used by sparse_bitset.m. Makes it clearer to gcc that parts of this
     % operation can be optimized into shifts, without turning up the
@@ -518,7 +527,6 @@
 :- implementation.
 
 :- import_module exception.
-:- import_module string.
 :- import_module uint.
 
 %---------------------------------------------------------------------------%
@@ -526,6 +534,29 @@
 :- instance enum(int) where [
     to_int(X) = X,
     from_int(X) = X
+].
+
+:- instance uenum(int) where [
+    % This maps non-negative numbers like this:
+    %
+    %   0->0u, 1->2u, 2->4u, ... (2^31)-1 -> (2^32)-2u
+    %
+    % It maps negative numbers like this:
+    %
+    %   -1->1u, -2->3u, -3->5u, ... (2^31) -> (2^32)-1u
+    %
+    to_uint(I) = U :-
+        ( if I >= 0 then
+            U = cast_from_int(I `unchecked_left_shift` 1)
+        else
+            U = cast_from_int((-I) `unchecked_left_shift` 1) - 1u
+        ),
+    from_uint(U, I) :-
+        ( if even(U) then
+            I = cast_to_int(U `unchecked_right_shift` 1)
+        else
+            I = -cast_to_int(U `unchecked_right_shift` 1) - 1
+        )
 ].
 
 %---------------------------------------------------------------------------%
@@ -726,6 +757,8 @@ log2_loop(CurX, CurLogXSoFar, CeilLogX) :-
 
 %---------------------------------------------------------------------------%
 
+% The unchecked shift operations are builtins.
+
 X << Y = Z :-
     ( if Y `private_builtin.unsigned_lt` bits_per_int then
         Z = unchecked_left_shift(X, Y)
@@ -734,11 +767,27 @@ X << Y = Z :-
         throw(domain_error(Msg))
     ).
 
+X <<u Y = Z :-
+    ( if Y < ubits_per_int then
+        Z = unchecked_left_ushift(X, Y)
+    else
+        Msg = "int.(<<u): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
 X >> Y = Z :-
     ( if Y `private_builtin.unsigned_lt` bits_per_int then
         Z = unchecked_right_shift(X, Y)
     else
         Msg = "int.(>>): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
+X >>u Y = Z :-
+    ( if Y < ubits_per_int then
+        Z = unchecked_right_ushift(X, Y)
+    else
+        Msg = "int.(>>u): second operand is out of range",
         throw(domain_error(Msg))
     ).
 
@@ -818,6 +867,9 @@ min_int = X :-
 
 %---------------------%
 
+bits_per_int = X :-
+    bits_per_int(X).
+
 :- pragma foreign_proc("C",
     bits_per_int(Bits::out),
     [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
@@ -825,7 +877,6 @@ min_int = X :-
 "
     Bits = ML_BITS_PER_INT;
 ").
-
 :- pragma foreign_proc("C#",
     bits_per_int(Bits::out),
     [will_not_call_mercury, promise_pure, thread_safe],
@@ -834,7 +885,6 @@ min_int = X :-
     // XXX would be better to avoid hard-coding this here.
     Bits = 32;
 ").
-
 :- pragma foreign_proc("Java",
     bits_per_int(Bits::out),
     [will_not_call_mercury, promise_pure, thread_safe],
@@ -843,8 +893,31 @@ min_int = X :-
     Bits = 32;
 ").
 
-bits_per_int = X :-
-    bits_per_int(X).
+ubits_per_int = X :-
+    ubits_per_int(X).
+
+:- pragma foreign_proc("C",
+    ubits_per_int(Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
+        does_not_affect_liveness],
+"
+    Bits = (MR_Unsigned) ML_BITS_PER_INT;
+").
+:- pragma foreign_proc("C#",
+    ubits_per_int(Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    // we are using int32 in the compiler.
+    // XXX would be better to avoid hard-coding this here.
+    Bits = 32;
+").
+:- pragma foreign_proc("Java",
+    ubits_per_int(Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    // Java ints are 32 bits.
+    Bits = 32;
+").
 
 %---------------------------------------------------------------------------%
 
@@ -940,7 +1013,7 @@ all_true_in_range(P, Lo, Hi) :-
 
 %---------------------------------------------------------------------------%
 
-int_to_doc(X) = str(string.int_to_string(X)).
+int_to_doc(I) = pretty_printer.int_to_doc(I).
 
 %---------------------------------------------------------------------------%
 
@@ -972,7 +1045,7 @@ floor_to_multiple_of_bits_per_int(X) = Floor :-
     Div = Int / ML_BITS_PER_INT;
 ").
 
-quot_bits_per_int(Int::in) = (Result::out) :-
+quot_bits_per_int(Int) = Result :-
     Result = Int // bits_per_int.
 
 :- pragma foreign_proc("C",
@@ -983,7 +1056,7 @@ quot_bits_per_int(Int::in) = (Result::out) :-
     Result = Int * ML_BITS_PER_INT;
 ").
 
-times_bits_per_int(Int::in) = (Result::out) :-
+times_bits_per_int(Int) = Result :-
     Result = Int * bits_per_int.
 
 :- pragma foreign_proc("C",
@@ -994,7 +1067,7 @@ times_bits_per_int(Int::in) = (Result::out) :-
     Rem = Int % ML_BITS_PER_INT;
 ").
 
-rem_bits_per_int(Int::in) = (Result::out) :-
+rem_bits_per_int(Int) = Result :-
     Result = Int rem bits_per_int.
 
 %---------------------------------------------------------------------------%

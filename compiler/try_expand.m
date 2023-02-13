@@ -195,8 +195,7 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
-:- import_module parse_tree.prog_data.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
@@ -204,13 +203,6 @@
 
 :- pred expand_try_goals_in_module(module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
-
-    % try_expand_may_introduce_calls(PredName, Arity):
-    %
-    % Succeed if the transformation may introduce calls to a predicate
-    % or function with the given name in the exception module.
-    %
-:- pred try_expand_may_introduce_calls(string::in, arity::in) is semidet.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -228,14 +220,17 @@
 :- import_module hlds.make_goal.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.builtin_lib_types.
+:- import_module parse_tree.error_util.
+:- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_mode.
+:- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module map.
@@ -243,7 +238,7 @@
 :- import_module pair.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -312,7 +307,7 @@ expand_try_goals_in_proc(PredId, ProcId, !ModuleInfo, !Specs) :-
 update_changed_proc(Goal, PredId, ProcId, PredInfo, !.ProcInfo, !ModuleInfo,
         !Specs) :-
     proc_info_set_goal(Goal, !ProcInfo),
-    requantify_proc_general(ordinary_nonlocals_maybe_lambda, !ProcInfo),
+    requantify_proc_general(ord_nl_maybe_lambda, !ProcInfo),
     module_info_set_pred_proc_info(PredId, ProcId, PredInfo, !.ProcInfo,
         !ModuleInfo),
 
@@ -519,7 +514,7 @@ expand_try_goal(InstMap, TryGoal, FinalGoal, !Info) :-
         GoalOutputVarsSet = GoalOutputVarsSet0
     ),
 
-    some [!ModuleInfo, !PredInfo, !ProcInfo, !VarTypes] (
+    some [!ModuleInfo, !PredInfo, !ProcInfo] (
         !.Info = trys_info(!:ModuleInfo, !:PredInfo, !:ProcInfo, _),
         expand_try_goal_2(MaybeIO, ResultVar, Goal1, Then1, MaybeElse1,
             ExcpHandling1, InstMapAfterGoal, GoalOutputVarsSet, FinalGoal,
@@ -536,11 +531,11 @@ expand_try_goal(InstMap, TryGoal, FinalGoal, !Info) :-
 expand_try_goal_2(MaybeIO, ResultVar, Goal1, Then1, MaybeElse1, ExcpHandling1,
         InstMap, GoalOutputVarsSet, FinalGoal,
         !PredInfo, !ProcInfo, !ModuleInfo) :-
-    some [!VarTypes] (
+    some [!VarTable] (
         % Get the type of the output tuple.
-        proc_info_get_vartypes(!.ProcInfo, !:VarTypes),
+        proc_info_get_var_table(!.ProcInfo, !:VarTable),
         GoalOutputVars = set_of_var.to_sorted_list(GoalOutputVarsSet),
-        lookup_var_types(!.VarTypes, GoalOutputVars, GoalOutputVarTypes),
+        lookup_var_types(!.VarTable, GoalOutputVars, GoalOutputVarTypes),
         OutputTupleType = tuple_type(GoalOutputVarTypes, kind_star),
 
         % Fix the type of the result of the try call, now that we know what it
@@ -548,12 +543,16 @@ expand_try_goal_2(MaybeIO, ResultVar, Goal1, Then1, MaybeElse1, ExcpHandling1,
         RealResultVarType = defined_type(
             qualified(mercury_exception_module, "exception_result"),
             [OutputTupleType], kind_star),
-        update_var_type(ResultVar, RealResultVarType, !VarTypes),
-        proc_info_set_vartypes(!.VarTypes, !ProcInfo)
+        lookup_var_entry(!.VarTable, ResultVar, ResultVarEntry0),
+        ResultVarEntry0 = vte(ResultVarName, _, _),
+        ResultVarEntry = vte(ResultVarName, RealResultVarType,
+            is_not_dummy_type),
+        update_var_entry(ResultVar, ResultVarEntry, !VarTable),
+        proc_info_set_var_table(!.VarTable, !ProcInfo)
     ),
 
-    make_try_lambda(Goal1, GoalOutputVarsSet, OutputTupleType, MaybeIO,
-        LambdaVar, AssignLambdaVar, !ProcInfo),
+    make_try_lambda(Goal1, GoalOutputVarsSet, OutputTupleType,
+        MaybeIO, LambdaVar, AssignLambdaVar, !ProcInfo),
 
     Goal1 = hlds_goal(_, GoalInfo1),
     GoalPurity = goal_info_get_purity(GoalInfo1),
@@ -582,14 +581,14 @@ expand_try_goal_2(MaybeIO, ResultVar, Goal1, Then1, MaybeElse1, ExcpHandling1,
         % renaming in this case because GoalFinalIOVar might not even occur in
         % the Then part; then renaming would lead to a mode error.
 
-        proc_info_create_var_from_type(io_state_type, yes("TryIOOutput"),
-            TryIOOutputVar, !ProcInfo),
+        proc_info_create_var_from_type("TryIOOutput", io_state_type,
+            is_dummy_type, TryIOOutputVar, !ProcInfo),
         make_try_call("try_io", LambdaVar, ResultVar,
             [GoalInitialIOVar, TryIOOutputVar], OutputTupleType, GoalPurity,
             GoalContext, CallTryGoal, !PredInfo, !ProcInfo, !ModuleInfo),
 
         create_pure_atomic_complicated_unification(GoalFinalIOVar,
-            rhs_var(TryIOOutputVar), term.context_init,
+            rhs_var(TryIOOutputVar), dummy_context,
             umc_implicit("try_expand"), [], UnifyThenInitialIOVar),
         conjoin_goals(UnifyThenInitialIOVar, Then1, Then),
 
@@ -608,10 +607,10 @@ expand_try_goal_2(MaybeIO, ResultVar, Goal1, Then1, MaybeElse1, ExcpHandling1,
     goal_info_init(GoalInfo),
 
     % The `succeeded' case.
-    proc_info_create_var_from_type(OutputTupleType, yes("TmpOutputTuple"),
-        TmpTupleVar, !ProcInfo),
-    proc_info_create_var_from_type(OutputTupleType, yes("OutputTuple"),
-        TupleVar, !ProcInfo),
+    proc_info_create_var_from_type("TmpOutputTuple", OutputTupleType,
+        is_not_dummy_type, TmpTupleVar, !ProcInfo),
+    proc_info_create_var_from_type("OutputTuple", OutputTupleType,
+        is_not_dummy_type, TupleVar, !ProcInfo),
     deconstruct_functor(ResultVar, exception_succeeded_functor, [TmpTupleVar],
         DeconstructSucceeded),
     instmap_lookup_vars(InstMap, GoalOutputVars, TupleArgInsts),
@@ -805,8 +804,8 @@ bound_nonlocals_in_goal(ModuleInfo, InstMap, Goal, BoundNonLocals) :-
         var_is_bound_in_instmap_delta(ModuleInfo, InstMap, InstMapDelta),
         NonLocals).
 
-:- pred make_try_lambda(hlds_goal::in, set_of_progvar::in, mer_type::in,
-    maybe(try_io_state_vars)::in, prog_var::out, hlds_goal::out,
+:- pred make_try_lambda(hlds_goal::in, set_of_progvar::in,
+    mer_type::in, maybe(try_io_state_vars)::in, prog_var::out, hlds_goal::out,
     proc_info::in, proc_info::out) is det.
 
 make_try_lambda(Body0, OutputVarsSet, OutputTupleType, MaybeIO,
@@ -815,8 +814,8 @@ make_try_lambda(Body0, OutputVarsSet, OutputTupleType, MaybeIO,
     NonLocals0 = goal_info_get_nonlocals(BodyInfo0),
     set_of_var.difference(NonLocals0, OutputVarsSet, NonLocals1),
 
-    proc_info_create_var_from_type(OutputTupleType, yes("OutputTuple"),
-        OutputTupleVar, !ProcInfo),
+    proc_info_create_var_from_type("OutputTuple", OutputTupleType,
+        is_not_dummy_type, OutputTupleVar, !ProcInfo),
     (
         MaybeIO = yes(try_io_state_vars(IOVarInitial, IOVarFinal)),
         LambdaParamsModes = [OutputTupleVar - out_mode,
@@ -831,8 +830,8 @@ make_try_lambda(Body0, OutputVarsSet, OutputTupleType, MaybeIO,
     ),
     LambdaType = higher_order_type(pf_predicate, LambdaParamTypes,
         none_or_default_func, purity_pure, lambda_normal),
-    proc_info_create_var_from_type(LambdaType, yes("TryLambda"), LambdaVar,
-        !ProcInfo),
+    proc_info_create_var_from_type("TryLambda", LambdaType,
+        is_not_dummy_type, LambdaVar, !ProcInfo),
 
     % Add the construction of OutputTuple to the body.
     construct_tuple(OutputTupleVar, set_of_var.to_sorted_list(OutputVarsSet),
@@ -840,13 +839,10 @@ make_try_lambda(Body0, OutputVarsSet, OutputTupleType, MaybeIO,
     conjoin_goals(Body0, MakeOutputTuple, LambdaBody0),
 
     % Rename away output variables in the lambda body.
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     clone_variables(set_of_var.to_sorted_list(OutputVarsSet),
-        VarSet0, VarTypes0, VarSet0, VarSet, VarTypes0, VarTypes,
-        map.init, Renaming),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+        VarTable0, VarTable0, VarTable, map.init, Renaming),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     rename_some_vars_in_goal(Renaming, LambdaBody0, LambdaBody),
 
     % Get the determinism of the lambda.
@@ -859,7 +855,7 @@ make_try_lambda(Body0, OutputVarsSet, OutputTupleType, MaybeIO,
         set_of_var.to_sorted_list(NonLocals), LambdaParamsModes,
         LambdaDetism, LambdaBody),
     create_pure_atomic_complicated_unification(LambdaVar, RHS,
-        term.context_init, umc_implicit("try_expand"), [],
+        dummy_context, umc_implicit("try_expand"), [],
         AssignLambdaVarGoal0),
     goal_add_feature(feature_lambda_from_try,
         AssignLambdaVarGoal0, AssignLambdaVarGoal).
@@ -886,16 +882,17 @@ detism_to_try_lambda_detism(detism_failure, detism_semi).
 
 make_try_call(PredName, LambdaVar, ResultVar, ExtraArgs, OutputTupleType,
         GoalPurity, Context, OverallGoal, !PredInfo, !ProcInfo, !ModuleInfo) :-
-    polymorphism_make_type_info_var_raw(OutputTupleType, Context,
+    polymorphism_make_type_info_var_mi(OutputTupleType, Context,
         TypeInfoVar, MakeTypeInfoGoals, !ModuleInfo, !PredInfo, !ProcInfo),
 
     % The mode will be fixed up by a later analysis.
     Mode = mode_no(0),
-    Args = [TypeInfoVar, LambdaVar, ResultVar] ++ ExtraArgs,
     Features = [],
-    generate_simple_call(!.ModuleInfo, mercury_exception_module, PredName,
-        pf_predicate, Mode, detism_cc_multi, purity_pure, Args, Features,
-        instmap_delta_bind_no_var, Context, CallGoal0),
+    generate_plain_call(!.ModuleInfo, pf_predicate,
+        mercury_exception_module, PredName,
+        [TypeInfoVar], [LambdaVar, ResultVar] ++ ExtraArgs,
+        instmap_delta_bind_no_var, Mode,
+        detism_cc_multi, purity_pure, Features, Context, CallGoal0),
 
     goal_info_init(Context, GoalInfo),
 
@@ -918,9 +915,10 @@ make_try_call(PredName, LambdaVar, ResultVar, ExtraArgs, OutputTupleType,
 :- pred make_unreachable_call(module_info::in, hlds_goal::out) is det.
 
 make_unreachable_call(ModuleInfo, Goal) :-
-    generate_simple_call(ModuleInfo, mercury_exception_module, "unreachable",
-        pf_predicate, only_mode, detism_erroneous, purity_pure,
-        [], [], instmap_delta_bind_no_var, term.context_init, Goal).
+    generate_plain_call(ModuleInfo, pf_predicate,
+        mercury_exception_module, "unreachable",
+        [], [], instmap_delta_bind_no_var, only_mode,
+        detism_erroneous, purity_pure, [], dummy_context, Goal).
 
 :- pred make_output_tuple_inst_cast(prog_var::in, prog_var::in,
     list(mer_inst)::in, hlds_goal::out) is det.
@@ -937,18 +935,12 @@ make_output_tuple_inst_cast(TmpTupleVar, TupleVar, TupleArgInsts,
             bound_functor(tuple_cons(TupleArity), TupleArgInsts)
         ]),
         generate_cast_with_insts(unsafe_type_inst_cast, TmpTupleVar, TupleVar,
-            ground_inst, TupleInst, term.context_init, CastOrUnify)
+            ground_inst, TupleInst, dummy_context, CastOrUnify)
     else
         create_pure_atomic_complicated_unification(TupleVar,
-            rhs_var(TmpTupleVar), term.context_init,
+            rhs_var(TmpTupleVar), dummy_context,
             umc_implicit("try_expand"), [], CastOrUnify)
     ).
-
-%-----------------------------------------------------------------------------%
-
-try_expand_may_introduce_calls("try", 2).
-try_expand_may_introduce_calls("try_io", 4).
-try_expand_may_introduce_calls("unreachable", 0).
 
 %-----------------------------------------------------------------------------%
 :- end_module check_hlds.try_expand.

@@ -20,9 +20,10 @@
 :- import_module hlds.
 :- import_module hlds.hlds_class.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
+:- import_module hlds.hlds_cons.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.vartypes.
 
 :- import_module list.
 
@@ -36,8 +37,8 @@
                 ta_var_types            :: vartypes,
                 ta_type_varset          :: tvarset,
 
-                % Universally quantified type variables.
-                ta_external_type_params :: external_type_params,
+                % Existentially quantified type variables.
+                ta_existq_tvars         :: list(tvar),
 
                 % Type bindings.
                 ta_type_bindings        :: tsubst,
@@ -72,8 +73,8 @@
     vartypes::out) is det.
 :- pred type_assign_get_typevarset(type_assign::in,
     tvarset::out) is det.
-:- pred type_assign_get_external_type_params(type_assign::in,
-    external_type_params::out) is det.
+:- pred type_assign_get_existq_tvars(type_assign::in,
+    list(tvar)::out) is det.
 :- pred type_assign_get_type_bindings(type_assign::in,
     tsubst::out) is det.
 :- pred type_assign_get_coerce_constraints(type_assign::in,
@@ -89,7 +90,7 @@
     type_assign::in, type_assign::out) is det.
 :- pred type_assign_set_typevarset(tvarset::in,
     type_assign::in, type_assign::out) is det.
-:- pred type_assign_set_external_type_params(external_type_params::in,
+:- pred type_assign_set_existq_tvars(list(tvar)::in,
     type_assign::in, type_assign::out) is det.
 :- pred type_assign_set_type_bindings(tsubst::in,
     type_assign::in, type_assign::out) is det.
@@ -113,9 +114,8 @@
 
 :- type type_assign_set == list(type_assign).
 
-:- pred type_assign_set_init(tvarset::in, vartypes::in,
-    external_type_params::in, hlds_constraints::in, type_assign_set::out)
-    is det.
+:- pred type_assign_set_init(tvarset::in, vartypes::in, list(tvar)::in,
+    hlds_constraints::in, type_assign_set::out) is det.
 
     % type_assign_set_get_final_info(TypeAssignSet, OldExternalTypeParams,
     %   OldExistQVars, OldExplicitVarTypes, NewTypeVarSet, New* ...,
@@ -148,21 +148,49 @@
 % The args_type_assign data structure.
 %
 
+:- type args_type_assign_source
+    --->    atas_pred(pred_id)
+            % If the argument types come from a plain call, then their source
+            % should be "atas_pred(PredId)" where PredId is the callee.
+    ;       atas_higher_order_call(prog_var)
+            % If the argument types come from a higher order call, then
+            % their source should be "atas_higher_order_call(Var)" where Var
+            % is the higher-order variable being called.
+    ;       atas_cons(cons_type_info_source)
+            % If the argument types come from a ConsId, then their source
+            % should be "atas_cons(ConsTypeInfoSource)", where
+            % ConsTypeInfoSource is the description of the source of ConsId.
+            %
+            % Note that the ConsId may refer to a pred_id when the program
+            % (tries to) partially apply a predicate or function.
+    ;       atas_ensure_have_a_type.
+            % If the argument types come from the compiler try to
+            % ensure that a variable has *a* type, then the source should be
+            % atas_ensure_have_a_type.
+            %
+            % Since ensure_vars_have_a_type does not impose any expectations
+            % on the type of a variable, while atas_ensure_have_a_type
+            % may occur in args_type_assigns, it should *not* occur
+            % in any args_type_assigns involved in argument type errors.
+
 :- type args_type_assign
     --->    args_type_assign(
                 % Type assignment.
-                ata_caller_arg_assign   :: type_assign,
+                ata_caller_arg_assign       :: type_assign,
 
-                % Types of callee args, renamed apart.
-                ata_callee_arg_types    :: list(mer_type),
+                % Types of callee/cons_id args, renamed apart.
+                ata_expected_arg_types      :: list(mer_type),
 
-                % Constraints from callee, renamed apart.
-                ata_callee_constraints  :: hlds_constraints
+                % Constraints from callee/cons_id, renamed apart.
+                ata_expected_constraints    :: hlds_constraints,
+
+                % The source of the expected arg types and their constraints.
+                ata_source                  :: args_type_assign_source
             ).
 
 :- func get_caller_arg_assign(args_type_assign) = type_assign.
-:- func get_callee_arg_types(args_type_assign) = list(mer_type).
-:- func get_callee_constraints(args_type_assign) = hlds_constraints.
+:- func get_expected_arg_types(args_type_assign) = list(mer_type).
+:- func get_expected_constraints(args_type_assign) = hlds_constraints.
 
 %---------------------------------------------------------------------------%
 %
@@ -175,11 +203,46 @@
     %
 :- func convert_args_type_assign_set(args_type_assign_set) = type_assign_set.
 
-    % Same as convert_args_type_assign_set, but aborts when the args are
-    % non-empty.
-    %
-:- func convert_args_type_assign_set_check_empty_args(args_type_assign_set) =
-    type_assign_set.
+%---------------------------------------------------------------------------%
+%
+% The cons_type_info data structure.
+%
+
+% XXX Values of type cons_type_info are not held in the typecheck_info,
+% though values of type cons_type_info_source are. Values of this type
+% are currently computed on demand, though they should be stored precomputed
+% for each data constructor for each type in the HLDS.
+:- type cons_type_info
+    --->    cons_type_info(
+                % Type variables.
+                cti_varset          :: tvarset,
+
+                % Existentially quantified type vars.
+                cti_existq_tvars    :: existq_tvars,
+
+                % Constructor type.
+                cti_result_type     :: mer_type,
+
+                % Types of the arguments.
+                cti_arg_types       :: list(mer_type),
+
+                % Constraints introduced by this constructor (e.g. if it is
+                % actually a function, or if it is an existentially quantified
+                % data constructor).
+                cti_constraints     :: hlds_constraints,
+
+                cti_source          :: cons_type_info_source
+            ).
+
+:- type cons_type_info_source
+    --->    source_type(type_ctor, cons_id)
+    ;       source_builtin_type(string)
+    ;       source_field_access(field_access_type, type_ctor, cons_id, string)
+            % get or set, type, cons_id, field name
+    ;       source_apply(string)
+    ;       source_pred(pred_id).
+
+:- func project_cons_type_info_source(cons_type_info) = cons_type_info_source.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -201,8 +264,8 @@ type_assign_get_var_types(TA, X) :-
     X = TA ^ ta_var_types.
 type_assign_get_typevarset(TA, X) :-
     X = TA ^ ta_type_varset.
-type_assign_get_external_type_params(TA, X) :-
-    X = TA ^ ta_external_type_params.
+type_assign_get_existq_tvars(TA, X) :-
+    X = TA ^ ta_existq_tvars.
 type_assign_get_type_bindings(TA, X) :-
     X = TA ^ ta_type_bindings.
 type_assign_get_coerce_constraints(TA, X) :-
@@ -218,8 +281,8 @@ type_assign_set_var_types(X, !TA) :-
     !TA ^ ta_var_types := X.
 type_assign_set_typevarset(X, !TA) :-
     !TA ^ ta_type_varset := X.
-type_assign_set_external_type_params(X, !TA) :-
-    !TA ^ ta_external_type_params := X.
+type_assign_set_existq_tvars(X, !TA) :-
+    !TA ^ ta_existq_tvars := X.
 type_assign_set_type_bindings(X, !TA) :-
     !TA ^ ta_type_bindings := X.
 type_assign_set_coerce_constraints(X, !TA) :-
@@ -271,7 +334,7 @@ type_assign_set_get_final_info(TypeAssignSet,
         ConstraintProofMap = ConstraintProofMap0,
         ConstraintMap1 = ConstraintMap0,
         vartypes_types(VarTypes1, Types1),
-        type_vars_list(Types1, TypeVars1)
+        type_vars_in_types(Types1, TypeVars1)
     else
         transform_foldl_var_types(expand_types(TypeBindings),
             VarTypes0, VarTypes1, set.init, TypeVarsSet1),
@@ -323,7 +386,7 @@ type_assign_set_get_final_info(TypeAssignSet,
     % (XXX should we do the same for TypeConstraints and ConstraintProofMap
     % too?)
     vartypes_types(OldExplicitVarTypes, ExplicitTypes),
-    type_vars_list(ExplicitTypes, ExplicitTypeVars0),
+    type_vars_in_types(ExplicitTypes, ExplicitTypeVars0),
     map.keys(ExistTypeRenaming, ExistQVarsToBeRenamed),
     list.delete_elems(OldExistQVars, ExistQVarsToBeRenamed,
         ExistQVarsToRemain),
@@ -363,7 +426,7 @@ type_assign_set_get_final_info(TypeAssignSet,
 
 expand_types(TypeSubst, Type0, Type, !TypeVarsSet) :-
     apply_rec_subst_to_type(TypeSubst, Type0, Type),
-    type_vars(Type, TypeVars),
+    type_vars_in_type(Type, TypeVars),
     set.insert_list(TypeVars, !TypeVarsSet).
 
     % We rename any existentially quantified type variables which get mapped
@@ -407,10 +470,10 @@ tvar_maps_to_tvar(TypeBindings, TVar0, TVar) :-
 
 get_caller_arg_assign(ArgsTypeAssign) =
     ArgsTypeAssign ^ ata_caller_arg_assign.
-get_callee_arg_types(ArgsTypeAssign) =
-    ArgsTypeAssign ^ ata_callee_arg_types.
-get_callee_constraints(ArgsTypeAssign) =
-    ArgsTypeAssign ^ ata_callee_constraints.
+get_expected_arg_types(ArgsTypeAssign) =
+    ArgsTypeAssign ^ ata_expected_arg_types.
+get_expected_constraints(ArgsTypeAssign) =
+    ArgsTypeAssign ^ ata_expected_constraints.
 
 %---------------------------------------------------------------------------%
 
@@ -419,32 +482,20 @@ convert_args_type_assign_set([ArgsTypeAssign | ArgsTypeAssigns]) =
     [convert_args_type_assign(ArgsTypeAssign) |
     convert_args_type_assign_set(ArgsTypeAssigns)].
 
-convert_args_type_assign_set_check_empty_args([]) = [].
-convert_args_type_assign_set_check_empty_args([ArgTypeAssign | ArgTypeAssigns])
-        = Result :-
-    ArgTypeAssign = args_type_assign(_, Args, _),
-    (
-        Args = [],
-        Result =
-            [convert_args_type_assign(ArgTypeAssign) |
-            convert_args_type_assign_set_check_empty_args(ArgTypeAssigns)]
-    ;
-        Args = [_ | _],
-        % This should never happen, since the arguments should all have been
-        % processed at this point.
-        unexpected($pred, "Args != []")
-    ).
-
 :- func convert_args_type_assign(args_type_assign) = type_assign.
 
 convert_args_type_assign(ArgsTypeAssign) = TypeAssign :-
-    ArgsTypeAssign = args_type_assign(TypeAssign0, _, Constraints0),
+    ArgsTypeAssign = args_type_assign(TypeAssign0, _, Constraints0, _),
     type_assign_get_typeclass_constraints(TypeAssign0, OldConstraints),
     type_assign_get_type_bindings(TypeAssign0, Bindings),
     apply_rec_subst_to_constraints(Bindings, Constraints0, Constraints),
     merge_hlds_constraints(Constraints, OldConstraints, NewConstraints),
     type_assign_set_typeclass_constraints(NewConstraints,
         TypeAssign0, TypeAssign).
+
+%-----------------------------------------------------------------------------%
+
+project_cons_type_info_source(CTI) = CTI ^ cti_source.
 
 %---------------------------------------------------------------------------%
 :- end_module check_hlds.type_assign.

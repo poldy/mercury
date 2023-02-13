@@ -51,11 +51,6 @@
 
 %-----------------------------------------------------------------------------%
 
-    % Return the predicate name we should use for the given special_pred
-    % for the given type constructor.
-    %
-:- func special_pred_name(special_pred_id, type_ctor) = string.
-
 :- pred special_pred_mode_num(special_pred_id::in, int::out) is det.
 
     % This predicate always returns determinism `semidet' for unification
@@ -94,8 +89,8 @@
 
     % XXX Document me, and the relationship to the /2 pred just above.
     %
-:- pred special_pred_is_generated_lazily(module_info::in, type_ctor::in,
-    hlds_type_body::in, type_status::in) is semidet.
+:- pred special_pred_is_generated_lazily_for_defn(module_info::in,
+    type_ctor::in, hlds_type_body::in, type_status::in) is semidet.
 
     % A compiler-generated predicate only needs type checking if
     % (a) it is a user-defined equality pred, or
@@ -193,28 +188,6 @@ special_pred_description(spec_pred_index,   "indexing predicate").
 
 %-----------------------------------------------------------------------------%
 
-special_pred_name(SpecialPred, type_ctor(SymName, Arity)) = Name :-
-    BaseName = get_special_pred_id_target_name(SpecialPred),
-    AppendTypeId = spec_pred_name_append_type_id,
-    (
-        AppendTypeId = yes,
-        Name = BaseName ++ sym_name_to_string(SymName)
-            ++ "/" ++ int_to_string(Arity)
-    ;
-        AppendTypeId = no,
-        Name = BaseName
-    ).
-
-:- func spec_pred_name_append_type_id = bool.
-:- pragma inline(func(spec_pred_name_append_type_id/0)).
-
-% XXX The name demanglers don't yet understand predicate names for special
-% preds that have the type name and arity appended, and the hand-written
-% unify/compare predicates for builtin types such as typeinfo have the plain
-% base names. Therefore returning "yes" here is useful only for debugging
-% the compiler.
-spec_pred_name_append_type_id = no.
-
 special_pred_mode_num(_, 0).
     % Mode num for special procs is always 0 (the first mode).
 
@@ -281,7 +254,8 @@ special_pred_is_generated_lazily(ModuleInfo, TypeCtor) :-
         special_pred_is_generated_lazily_2(ModuleInfo, TypeBody, TypeStatus)
     ).
 
-special_pred_is_generated_lazily(ModuleInfo, TypeCtor, TypeBody, TypeStatus) :-
+special_pred_is_generated_lazily_for_defn(ModuleInfo, TypeCtor,
+        TypeBody, TypeStatus) :-
     % We don't want special preds for solver types to be generated lazily
     % because we have to insert calls to their initialisation preds during
     % mode analysis and we therefore require the appropriate names to
@@ -417,9 +391,9 @@ compiler_generated_rtti_for_builtins(ModuleInfo) :-
 get_special_proc(ModuleInfo, TypeCtor, SpecialPredId,
         PredName, PredId, ProcId) :-
     TypeCategory = classify_type_ctor(ModuleInfo, TypeCtor),
-    get_category_name(TypeCategory) = MaybeCategoryName,
+    get_ctor_cat_builtin_type_name(TypeCategory) = MaybeBuiltinTypeName,
     (
-        MaybeCategoryName = no,
+        MaybeBuiltinTypeName = no,
         module_info_get_special_pred_maps(ModuleInfo, SpecialPredMaps),
         search_special_pred_maps(SpecialPredMaps, SpecialPredId, TypeCtor,
             PredId),
@@ -430,11 +404,14 @@ get_special_proc(ModuleInfo, TypeCtor, SpecialPredId,
         special_pred_mode_num(SpecialPredId, ProcInt),
         proc_id_to_int(ProcId, ProcInt)
     ;
-        MaybeCategoryName = yes(CategoryName),
+        MaybeBuiltinTypeName = yes(BuiltinTypeName),
         special_pred_name_arity(SpecialPredId, SpecialName, _, Arity),
-        Name = "builtin_" ++ SpecialName ++ "_" ++ CategoryName,
+        Name = "builtin_" ++ SpecialName ++ "_" ++ BuiltinTypeName,
+        % None of the special preds are in fact functions, so for them,
+        % user arity and pred form arity are the same.
+        UserArity = user_arity(Arity),
         lookup_builtin_pred_proc_id(ModuleInfo, mercury_private_builtin_module,
-            Name, pf_predicate, Arity, only_mode, PredId, ProcId),
+            Name, pf_predicate, UserArity, only_mode, PredId, ProcId),
         PredName = qualified(mercury_private_builtin_module, Name)
     ).
 
@@ -451,9 +428,9 @@ get_special_proc_det(ModuleInfo, TypeCtor, SpecialPredId, PredName,
         unexpected($pred, "get_special_proc failed")
     ).
 
-:- func get_category_name(type_ctor_category) = maybe(string).
+:- func get_ctor_cat_builtin_type_name(type_ctor_category) = maybe(string).
 
-get_category_name(CtorCat) = MaybeName :-
+get_ctor_cat_builtin_type_name(CtorCat) = MaybeName :-
     (
         CtorCat = ctor_cat_builtin(cat_builtin_int(int_type_int)),
         MaybeName = yes("int")

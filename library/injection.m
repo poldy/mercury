@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2005-2006, 2010-2011 The University of Melbourne.
-% Copyright (C) 2014-2018 The Mercury team.
+% Copyright (C) 2014-2019, 2021-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -10,8 +10,8 @@
 % Author: mark.
 % Stability: low.
 %
-% This module provides the `injection' ADT.  An injection is like a `map'
-% (see map.m) but it allows efficient reverse lookups, similarly to `bimap'.
+% This module provides the `injection' ADT.  An injection is like a map
+% (see map.m) but it allows efficient reverse lookups, similarly to bimap.
 % This time efficiency comes at the expense of using twice as much space
 % or more.  The difference between an injection and a bimap is that there
 % can be values in the range of the injection that are not returned for any

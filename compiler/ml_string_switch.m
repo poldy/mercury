@@ -132,31 +132,38 @@ ml_generate_string_trie_jump_switch(VarRval, TaggedCases, CodeModel, CanFail,
     map.to_assoc_list(CodeMap, CodeCases),
     generate_trie_arms(CodeCases, [], RevCaseNumSwitchArms),
     list.reverse(RevCaseNumSwitchArms, CaseNumSwitchArms),
-    ml_gen_maybe_switch_failure(CodeModel, CanFail, Context, FailStmts, !Info),
     (
-        FailStmts = [],
+        CanFail = cannot_fail,
+        CaseNumDefault = default_is_unreachable
+    ;
+        CanFail = can_fail,
+        ml_gen_maybe_switch_failure(CodeModel, CanFail, Context, FailStmts,
+            !Info),
         (
-            CodeModel = model_det,
-            % For model_det switches, the default must be unreachable.
-            CaseNumDefault = default_is_unreachable
+            FailStmts = [],
+            (
+                CodeModel = model_det,
+                % For model_det switches, the default must be unreachable.
+                CaseNumDefault = default_is_unreachable
+            ;
+                CodeModel = model_semi,
+                % For model_semi switches, the default should contain at least
+                % an assignment of FALSE to the "succeeded" flag.
+                unexpected($pred, "failure does not assign to succeeded")
+            ;
+                CodeModel = model_non,
+                FailStmt = ml_stmt_block([], [], [], Context),
+                CaseNumDefault = default_case(FailStmt)
+            )
         ;
-            CodeModel = model_semi,
-            % For model_semi switches, the default should contain at least
-            % an assignment of FALSE to the "succeeded" flag.
-            unexpected($pred, "failure does not assign to succeeded")
-        ;
-            CodeModel = model_non,
-            FailStmt = ml_stmt_block([], [], [], Context),
+            (
+                FailStmts = [FailStmt]
+            ;
+                FailStmts = [_, _ | _],
+                FailStmt = ml_stmt_block([], [], FailStmts, Context)
+            ),
             CaseNumDefault = default_case(FailStmt)
         )
-    ;
-        (
-            FailStmts = [FailStmt]
-        ;
-            FailStmts = [_, _ | _],
-            FailStmt = ml_stmt_block([], [], FailStmts, Context)
-        ),
-        CaseNumDefault = default_case(FailStmt)
     ),
     CaseNumSwitchRange = mlds_switch_range(0, MaxCaseNum),
     CaseSwitchStmt = ml_stmt_switch(mlds_builtin_type_int(int_type_int),
@@ -493,7 +500,7 @@ create_trie(Encoding, TaggedCases, MaxCaseNum, TopTrieNode) :-
     ;
         StrsCaseIds = [HeadStrCaseId | TailStrCaseIds],
         HeadStrCaseId = HeadStr - HeadCaseId,
-        to_code_unit_list(Encoding, HeadStr, HeadStrCodeUnits),
+        to_code_unit_list_in_encoding(Encoding, HeadStr, HeadStrCodeUnits),
         TopTrieNode1 = trie_leaf([], HeadStrCodeUnits, HeadCaseId),
         insert_cases_into_trie(Encoding, TailStrCaseIds, TopTrieNode1,
             TopTrieNode)
@@ -505,7 +512,7 @@ create_trie(Encoding, TaggedCases, MaxCaseNum, TopTrieNode) :-
 insert_cases_into_trie(_Encoding, [], !TrieNode).
 insert_cases_into_trie(Encoding, [Case | Cases], !TrieNode) :-
     Case = Str - CaseId,
-    to_code_unit_list(Encoding, Str, StrCodeUnits),
+    to_code_unit_list_in_encoding(Encoding, Str, StrCodeUnits),
     insert_case_into_trie_node([], StrCodeUnits, CaseId, !TrieNode),
     insert_cases_into_trie(Encoding, Cases, !TrieNode).
 
@@ -612,7 +619,9 @@ convert_trie_to_nested_switches(Encoding, VarRval, CaseNumVarLval, Context,
         list.length(RevMatchedCodeUnits, NumRevMatchedCodeUnits),
         expect(unify(NumRevMatchedCodeUnits, NumMatched), $pred,
             "NumRevMatchedCodeUnits != NumMatched"),
-        ( if from_code_unit_list(Encoding, AllCodeUnits, String) then
+        ( if
+            from_code_unit_list_in_encoding(Encoding, AllCodeUnits, String)
+        then
             StringRval = ml_const(mlconst_string(String))
         else
             unexpected($pred, "code units cannot be turned back into string")

@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
-% Copyright (C) 2016-2020 The Mercury team.
+% Copyright (C) 2016-2021 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -17,7 +17,12 @@
 :- module uint.
 :- interface.
 
+:- import_module enum.
 :- import_module pretty_printer.
+
+%---------------------------------------------------------------------------%
+
+:- instance uenum(uint).
 
 %---------------------------------------------------------------------------%
 
@@ -127,12 +132,14 @@
     % Throws an exception if Y is not in [0, bits_per_uint).
     %
 :- func (uint::in) << (int::in) = (uint::uo) is det.
+:- func (uint::in) <<u (uint::in) = (uint::uo) is det.
 
     % unchecked_left_shift(X, Y) is the same as X << Y except that the
     % behaviour is undefined if Y is not in [0, bits_per_uint).
     % It will typically be implemented more efficiently than X << Y.
     %
 :- func unchecked_left_shift(uint::in, int::in) = (uint::uo) is det.
+:- func unchecked_left_ushift(uint::in, uint::in) = (uint::uo) is det.
 
     % Right shift.
     % X >> Y returns X "right shifted" by Y bits.
@@ -140,12 +147,14 @@
     % Throws an exception if Y is not in [0, bits_per_uint).
     %
 :- func (uint::in) >> (int::in) = (uint::uo) is det.
+:- func (uint::in) >>u (uint::in) = (uint::uo) is det.
 
     % unchecked_right_shift(X, Y) is the same as X >> Y except that the
     % behaviour is undefined if Y is not in [0, bits_per_uint).
     % It will typically be implemented more efficiently than X >> Y.
     %
 :- func unchecked_right_shift(uint::in, int::in) = (uint::uo) is det.
+:- func unchecked_right_ushift(uint::in, uint::in) = (uint::uo) is det.
 
     % even(X) is equivalent to (X mod 2 = 0).
     %
@@ -178,13 +187,15 @@
     %
 :- func max_uint = uint.
 
-    % bits_per_uint is the number of bits in a uint on this machine.
+    % [u]bits_per_uint is the number of bits in a uint on this machine.
     %
 :- func bits_per_uint = int.
+:- func ubits_per_uint = uint.
 
     % Convert a uint to a pretty_printer.doc for formatting.
     %
 :- func uint_to_doc(uint) = pretty_printer.doc.
+:- pragma obsolete(func(uint_to_doc/1), [pretty_printer.uint_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %
@@ -203,7 +214,13 @@
 
 :- import_module exception.
 :- import_module require.
-:- import_module string.
+
+%---------------------------------------------------------------------------%
+
+:- instance uenum(uint) where [
+    to_uint(X) = X,
+    from_uint(X, X)
+].
 
 %---------------------------------------------------------------------------%
 
@@ -326,18 +343,34 @@ X rem Y = Rem :-
 %---------------------------------------------------------------------------%
 
 X << Y = Result :-
-    ( if cast_from_int(Y) < cast_from_int(bits_per_uint) then
+    ( if cast_from_int(Y) < ubits_per_uint then
         Result = unchecked_left_shift(X, Y)
     else
         Msg = "uint.(<<): second operand is out of range",
         throw(domain_error(Msg))
     ).
 
+X <<u Y = Result :-
+    ( if Y < ubits_per_uint then
+        Result = unchecked_left_ushift(X, Y)
+    else
+        Msg = "uint.(<<u): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
 X >> Y = Result :-
-    ( if cast_from_int(Y) < cast_from_int(bits_per_uint) then
+    ( if cast_from_int(Y) < ubits_per_uint then
         Result = unchecked_right_shift(X, Y)
     else
         Msg = "uint.(>>): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
+X >>u Y = Result :-
+    ( if Y < ubits_per_uint then
+        Result = unchecked_right_ushift(X, Y)
+    else
+        Msg = "uint.(>>u): second operand is out of range",
         throw(domain_error(Msg))
     ).
 
@@ -397,14 +430,12 @@ odd(X) :-
 "
     Bits = ML_BITS_PER_UINT;
 ").
-
 :- pragma foreign_proc("Java",
     bits_per_uint = (Bits::out),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     Bits = 32;
 ").
-
 :- pragma foreign_proc("C#",
     bits_per_uint = (Bits::out),
     [will_not_call_mercury, promise_pure, thread_safe],
@@ -412,9 +443,29 @@ odd(X) :-
     Bits = 32;
 ").
 
+:- pragma foreign_proc("C",
+    ubits_per_uint = (Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
+        does_not_affect_liveness],
+"
+    Bits = (MR_Unsigned) ML_BITS_PER_UINT;
+").
+:- pragma foreign_proc("Java",
+    ubits_per_uint = (Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Bits = 32;
+").
+:- pragma foreign_proc("C#",
+    ubits_per_uint = (Bits::out),
+    [will_not_call_mercury, promise_pure, thread_safe],
+"
+    Bits = 32;
+").
+
 %---------------------------------------------------------------------------%
 
-uint_to_doc(X) = str(string.uint_to_string(X)).
+uint_to_doc(U) = pretty_printer.uint_to_doc(U).
 
 %---------------------------------------------------------------------------%
 
@@ -433,7 +484,7 @@ uint_to_doc(X) = str(string.uint_to_string(X)).
 
 hash(!.Key) = Hash :-
     C2 = 0x_27d4_eb2d_u, % A prime or odd constant.
-    ( if bits_per_uint = 32 then
+    ( if ubits_per_uint = 32u then
         !:Key = (!.Key `xor` 61_u) `xor` (!.Key >> 16),
         !:Key = !.Key + (!.Key << 3),
         !:Key = !.Key `xor` (!.Key >> 4),

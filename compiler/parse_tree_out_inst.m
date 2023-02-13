@@ -65,11 +65,11 @@
 
 %-----------------------------------------------------------------------------%
 
-:- pred mercury_format_is_live_comma(is_live::in, S::in, U::di, U::uo) is det
-    <= output(S, U).
+:- pred mercury_format_is_live_comma(is_live::in, S::in, U::di, U::uo)
+    is det <= output(S, U).
 
-:- pred mercury_format_real_comma(unify_is_real::in, S::in, U::di, U::uo) is det
-    <= output(S, U).
+:- pred mercury_format_real_comma(unify_is_real::in, S::in, U::di, U::uo)
+    is det <= output(S, U).
 
 :- func mercury_uniqueness_to_string(uniqueness, string) = string.
 :- pred mercury_format_uniqueness(uniqueness::in, string::in,
@@ -108,8 +108,8 @@
 :- import_module parse_tree.prog_util.
 
 :- import_module require.
-:- import_module varset.
 :- import_module unit.
+:- import_module varset.
 
 %-----------------------------------------------------------------------------%
 
@@ -176,14 +176,15 @@ mercury_format_inst(Lang, InstVarSet, Inst, S, !U) :-
         )
     ;
         Inst = inst_var(Var),
-        mercury_format_var(InstVarSet, print_name_only, Var, S, !U)
+        mercury_format_var_vs(InstVarSet, print_name_only, Var, S, !U)
     ;
         Inst = constrained_inst_vars(Vars, CInst),
         mercury_format_constrained_inst_vars(Lang, InstVarSet, Vars, CInst,
             S, !U)
     ;
         Inst = abstract_inst(Name, Args),
-        mercury_format_inst_name(Lang, InstVarSet, user_inst(Name, Args), S, !U)
+        mercury_format_inst_name(Lang, InstVarSet, user_inst(Name, Args),
+            S, !U)
     ;
         Inst = defined_inst(InstName),
         mercury_format_inst_name(Lang, InstVarSet, InstName, S, !U)
@@ -343,7 +344,7 @@ mercury_format_inst_name(Lang, InstVarSet, InstName, S, !U) :-
 mercury_format_constrained_inst_vars(Lang, InstVarSet, !.Vars, Inst, S, !U) :-
     ( if set.remove_least(Var, !Vars) then
         add_string("(", S, !U),
-        mercury_format_var(InstVarSet, print_name_only, Var, S, !U),
+        mercury_format_var_vs(InstVarSet, print_name_only, Var, S, !U),
         add_string(" =< ", S, !U),
         mercury_format_constrained_inst_vars(Lang, InstVarSet, !.Vars, Inst,
             S, !U),
@@ -410,7 +411,8 @@ mercury_format_ground_pred_inst_info(Lang, InstVarSet, Uniq, PredInstInfo,
         MaybeArgRegs = arg_reg_types_unset
     ).
 
-mercury_format_any_pred_inst_info(Lang, InstVarSet, Uniq, PredInstInfo, S, !U) :-
+mercury_format_any_pred_inst_info(Lang, InstVarSet, Uniq, PredInstInfo,
+        S, !U) :-
     PredInstInfo = pred_inst_info(PredOrFunc, Modes, MaybeArgRegs, Det),
     (
         Uniq = shared
@@ -505,8 +507,8 @@ mercury_format_real_comma(Real, S, !U) :-
         add_string("fake, ", S, !U)
     ).
 
-:- pred mercury_format_comma_real(unify_is_real::in, S::in, U::di, U::uo) is det
-    <= output(S, U).
+:- pred mercury_format_comma_real(unify_is_real::in, S::in, U::di, U::uo)
+    is det <= output(S, U).
 
 mercury_format_comma_real(Real, S, !U) :-
     (
@@ -602,8 +604,10 @@ mercury_format_mode(Lang, InstVarSet, Mode0, S, !U) :-
                 insts_to_mode(FromInst0, ToInst0, Mode1),
                 (
                     Mode1 = from_to_mode(FromInst1, ToInst1),
-                    strip_builtin_qualifiers_from_inst(FromInst1, FromInst),
-                    strip_builtin_qualifiers_from_inst(ToInst1, ToInst),
+                    strip_module_names_from_inst(strip_builtin_module_name,
+                        FromInst1, FromInst),
+                    strip_module_names_from_inst(strip_builtin_module_name,
+                        ToInst1, ToInst),
                     mercury_format_from_to_mode(Lang, InstVarSet,
                         FromInst, ToInst, S, !U)
                 ;
@@ -638,7 +642,7 @@ mercury_format_user_defined_mode(Lang, InstVarSet, SymName, ArgInsts, S, !U) :-
     %
     % 1 omit brackets from around sym_names, and
     % 2 omit module qualifiers from sym_names.
-    %
+      %
     % The brackets are needed only to help the parser when trying to read in
     % the output sym_name, when that happens to be an operator. Humans can
     % parse the bracketless output even if the parser can't.

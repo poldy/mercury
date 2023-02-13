@@ -16,6 +16,12 @@ MCFLAGS-arg_order_rearrangment	= \
 MCFLAGS-bug412			= --warn-unused-imports
 MCFLAGS-duplicate_call		= --warn-duplicate-calls
 MCFLAGS-duplicate_const		= --warn-duplicate-calls
+
+MCFLAGS-empty_interface		= -E
+
+MCFLAGS-disabled_warning    	= --warn-unknown-format-calls
+MCFLAGS-format_call_warning    	= --warn-unknown-format-calls
+
 MCFLAGS-unused_args_analysis    = \
 				--intermodule-analysis \
 				--optimize-unused-args \

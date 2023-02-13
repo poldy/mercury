@@ -87,6 +87,8 @@
 %---------------------%
 % Set operations.
 
+:- pred subset(set_of_var(T)::in, set_of_var(T)::in) is semidet.
+
 :- func union(set_of_var(T), set_of_var(T)) = set_of_var(T).
 :- pred union(set_of_var(T)::in, set_of_var(T)::in,
     set_of_var(T)::out) is det.
@@ -181,8 +183,8 @@
 % Once the representation has been proven, you can change all those occurrences
 % of test_bitset to the name of the module implementing the new representation.
 
-:- import_module sparse_bitset.                                       % MODULE
 :- import_module require.
+:- import_module sparse_bitset.                                       % MODULE
 
 :- type set_of_var(T) ==  sparse_bitset(var(T)).                      % MODULE
 
@@ -281,6 +283,9 @@ remove_least(LeastElem, !Set) :-
 
 %---------------------%
 % Set operations.
+
+subset(SetA, SetB) :-
+    sparse_bitset.subset(SetA, SetB).                                 % MODULE
 
 union(SetA, SetB) = sparse_bitset.union(SetA, SetB).                  % MODULE
 union(SetA, SetB, Set) :-

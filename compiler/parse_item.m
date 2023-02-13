@@ -16,18 +16,18 @@
 
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.parse_types.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_item.
 
-:- import_module list.
+:- import_module maybe.
 :- import_module term.
 :- import_module varset.
 
     % parse_item_or_marker(ModuleName, VarSet, Term, SeqNum,
-    %   MaybeItemOrMarker, !Specs):
+    %   MaybeItemOrMarker):
     %
     % Parse Term as either an item or sequence of items, or as a marker for
     % the start or end of a module, the start of a module section,
@@ -40,15 +40,22 @@
     % in both cases.
     %
     % If the parsing attempt is unsuccessful, bind MaybeItemOrMarker
-    % to an error1() wrappedaround an appropriate set of error messages.
-    %
-    % If the term to be parsed has an error that we can recover from without
-    % losing information, then return the item or marker *and* add the
-    % appropriate messages to !Specs.
+    % to an error1() wrapped around an appropriate set of error messages.
     %
 :- pred parse_item_or_marker(module_name::in, varset::in, term::in,
-    item_seq_num::in, maybe1(item_or_marker)::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
+    item_seq_num::in, maybe1(item_or_marker)::out) is det.
+
+    % parse_clause_term(MaybeDefaultModuleName, VarSet, Term, SeqNum,
+    %   MaybeItemOrMarker):
+    %
+    % The part of parse_item_or_marker that parses clauses. Implicit
+    % qualification happens only if the caller passes a module name
+    % in the first argument.
+    %
+    % Exported for use by parse_class.m.
+    %
+:- pred parse_clause_term(maybe(module_name)::in, varset::in, term::in,
+    item_seq_num::in, maybe1(item_clause_info)::out) is det.
 
     % parse_class_decl(ModuleName, VarSet, Term, MaybeClassDecl):
     %
@@ -58,7 +65,7 @@
     % Qualify appropriate parts of the declaration with ModuleName
     % as the module name.
     %
-    %ino Exported for use by parse_class.m.
+    % Exported for use by parse_class.m.
     %
 :- pred parse_class_decl(module_name::in, varset::in, term::in,
     maybe1(class_decl)::out) is det.
@@ -113,10 +120,11 @@
 :- import_module parse_tree.parse_mutable.
 :- import_module parse_tree.parse_pragma.
 :- import_module parse_tree.parse_sym_name.
+:- import_module parse_tree.parse_tree_out_clause.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.parse_type_defn.
-:- import_module parse_tree.parse_type_repn.
 :- import_module parse_tree.parse_type_name.
+:- import_module parse_tree.parse_type_repn.
 :- import_module parse_tree.parse_util.
 :- import_module parse_tree.parse_vars.
 :- import_module parse_tree.prog_mode.
@@ -126,39 +134,46 @@
 :- import_module bool.
 :- import_module cord.
 :- import_module int.
+:- import_module list.
 :- import_module map.
-:- import_module maybe.
 :- import_module one_or_more.
+:- import_module pretty_printer.
 :- import_module string.
+:- import_module term_int.
 
 %---------------------------------------------------------------------------%
 
-parse_item_or_marker(ModuleName, VarSet, Term, SeqNum, MaybeIOM, !Specs) :-
+parse_item_or_marker(ModuleName, VarSet, Term, SeqNum, MaybeIOM) :-
     ( if Term = term.functor(term.atom(":-"), [DeclTerm], _DeclContext) then
         parse_decl_term_item_or_marker(ModuleName, VarSet, DeclTerm,
-            SeqNum, MaybeIOM, !Specs)
-    else
-        parse_clause_term_item_or_marker(ModuleName, VarSet, Term,
             SeqNum, MaybeIOM)
+    else
+        parse_clause_term(yes(ModuleName), VarSet, Term, SeqNum, MaybeClause),
+        (
+            MaybeClause = ok1(ItemClause),
+            MaybeIOM = ok1(iom_item(item_clause(ItemClause)))
+        ;
+            MaybeClause = error1(Specs),
+            MaybeIOM = error1(Specs)
+        )
     ).
 
 %---------------------------------------------------------------------------%
 
 :- pred parse_decl_term_item_or_marker(module_name::in, varset::in, term::in,
-    item_seq_num::in, maybe1(item_or_marker)::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-:- pragma inline(pred(parse_decl_term_item_or_marker/7)).
+    item_seq_num::in, maybe1(item_or_marker)::out) is det.
+:- pragma inline(pred(parse_decl_term_item_or_marker/5)).
 
 parse_decl_term_item_or_marker(ModuleName, VarSet, DeclTerm,
-        SeqNum, MaybeIOM, !Specs) :-
+        SeqNum, MaybeIOM) :-
     ( if DeclTerm = term.functor(term.atom(Functor), ArgTerms, Context) then
         ( if
             parse_decl_item_or_marker(ModuleName, VarSet, Functor, ArgTerms,
-                decl_is_not_in_class, Context, SeqNum, MaybeIOMPrime, !Specs)
+                decl_is_not_in_class, Context, SeqNum, MaybeIOMPrime)
         then
             MaybeIOM = MaybeIOMPrime
         else
-            Spec = decl_functor_is_not_valid(DeclTerm, Functor),
+            Spec = decl_functor_is_not_valid(Functor, Context),
             MaybeIOM = error1([Spec])
         )
     else
@@ -169,17 +184,16 @@ parse_decl_term_item_or_marker(ModuleName, VarSet, DeclTerm,
 :- func decl_is_not_an_atom(varset, term) = error_spec.
 
 decl_is_not_an_atom(VarSet, Term) = Spec :-
-    TermStr = mercury_term_to_string(VarSet, print_name_only, Term),
+    TermStr = mercury_term_to_string_vs(VarSet, print_name_only, Term),
     Context = get_term_context(Term),
     Pieces = [words("Error:"), quote(TermStr),
         words("is not a valid declaration."), nl],
     Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
         Context, Pieces).
 
-:- func decl_functor_is_not_valid(term, string) = error_spec.
+:- func decl_functor_is_not_valid(string, prog_context) = error_spec.
 
-decl_functor_is_not_valid(Term, Functor) = Spec :-
-    Context = get_term_context(Term),
+decl_functor_is_not_valid(Functor, Context) = Spec :-
     Pieces = [words("Error:"), quote(Functor),
         words("is not a valid declaration type."), nl],
     Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
@@ -189,11 +203,10 @@ decl_functor_is_not_valid(Term, Functor) = Spec :-
 
 :- pred parse_decl_item_or_marker(module_name::in, varset::in,
     string::in, list(term)::in, decl_in_class::in, prog_context::in,
-    item_seq_num::in, maybe1(item_or_marker)::out,
-    list(error_spec)::in, list(error_spec)::out) is semidet.
+    item_seq_num::in, maybe1(item_or_marker)::out) is semidet.
 
 parse_decl_item_or_marker(ModuleName, VarSet, Functor, ArgTerms,
-        IsInClass, Context, SeqNum, MaybeIOM, !Specs) :-
+        IsInClass, Context, SeqNum, MaybeIOM) :-
     require_switch_arms_det [Functor]
     (
         Functor = "module",
@@ -221,11 +234,11 @@ parse_decl_item_or_marker(ModuleName, VarSet, Functor, ArgTerms,
     ;
         Functor = "type",
         parse_type_defn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
-            non_solver_type, MaybeIOM, !Specs)
+            non_solver_type, MaybeIOM)
     ;
         Functor = "solver",
         parse_solver_type_defn_item(ModuleName, VarSet, ArgTerms,
-            Context, SeqNum, MaybeIOM, !Specs)
+            Context, SeqNum, MaybeIOM)
     ;
         Functor = "type_representation",
         parse_type_repn_item(ModuleName, VarSet, ArgTerms, Context, SeqNum,
@@ -396,18 +409,16 @@ parse_attr_decl_item_or_marker(ModuleName, VarSet, Functor, ArgTerms,
 
 %---------------------------------------------------------------------------%
 
-:- pred parse_clause_term_item_or_marker(module_name::in, varset::in, term::in,
-    item_seq_num::in, maybe1(item_or_marker)::out) is det.
-:- pragma inline(pred(parse_clause_term_item_or_marker/5)).
+:- pragma inline(pred(parse_clause_term/5)).
 
-parse_clause_term_item_or_marker(ModuleName, VarSet, Term, SeqNum, MaybeIOM) :-
+parse_clause_term(MaybeModuleName, VarSet, Term, SeqNum, MaybeClause) :-
     ( if
         Term = term.functor(term.atom("-->"), [DCGHeadTerm, DCGBodyTerm],
             DCGContext)
     then
         % Term is a DCG clause.
-        parse_dcg_clause(ModuleName, VarSet, DCGHeadTerm, DCGBodyTerm,
-            DCGContext, SeqNum, MaybeIOM)
+        parse_dcg_clause(MaybeModuleName, VarSet, DCGHeadTerm, DCGBodyTerm,
+            DCGContext, SeqNum, MaybeClause)
     else
         % Term is a clause; either a fact or a rule.
         ( if
@@ -424,8 +435,8 @@ parse_clause_term_item_or_marker(ModuleName, VarSet, Term, SeqNum, MaybeIOM) :-
             ClauseContext = get_term_context(HeadTerm),
             BodyTerm = term.functor(term.atom("true"), [], ClauseContext)
         ),
-        parse_clause(ModuleName, VarSet, HeadTerm, BodyTerm,
-            ClauseContext, SeqNum, MaybeIOM)
+        parse_clause(MaybeModuleName, VarSet, HeadTerm, BodyTerm,
+            ClauseContext, SeqNum, MaybeClause)
     ).
 
 parse_class_decl(ModuleName, VarSet, Term, MaybeClassMethod) :-
@@ -504,7 +515,7 @@ parse_quant_attr(ModuleName, VarSet, Functor, ArgTerms, IsInClass, Context,
         MaybeIOM = error1([Spec])
     ).
 
-:- pred check_quant_vars(cord(format_component)::in, varset::in,
+:- pred check_quant_vars(cord(format_piece)::in, varset::in,
     quantifier_type::in, term::in, maybe1(list(var))::out) is det.
 
 check_quant_vars(InitContextPieces, VarSet, QuantType, VarsTerm, MaybeVars) :-
@@ -591,7 +602,7 @@ parse_attributed_decl(ModuleName, VarSet, Term, IsInClass, _Context, SeqNum,
         then
             MaybeIOM = MaybeIOMPrime
         else
-            Spec = decl_functor_is_not_valid(Term, Functor),
+            Spec = decl_functor_is_not_valid(Functor, FunctorContext),
             MaybeIOM = error1([Spec])
         )
     else
@@ -809,9 +820,9 @@ parse_mode_defn_or_decl_item(ModuleName, VarSet, ArgTerms, IsInClass, Context,
 parse_version_numbers_marker(ModuleName, Functor, ArgTerms,
         Context, _SeqNum, MaybeIOM) :-
     (
-        ArgTerms = [VersionNumberTerm, ModuleNameTerm, VersionNumbersTerm],
-        ( if decimal_term_to_int(VersionNumberTerm, VersionNumber) then
-            ( if VersionNumber = module_item_version_numbers_version_number then
+        ArgTerms = [VNTerm, ModuleNameTerm, VersionNumbersTerm],
+        ( if term_int.decimal_term_to_int(VNTerm, VN) then
+            ( if VN = module_item_version_numbers_version_number then
                 ( if
                     try_parse_symbol_name(ModuleNameTerm, ModuleName)
                 then
@@ -840,7 +851,7 @@ parse_version_numbers_marker(ModuleName, Functor, ArgTerms,
                 Spec = conditional_spec($pred, warn_smart_recompilation, yes,
                     severity_error, phase_term_to_parse_tree,
                     [simplest_msg(Context, Pieces)]),
-                MaybeIOM = ok1(iom_handled([Spec]))
+                MaybeIOM = ok1(iom_handled_error([Spec]))
             )
         else
             Pieces = [words("Error: invalid version number in"),
@@ -869,13 +880,21 @@ parse_version_numbers_marker(ModuleName, Functor, ArgTerms,
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-:- pred parse_clause(module_name::in, varset::in, term::in, term::in,
-    term.context::in, item_seq_num::in, maybe1(item_or_marker)::out) is det.
+:- pred parse_clause(maybe(module_name)::in, varset::in, term::in, term::in,
+    term.context::in, item_seq_num::in, maybe1(item_clause_info)::out) is det.
 
-parse_clause(ModuleName, VarSet0, HeadTerm, BodyTerm0, Context, SeqNum,
-        MaybeIOM) :-
+parse_clause(MaybeModuleName, VarSet0, HeadTerm, BodyTerm0, Context, SeqNum,
+        MaybeClause) :-
     varset.coerce(VarSet0, ProgVarSet0),
     GoalContextPieces = cord.init,
+    trace [compile_time(flag("print_parse_goal_input")),
+        runtime(env("PRINT_PARSE_GOAL_INPUT")), io(!IO)]
+    (
+        io.stderr_stream(StdErr, !IO),
+        io.nl(StdErr, !IO),
+        write_doc(StdErr, pretty_printer.format(BodyTerm0), !IO),
+        io.nl(StdErr, !IO)
+    ),
     parse_goal(BodyTerm0, GoalContextPieces, MaybeBodyGoal,
         ProgVarSet0, ProgVarSet),
     varset.coerce(ProgVarSet, VarSet),
@@ -893,8 +912,15 @@ parse_clause(ModuleName, VarSet0, HeadTerm, BodyTerm0, Context, SeqNum,
         else
             HeadContextPieces =
                 cord.from_list([words("In equation head:"), nl]),
-            parse_implicitly_qualified_sym_name_and_args(ModuleName,
-                FuncHeadTerm, VarSet, HeadContextPieces, MaybeFunctor)
+            (
+                MaybeModuleName = no,
+                parse_sym_name_and_args(VarSet,
+                    HeadContextPieces, FuncHeadTerm, MaybeFunctor)
+            ;
+                MaybeModuleName = yes(ModuleName),
+                parse_implicitly_qualified_sym_name_and_args(ModuleName,
+                    VarSet, HeadContextPieces, FuncHeadTerm, MaybeFunctor)
+            )
         )
     else
         MaybeFuncResultTerm = no,
@@ -905,11 +931,17 @@ parse_clause(ModuleName, VarSet0, HeadTerm, BodyTerm0, Context, SeqNum,
         else
             HeadContextPieces =
                 cord.from_list([words("In clause head:"), nl]),
-            parse_implicitly_qualified_sym_name_and_args(ModuleName, HeadTerm,
-                VarSet, HeadContextPieces, MaybeFunctor)
+            (
+                MaybeModuleName = no,
+                parse_sym_name_and_args(VarSet,
+                    HeadContextPieces, HeadTerm, MaybeFunctor)
+            ;
+                MaybeModuleName = yes(ModuleName),
+                parse_implicitly_qualified_sym_name_and_args(ModuleName,
+                    VarSet, HeadContextPieces, HeadTerm, MaybeFunctor)
+            )
         )
     ),
-
     (
         MaybeFunctor = ok2(SymName, ArgTerms0),
         (
@@ -922,14 +954,38 @@ parse_clause(ModuleName, VarSet0, HeadTerm, BodyTerm0, Context, SeqNum,
             ArgTerms = ArgTerms0
         ),
         list.map(term.coerce, ArgTerms, ProgArgTerms),
+        trace [compile_time(flag("print_parse_goal_output")),
+            runtime(env("PRINT_PARSE_GOAL_OUTPUT")), io(!IO)]
+        (
+            io.stderr_stream(StdErr, !IO),
+            ( if
+                unqualify_name(SymName) = "pred_you_want_to_debug"
+            then
+                (
+                    MaybeBodyGoal = ok2(Goal, _),
+                    io.nl(StdErr, !IO),
+                    io.format(StdErr, "parsed %s/%d:\n",
+                        [s(sym_name_to_string(SymName)),
+                        i(list.length(ProgArgTerms))], !IO),
+                    mercury_output_goal(StdErr, ProgVarSet, 0, Goal, !IO),
+                    io.nl(StdErr, !IO)
+                ;
+                    MaybeBodyGoal = error2(_),
+                    io.format(StdErr, "parsing %s/%d failed\n",
+                        [s(sym_name_to_string(SymName)),
+                        i(list.length(ProgArgTerms))], !IO)
+                )
+            else
+                true
+            )
+        ),
         ItemClause = item_clause_info(PredOrFunc, SymName, ProgArgTerms,
             ProgVarSet, MaybeBodyGoal, Context, SeqNum),
-        Item = item_clause(ItemClause),
-        MaybeIOM = ok1(iom_item(Item))
+        MaybeClause = ok1(ItemClause)
     ;
         MaybeFunctor = error2(FunctorSpecs),
         Specs = FunctorSpecs ++ get_any_errors_warnings2(MaybeBodyGoal),
-        MaybeIOM = error1(Specs)
+        MaybeClause = error1(Specs)
     ).
 
 %---------------------------------------------------------------------------%
@@ -1069,7 +1125,7 @@ parse_pred_decl_base(PredOrFunc, ModuleName, VarSet, PredTypeTerm,
             MaybeIOM = error1([Spec])
         else
             parse_implicitly_qualified_sym_name_and_args(ModuleName,
-                PredTypeTerm, VarSet, ContextPieces, MaybePredNameAndArgs),
+                VarSet, ContextPieces, PredTypeTerm, MaybePredNameAndArgs),
             (
                 MaybePredNameAndArgs = error2(Specs),
                 MaybeIOM = error1(Specs)
@@ -1179,7 +1235,7 @@ parse_func_decl_base(ModuleName, VarSet, Term, MaybeDet, IsInClass, Context,
             else
                 FuncTerm = desugar_field_access(MaybeSugaredFuncTerm),
                 parse_implicitly_qualified_sym_name_and_args(ModuleName,
-                    FuncTerm, VarSet, ContextPieces, MaybeFuncNameAndArgs),
+                    VarSet, ContextPieces, FuncTerm, MaybeFuncNameAndArgs),
                 (
                     MaybeFuncNameAndArgs = error2(Specs),
                     MaybeIOM = error1(Specs)
@@ -1378,7 +1434,7 @@ classify_type_and_mode_list(ArgNum, [Head | Tail],
     --->    dont_add_the_prefix
     ;       add_the_prefix.
 
-:- func wrap_nth(maybe_add_the_prefix, int) = format_component.
+:- func wrap_nth(maybe_add_the_prefix, int) = format_piece.
 
 wrap_nth(MaybeAddPredix, ArgNum) = Component :-
     ( if ArgNum < 0 then
@@ -1468,8 +1524,8 @@ parse_mode_decl_base(ModuleName, VarSet, Term, IsInClass, Context, SeqNum,
             FuncTerm = desugar_field_access(MaybeSugaredFuncTerm),
             ContextPieces = cord.from_list([words("In function"), decl("mode"),
                 words("declaration:"), nl]),
-            parse_implicitly_qualified_sym_name_and_args(ModuleName, FuncTerm,
-                VarSet, ContextPieces, MaybeFunctorArgs),
+            parse_implicitly_qualified_sym_name_and_args(ModuleName,
+                VarSet, ContextPieces, FuncTerm, MaybeFunctorArgs),
             (
                 MaybeFunctorArgs = error2(Specs),
                 MaybeIOM = error1(Specs)
@@ -1490,8 +1546,8 @@ parse_mode_decl_base(ModuleName, VarSet, Term, IsInClass, Context, SeqNum,
         else
             ContextPieces = cord.from_list([words("In"), decl("mode"),
                 words("declaration:"), nl]),
-            parse_implicitly_qualified_sym_name_and_args(ModuleName, Term,
-                VarSet, ContextPieces, MaybeFunctorArgs),
+            parse_implicitly_qualified_sym_name_and_args(ModuleName,
+                VarSet, ContextPieces, Term, MaybeFunctorArgs),
             (
                 MaybeFunctorArgs = error2(Specs),
                 MaybeIOM = error1(Specs)
@@ -1653,7 +1709,7 @@ get_purity_from_attrs(Context, [PurityAttr | PurityAttrs], MaybePurity) :-
     % XXX The "smallest" part of that is almost certainly bug.
     %
 :- pred get_class_context_and_inst_constraints_from_attrs(module_name::in,
-    varset::in, list(quant_constr_attr)::in, cord(format_component)::in,
+    varset::in, list(quant_constr_attr)::in, cord(format_piece)::in,
     maybe3(existq_tvars, prog_constraints, inst_var_sub)::out) is det.
 
 get_class_context_and_inst_constraints_from_attrs(ModuleName, VarSet,
@@ -1713,7 +1769,7 @@ get_class_context_and_inst_constraints_from_attrs(ModuleName, VarSet,
     ).
 
 :- pred get_class_context_and_inst_constraints_loop(module_name::in,
-    varset::in, list(quant_constr_attr)::in, cord(format_component)::in,
+    varset::in, list(quant_constr_attr)::in, cord(format_piece)::in,
     list(error_spec)::in, list(error_spec)::out,
     cord(var)::in, cord(var)::out, cord(var)::in, cord(var)::out,
     cord(prog_constraint)::in, cord(prog_constraint)::out,
@@ -1918,7 +1974,7 @@ parse_promise_ex_item(VarSet, Functor, ArgTerms, Context, SeqNum,
     % and bind BeforeDetismTerm to the other part of Term. If we don't
     % find, one, then bind MaybeMaybeDetism to ok1(no).
     %
-:- pred parse_determinism_suffix(varset::in, cord(format_component)::in,
+:- pred parse_determinism_suffix(varset::in, cord(format_piece)::in,
     term::in, term::out, maybe1(maybe(determinism))::out) is det.
 
 parse_determinism_suffix(VarSet, ContextPieces, Term, BeforeDetismTerm,
@@ -1980,7 +2036,7 @@ parse_with_type_suffix(VarSet, Term, BeforeWithTypeTerm, MaybeWithType) :-
 
     % Process the `with_inst inst` suffix part of a declaration.
     %
-:- pred parse_with_inst_suffix(varset::in, cord(format_component)::in,
+:- pred parse_with_inst_suffix(varset::in, cord(format_piece)::in,
     term::in, term::out, maybe1(maybe(mer_inst))::out) is det.
 
 parse_with_inst_suffix(VarSet, ContextPieces, Term,
@@ -2144,7 +2200,7 @@ is_the_name_a_variable(VarSet, Kind, Term, Spec) :-
 in_pred_or_func_decl_desc(pf_function) = "in function declaration".
 in_pred_or_func_decl_desc(pf_predicate) = "in predicate declaration".
 
-:- func pred_or_func_decl_pieces(pred_or_func) = list(format_component).
+:- func pred_or_func_decl_pieces(pred_or_func) = list(format_piece).
 
 pred_or_func_decl_pieces(pf_function) =
     [decl("func"), words("declaration")].

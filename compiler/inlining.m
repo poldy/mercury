@@ -87,16 +87,18 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
+:- import_module io.
 :- import_module list.
 :- import_module map.
 
 %---------------------------------------------------------------------------%
 
-:- pred inline_in_module(module_info::in, module_info::out) is det.
+:- pred inline_in_module(io.text_output_stream::in,
+    module_info::in, module_info::out) is det.
 
     % This heuristic is used for both local and intermodule inlining.
     % XXX No, it isn't; it is not used in this module.
@@ -108,8 +110,9 @@
 
 :- pred is_simple_goal(hlds_goal::in, int::in) is semidet.
 
-    % do_inline_call(UnivQVars, Args, CalledPredInfo, CalledProcInfo,
-    %   !VarSet, !VarTypes, !TVarSet, !RttiVarMaps, !RttiVarMaps, Goal):
+    % do_inline_call(ModuleInfo, UnivQVars, Args,
+    %   CalledPredInfo, CalledProcInfo, !TVarSet, !VarTable, !RttiVarMaps,
+    %   Goal):
     %
     % Given the universally quantified type variables in the caller's type,
     % the arguments to the call, the pred_info and proc_info for the called
@@ -117,19 +120,17 @@
     % procedure currently being analysed, rename the goal for the called
     % procedure so that it can be inlined.
     %
-:- pred do_inline_call(list(tvar)::in, list(prog_var)::in,
-    pred_info::in, proc_info::in, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out, tvarset::in, tvarset::out,
-    rtti_varmaps::in, rtti_varmaps::out, hlds_goal::out) is det.
+:- pred do_inline_call(module_info::in, list(tvar)::in, list(prog_var)::in,
+    pred_info::in, proc_info::in, tvarset::in, tvarset::out,
+    var_table::in, var_table::out, rtti_varmaps::in, rtti_varmaps::out,
+    hlds_goal::out) is det.
 
     % rename_goal(CalledProcHeadVars, CallArgs,
-    %   CallerVarSet0, CalleeVarSet, CallerVarSet,
     %   CallerVarTypes0, CalleeVarTypes, CallerVarTypes,
     %   VarRenaming, CalledGoal, RenamedGoal).
     %
 :- pred rename_goal(list(prog_var)::in, list(prog_var)::in,
-    prog_varset::in, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::in, vartypes::out,
+    var_table::in, var_table::in, var_table::out,
     map(prog_var, prog_var)::out, hlds_goal::in, hlds_goal::out) is det.
 
 :- type may_inline_purity_promised_pred
@@ -153,10 +154,12 @@
 :- import_module check_hlds.det_analysis.
 :- import_module check_hlds.purity.
 :- import_module check_hlds.recompute_instmap_deltas.
+:- import_module check_hlds.type_util.
 :- import_module hlds.goal_util.
 :- import_module hlds.hlds_dependency_graph.
 :- import_module hlds.mark_tail_calls.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.quantification.
 :- import_module libs.
 :- import_module libs.dependency_graph.
@@ -168,6 +171,7 @@
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_type.
+:- import_module parse_tree.set_of_var.
 :- import_module transform_hlds.complexity.
 :- import_module transform_hlds.dead_proc_elim.
 
@@ -248,9 +252,8 @@
 
             % The fields we can update while doing inlining in a goal.
 
-                i_prog_varset           :: prog_varset,
-                i_vartypes              :: vartypes,
                 i_tvarset               :: tvarset,
+                i_var_table             :: var_table,
 
                 % Information about locations of type_infos and
                 % typeclass_infos.
@@ -280,7 +283,7 @@
 
 :- type have_we_changed_detism
     --->    have_not_changed_detism
-    ;       have_changed_detism.
+    ;       may_have_changed_detism.
 
 :- type have_we_changed_purity
     --->    have_not_changed_purity
@@ -288,7 +291,7 @@
 
 %---------------------------------------------------------------------------%
 
-inline_in_module(!ModuleInfo) :-
+inline_in_module(ProgressStream, !ModuleInfo) :-
     % Package up all the inlining options
     % - whether to inline simple conj's of builtins
     % - whether to inline predicates that are only called once
@@ -349,27 +352,31 @@ inline_in_module(!ModuleInfo) :-
     get_bottom_up_sccs_with_entry_points(!.ModuleInfo, DepInfo,
         BottomUpSCCsEntryPoints),
     set.init(ShouldInlineProcs0),
-    inline_in_sccs(Params, BottomUpSCCsEntryPoints, ShouldInlineProcs0,
-        !ModuleInfo),
+    inline_in_sccs(ProgressStream, Params, BottomUpSCCsEntryPoints,
+        ShouldInlineProcs0, !ModuleInfo),
 
     % The dependency graph is now out of date and needs to be rebuilt.
     module_info_clobber_dependency_info(!ModuleInfo).
 
-:- pred inline_in_sccs(inline_params::in, list(scc_with_entry_points)::in,
-    set(pred_proc_id)::in,
+:- pred inline_in_sccs(io.text_output_stream::in, inline_params::in,
+    list(scc_with_entry_points)::in, set(pred_proc_id)::in,
     module_info::in, module_info::out) is det.
 
-inline_in_sccs(_Params, [], _ShouldInlineProcs, !ModuleInfo).
-inline_in_sccs(Params, [SCCEntryPoints | SCCsEntryPoints],
+inline_in_sccs(_ProgressStream, _Params, [], _ShouldInlineProcs, !ModuleInfo).
+inline_in_sccs(ProgressStream, Params, [SCCEntryPoints | SCCsEntryPoints],
         !.ShouldInlineProcs, !ModuleInfo) :-
-    inline_in_scc(Params, SCCEntryPoints, !ShouldInlineProcs, !ModuleInfo),
-    inline_in_sccs(Params, SCCsEntryPoints, !.ShouldInlineProcs, !ModuleInfo).
+    inline_in_scc(ProgressStream, Params, SCCEntryPoints,
+        !ShouldInlineProcs, !ModuleInfo),
+    inline_in_sccs(ProgressStream, Params, SCCsEntryPoints,
+        !.ShouldInlineProcs, !ModuleInfo).
 
-:- pred inline_in_scc(inline_params::in, scc_with_entry_points::in,
+:- pred inline_in_scc(io.text_output_stream::in, inline_params::in,
+    scc_with_entry_points::in,
     set(pred_proc_id)::in, set(pred_proc_id)::out,
     module_info::in, module_info::out) is det.
 
-inline_in_scc(Params, SCCEntryPoints, !ShouldInlineProcs, !ModuleInfo) :-
+inline_in_scc(ProgressStream, Params, SCCEntryPoints,
+        !ShouldInlineProcs, !ModuleInfo) :-
     SCCEntryPoints =
         scc_with_entry_points(SCC, _CalledFromHigherSCCs, _Exported),
     SCCProcs = set.to_sorted_list(SCC),
@@ -380,29 +387,29 @@ inline_in_scc(Params, SCCEntryPoints, !ShouldInlineProcs, !ModuleInfo) :-
         SCCProcs = [SCCProc],
         inline_in_proc_if_allowed(Params, !.ShouldInlineProcs,
             set.init, SCCProc, !ModuleInfo),
-        maybe_mark_proc_to_be_inlined(Params, !.ModuleInfo, SCCProc,
-            !ShouldInlineProcs)
+        maybe_mark_proc_to_be_inlined(ProgressStream, Params, !.ModuleInfo,
+            SCCProc, !ShouldInlineProcs)
     ;
         SCCProcs = [_, _ | _],
         LinearTailRec = Params ^ ip_linear_tail_rec,
         (
             LinearTailRec = do_not_inline_linear_tail_rec_sccs,
-            inline_in_simple_non_singleton_scc(Params, SCCProcs,
-                !ShouldInlineProcs, !ModuleInfo)
+            inline_in_simple_non_singleton_scc(ProgressStream, Params,
+                SCCProcs, !ShouldInlineProcs, !ModuleInfo)
         ;
             LinearTailRec = inline_linear_tail_rec_sccs,
-            inline_in_maybe_linear_tail_rec_scc(Params,
+            inline_in_maybe_linear_tail_rec_scc(ProgressStream, Params,
                 SCCEntryPoints, SCCProcs, !ShouldInlineProcs, !ModuleInfo)
         )
     ).
 
-:- pred inline_in_maybe_linear_tail_rec_scc(inline_params::in,
-    scc_with_entry_points::in, list(pred_proc_id)::in,
+:- pred inline_in_maybe_linear_tail_rec_scc(io.text_output_stream::in,
+    inline_params::in, scc_with_entry_points::in, list(pred_proc_id)::in,
     set(pred_proc_id)::in, set(pred_proc_id)::out,
     module_info::in, module_info::out) is det.
 
-inline_in_maybe_linear_tail_rec_scc(Params, SCCEntryPoints, SCCProcs,
-        !ShouldInlineProcs, !ModuleInfo) :-
+inline_in_maybe_linear_tail_rec_scc(ProgressStream, Params,
+        SCCEntryPoints, SCCProcs, !ShouldInlineProcs, !ModuleInfo) :-
     SCCEntryPoints = scc_with_entry_points(SCC,
         CalledFromHigherSCCs, Exported),
     TSCCDepInfo =
@@ -485,7 +492,7 @@ inline_in_maybe_linear_tail_rec_scc(Params, SCCEntryPoints, SCCProcs,
                 SCC, EntryPoints),
             SCCProcs, !ModuleInfo)
     else
-        inline_in_simple_non_singleton_scc(Params, SCCProcs,
+        inline_in_simple_non_singleton_scc(ProgressStream, Params, SCCProcs,
             !ShouldInlineProcs, !ModuleInfo)
     ).
 
@@ -505,12 +512,13 @@ inline_in_linear_tail_rec_proc(Params, ShouldInlineProcs, SCC, EntryPoints,
     inline_in_proc_if_allowed(Params, ShouldInlineProcs, ShouldInlineTailProcs,
         PredProcId, !ModuleInfo).
 
-:- pred inline_in_simple_non_singleton_scc(inline_params::in,
-    list(pred_proc_id)::in, set(pred_proc_id)::in, set(pred_proc_id)::out,
+:- pred inline_in_simple_non_singleton_scc(io.text_output_stream::in,
+    inline_params::in, list(pred_proc_id)::in,
+    set(pred_proc_id)::in, set(pred_proc_id)::out,
     module_info::in, module_info::out) is det.
 
-inline_in_simple_non_singleton_scc(Params, SCCProcs, !ShouldInlineProcs,
-        !ModuleInfo) :-
+inline_in_simple_non_singleton_scc(ProgressStream, Params, SCCProcs,
+        !ShouldInlineProcs, !ModuleInfo) :-
     % We decide whether to inline *any* of the SCC's procedures *before*
     % we process any of them, so we can apply the results of the decision
     % to *all* of them.
@@ -528,7 +536,7 @@ inline_in_simple_non_singleton_scc(Params, SCCProcs, !ShouldInlineProcs,
         should_proc_be_inlined(Params, !.ModuleInfo),
         SCCProcs, ShouldInlineSCCProcs),
     list.foldl(
-        mark_proc_to_be_inlined(!.ModuleInfo),
+        mark_proc_to_be_inlined(ProgressStream, !.ModuleInfo),
         ShouldInlineSCCProcs, !ShouldInlineProcs),
     list.foldl(
         inline_in_proc_if_allowed(Params, !.ShouldInlineProcs, set.init),
@@ -537,24 +545,28 @@ inline_in_simple_non_singleton_scc(Params, SCCProcs, !ShouldInlineProcs,
     % This predicate effectively adds implicit `pragma inline' directives
     % for procedures that match its heuristic.
     %
-:- pred maybe_mark_proc_to_be_inlined(inline_params::in, module_info::in,
-    pred_proc_id::in, set(pred_proc_id)::in, set(pred_proc_id)::out) is det.
+:- pred maybe_mark_proc_to_be_inlined(io.text_output_stream::in,
+    inline_params::in, module_info::in, pred_proc_id::in,
+    set(pred_proc_id)::in, set(pred_proc_id)::out) is det.
 
-maybe_mark_proc_to_be_inlined(Params, ModuleInfo, PredProcId,
+maybe_mark_proc_to_be_inlined(ProgressStream, Params, ModuleInfo, PredProcId,
         !ShouldInlineProcs) :-
     ( if should_proc_be_inlined(Params, ModuleInfo, PredProcId) then
-        mark_proc_to_be_inlined(ModuleInfo, PredProcId, !ShouldInlineProcs)
+        mark_proc_to_be_inlined(ProgressStream, ModuleInfo, PredProcId,
+            !ShouldInlineProcs)
     else
         true
     ).
 
-:- pred mark_proc_to_be_inlined(module_info::in, pred_proc_id::in,
-    set(pred_proc_id)::in, set(pred_proc_id)::out) is det.
+:- pred mark_proc_to_be_inlined(io.text_output_stream::in, module_info::in,
+    pred_proc_id::in, set(pred_proc_id)::in, set(pred_proc_id)::out) is det.
 
-mark_proc_to_be_inlined(ModuleInfo, PredProcId, !ShouldInlineProcs) :-
+mark_proc_to_be_inlined(ProgressStream, ModuleInfo, PredProcId,
+        !ShouldInlineProcs) :-
     set.insert(PredProcId, !ShouldInlineProcs),
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo, "Inlining", PredProcId, !IO)
+        maybe_write_proc_progress_message(ProgressStream, ModuleInfo,
+            "Inlining", PredProcId, !IO)
     ).
 
 :- pred should_proc_be_inlined(inline_params::in, module_info::in,
@@ -563,8 +575,7 @@ mark_proc_to_be_inlined(ModuleInfo, PredProcId, !ShouldInlineProcs) :-
 should_proc_be_inlined(Params, ModuleInfo, PredProcId) :-
     module_info_pred_proc_info(ModuleInfo, PredProcId, PredInfo, ProcInfo),
     proc_info_get_goal(ProcInfo, CalledGoal),
-    PredProcId = proc(PredId, ProcId),
-    Entity = entity_proc(PredId, ProcId),
+    Entity = entity_proc(PredProcId),
 
     % The heuristic represented by the following code could be improved.
     (
@@ -572,7 +583,6 @@ should_proc_be_inlined(Params, ModuleInfo, PredProcId) :-
         SimpleThreshold = Params ^ ip_simple_goal_threshold,
         is_simple_goal(CalledGoal, SimpleThreshold)
     ;
-        CompoundThreshold > 0,
         NeededMap = Params ^ ip_needed_map,
         map.search(NeededMap, Entity, Needed),
         Needed = maybe_eliminable(NumUses),
@@ -582,6 +592,7 @@ should_proc_be_inlined(Params, ModuleInfo, PredProcId) :-
         % CallCost is the user-provided approximation of the size of the call.
         CallCost = Params ^ ip_call_cost,
         CompoundThreshold = Params ^ ip_compound_size_threshold,
+        CompoundThreshold > 0,
         (Size - CallCost) * NumUses =< CompoundThreshold
     ;
         Params ^ ip_single_use = inline_single_use,
@@ -694,35 +705,31 @@ inline_in_proc(Params, ShouldInlineProcs, ShouldInlineTailProcs, PredProcId,
 
         PredProcId = proc(PredId, ProcId),
 
-        module_info_get_preds(!.ModuleInfo, PredTable0),
-        map.lookup(PredTable0, PredId, !:PredInfo),
-        pred_info_get_proc_table(!.PredInfo, ProcTable0),
-        map.lookup(ProcTable0, ProcId, !:ProcInfo),
+        module_info_pred_info(!.ModuleInfo, PredId, !:PredInfo),
+        pred_info_proc_info(!.PredInfo, ProcId, !:ProcInfo),
 
         pred_info_get_univ_quant_tvars(!.PredInfo, UnivQTVars),
         pred_info_get_typevarset(!.PredInfo, TypeVarSet0),
 
         proc_info_get_goal(!.ProcInfo, Goal0),
-        proc_info_get_varset(!.ProcInfo, VarSet0),
-        proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+        proc_info_get_var_table(!.ProcInfo, VarTypes0),
         proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
 
         InlineInfo0 = inline_info(!.ModuleInfo, VarThresh, HighLevelCode,
             UnivQTVars, ShouldInlineTailProcs, ShouldInlineProcs,
-            VarSet0, VarTypes0, TypeVarSet0, RttiVarMaps0,
+            TypeVarSet0, VarTypes0, RttiVarMaps0,
             we_have_not_inlined, we_have_not_inlined_parallel_conj,
             have_not_changed_detism, have_not_changed_purity),
 
         inlining_in_goal(Goal0, Goal, InlineInfo0, InlineInfo),
 
         InlineInfo = inline_info(_, _, _, _, _, _,
-            VarSet, VarTypes, TypeVarSet, RttiVarMaps,
+            TypeVarSet, VarTypes, RttiVarMaps,
             DidInlining, InlinedParallel, DetChanged, PurityChanged),
 
         pred_info_set_typevarset(TypeVarSet, !PredInfo),
 
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTypes, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
         proc_info_set_goal(Goal, !ProcInfo),
 
@@ -741,15 +748,14 @@ inline_in_proc(Params, ShouldInlineProcs, ShouldInlineTailProcs, PredProcId,
             % corresponding caller variables, this will tell the simplification
             % pass we invoke before code generation that the goal(s) that
             % generate those caller variables can be optimized away.
-            requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
-            recompute_instmap_delta_proc(recompute_atomic_instmap_deltas,
+            requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+            recompute_instmap_delta_proc(recomp_atomics,
                 !ProcInfo, !ModuleInfo)
         ;
             DidInlining = we_have_not_inlined
         ),
 
-        map.det_update(ProcId, !.ProcInfo, ProcTable0, ProcTable),
-        pred_info_set_proc_table(ProcTable, !PredInfo),
+        pred_info_set_proc_info(ProcId, !.ProcInfo, !PredInfo),
 
         (
             PurityChanged = have_changed_purity,
@@ -758,14 +764,13 @@ inline_in_proc(Params, ShouldInlineProcs, ShouldInlineTailProcs, PredProcId,
             PurityChanged = have_not_changed_purity
         ),
 
-        map.det_update(PredId, !.PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo),
+        module_info_set_pred_info(PredId, !.PredInfo, !ModuleInfo),
 
         % If the determinism of some subgoals has changed, then we rerun
         % determinism analysis, because propagating the determinism information
         % through the procedure may lead to more efficient code.
         (
-            DetChanged = have_changed_detism,
+            DetChanged = may_have_changed_detism,
             det_infer_proc_ignore_msgs(PredId, ProcId, !ModuleInfo)
         ;
             DetChanged = have_not_changed_detism
@@ -899,7 +904,7 @@ inlining_in_par_conj([HeadGoal0 | TailGoals0], Goals, !Info) :-
 inlining_in_call(GoalExpr0, GoalInfo0, Goal, !Info) :-
     !.Info = inline_info(ModuleInfo, VarThresh, HighLevelCode,
         ExternalTypeParams, ShouldInlineTailProcs, ShouldInlineProcs,
-        VarSet0, VarTypes0, TypeVarSet0, RttiVarMaps0, _DidInlining0,
+        TypeVarSet0, VarTable0, RttiVarMaps0, _DidInlining0,
         InlinedParallel0, DetChanged0, PurityChanged0),
     GoalExpr0 =
         plain_call(PredId, ProcId, ArgVars, _Builtin, _Context, _SymName),
@@ -913,21 +918,19 @@ inlining_in_call(GoalExpr0, GoalInfo0, Goal, !Info) :-
         ;
             UserReq = not_user_req,
             % Okay, but will we exceed the number-of-variables threshold?
-            varset.vars(VarSet0, ListOfVars),
-            list.length(ListOfVars, ThisMany),
+            var_table_count(VarTable0, NumVarsInVarTable),
 
             % We need to find out how many variables the Callee has.
-            proc_info_get_varset(ProcInfo, CalleeVarSet),
-            varset.vars(CalleeVarSet, CalleeListOfVars),
-            list.length(CalleeListOfVars, CalleeThisMany),
-            TotalVars = ThisMany + CalleeThisMany,
-            TotalVars =< VarThresh
+            proc_info_get_var_table(ProcInfo, CalleeVarTable),
+            var_table_count(CalleeVarTable, NumVarsInCallee),
+            TotalNumVars = NumVarsInVarTable + NumVarsInCallee,
+            TotalNumVars =< VarThresh
         ),
         % XXX Work around bug #142.
         not may_encounter_bug_142(ProcInfo, ArgVars)
     then
-        do_inline_call(ExternalTypeParams, ArgVars, PredInfo, ProcInfo,
-            VarSet0, VarSet, VarTypes0, VarTypes, TypeVarSet0, TypeVarSet,
+        do_inline_call(ModuleInfo, ExternalTypeParams, ArgVars,
+            PredInfo, ProcInfo, TypeVarSet0, TypeVarSet, VarTable0, VarTable,
             RttiVarMaps0, RttiVarMaps, Goal1),
 
         DidInlining = we_have_inlined,
@@ -942,15 +945,23 @@ inlining_in_call(GoalExpr0, GoalInfo0, Goal, !Info) :-
         ),
 
         Goal1 = hlds_goal(_, GoalInfo1),
-        % If the inferred determinism of the called goal differs from the
-        % declared determinism, flag that we should rerun determinism analysis
-        % on this proc.
+        % If the determinism of the call is the same as the determinism
+        % of the callee (which it should be, unless something has changed
+        % since determinism analysis) *and* all the argument variables are
+        % used outside the call, then there is no need to rerun determinism
+        % analysis. We *do* have to rerun it if we have not met one of the
+        % above preconditions.
         Determinism0 = goal_info_get_determinism(GoalInfo0),
         Determinism1 = goal_info_get_determinism(GoalInfo1),
-        ( if Determinism0 = Determinism1 then
+        ArgVarSet = set_of_var.list_to_set(ArgVars),
+        NonLocals = goal_info_get_nonlocals(GoalInfo0),
+        ( if
+            Determinism0 = Determinism1,
+            set_of_var.subset(ArgVarSet, NonLocals)
+        then
             DetChanged = DetChanged0
         else
-            DetChanged = have_changed_detism
+            DetChanged = may_have_changed_detism
         ),
 
         Purity0 = goal_info_get_purity(GoalInfo0),
@@ -963,7 +974,7 @@ inlining_in_call(GoalExpr0, GoalInfo0, Goal, !Info) :-
 
         !:Info = inline_info(ModuleInfo, VarThresh, HighLevelCode,
             ExternalTypeParams, ShouldInlineTailProcs, ShouldInlineProcs,
-            VarSet, VarTypes, TypeVarSet, RttiVarMaps, DidInlining,
+            TypeVarSet, VarTable, RttiVarMaps, DidInlining,
             InlinedParallel, DetChanged, PurityChanged),
 
         (
@@ -1006,8 +1017,8 @@ tci_vars_different_constraints(RttiVarMaps, [VarA, VarB | Vars]) :-
 
 %---------------------------------------------------------------------------%
 
-do_inline_call(ExternalTypeParams, ArgVars, PredInfo, ProcInfo,
-        VarSet0, VarSet, VarTypes0, VarTypes, TypeVarSet0, TypeVarSet,
+do_inline_call(ModuleInfo, ExternalTypeParams, ArgVars, PredInfo, ProcInfo,
+        TypeVarSet0, TypeVarSet, VarTable0, VarTable,
         RttiVarMaps0, RttiVarMaps, Goal) :-
     proc_info_get_goal(ProcInfo, CalledGoal),
 
@@ -1015,8 +1026,7 @@ do_inline_call(ExternalTypeParams, ArgVars, PredInfo, ProcInfo,
 
     pred_info_get_typevarset(PredInfo, CalleeTypeVarSet),
     proc_info_get_headvars(ProcInfo, HeadVars),
-    proc_info_get_vartypes(ProcInfo, CalleeVarTypes0),
-    proc_info_get_varset(ProcInfo, CalleeVarSet),
+    proc_info_get_var_table(ProcInfo, CalleeVarTable0),
     proc_info_get_rtti_varmaps(ProcInfo, CalleeRttiVarMaps0),
 
     % Substitute the appropriate types into the type mapping of the called
@@ -1031,66 +1041,65 @@ do_inline_call(ExternalTypeParams, ArgVars, PredInfo, ProcInfo,
     % First, rename apart the type variables in the callee. (We can almost
     % throw away the new typevarset, since we are about to substitute away
     % any new type variables, but any unbound type variables in the callee
-    % will not be substituted away)
+    % will not be substituted away.)
 
     tvarset_merge_renaming(TypeVarSet0, CalleeTypeVarSet, TypeVarSet,
         TypeRenaming),
-    apply_variable_renaming_to_vartypes(TypeRenaming,
-        CalleeVarTypes0, CalleeVarTypes1),
+    apply_variable_renaming_to_var_table(TypeRenaming,
+        CalleeVarTable0, CalleeVarTable1),
 
     % Next, compute the type substitution and then apply it.
 
-    % Note: there's no need to update the type_info locations maps,
+    % Note: there is no need to update the type_info locations maps,
     % either for the caller or callee, since for any type vars in the
     % callee which get bound to type vars in the caller, the type_info
-    % location will be given by the entry in the caller's
-    % type_info locations map (and vice versa).  It doesn't matter if the
-    % final type_info locations map contains some entries
-    % for type variables which have been substituted away,
-    % because those entries simply won't be used.
+    % location will be given by the entry in the caller's type_info
+    % locations map (and vice versa).  It doesn't matter if the final
+    % type_info locations map contains some entries for type variables
+    % which have been substituted away, because those entries simply
+    % won't be used.
 
-    lookup_var_types(CalleeVarTypes1, HeadVars, HeadTypes),
-    lookup_var_types(VarTypes0, ArgVars, ArgTypes),
+    lookup_var_types(CalleeVarTable1, HeadVars, HeadTypes),
+    lookup_var_types(VarTable0, ArgVars, ArgTypes),
 
     pred_info_get_exist_quant_tvars(PredInfo, CalleeExistQVars),
     compute_caller_callee_type_substitution(HeadTypes, ArgTypes,
         ExternalTypeParams, CalleeExistQVars, TypeSubn),
 
+    % Update types in the callee.
+    apply_rec_subst_to_var_table(is_type_a_dummy(ModuleInfo), TypeSubn,
+        CalleeVarTable1, CalleeVarTable),
     % Handle the common case of non-existentially typed preds specially,
-    % since we can do things more efficiently in that case
+    % since we can do things more efficiently in that case.
     (
         CalleeExistQVars = [],
-        % Update types in callee only.
-        apply_rec_subst_to_vartypes(TypeSubn, CalleeVarTypes1, CalleeVarTypes),
-        VarTypes1 = VarTypes0
+        VarTable1 = VarTable0
     ;
         CalleeExistQVars = [_ | _],
-        % Update types in callee.
-        apply_rec_subst_to_vartypes(TypeSubn, CalleeVarTypes1, CalleeVarTypes),
-        % Update types in caller.
-        apply_rec_subst_to_vartypes(TypeSubn, VarTypes0, VarTypes1)
+        % Update types in the caller.
+        apply_rec_subst_to_var_table(is_type_a_dummy(ModuleInfo), TypeSubn,
+            VarTable0, VarTable1)
     ),
 
     % Now rename apart the variables in the called goal.
-    rename_goal(HeadVars, ArgVars, VarSet0, CalleeVarSet, VarSet, VarTypes1,
-        CalleeVarTypes, VarTypes, Subn, CalledGoal, Goal),
+    rename_goal(HeadVars, ArgVars, VarTable1, CalleeVarTable, VarTable,
+        Subn, CalledGoal, Goal),
 
     apply_substitutions_to_rtti_varmaps(TypeRenaming, TypeSubn, Subn,
         CalleeRttiVarMaps0, CalleeRttiVarMaps1),
 
     % Prefer the type_info_locn from the caller.
-    % The type_infos or typeclass_infos passed to the callee may
-    % have been produced by extracting type_infos or typeclass_infos
-    % from typeclass_infos in the caller, so they won't necessarily
-    % be the same.
+    % The type_infos or typeclass_infos passed to the callee may have been
+    % produced by extracting type_infos or typeclass_infos from
+    % typeclass_infos in the caller, so they won't necessarily be the same.
     rtti_varmaps_overlay(CalleeRttiVarMaps1, RttiVarMaps0, RttiVarMaps).
 
-rename_goal(HeadVars, ArgVars, VarSet0, CalleeVarSet, VarSet, VarTypes1,
-        CalleeVarTypes, VarTypes, Renaming, CalledGoal, Goal) :-
+rename_goal(HeadVars, ArgVars, VarTable0, CalleeVarTable, VarTable,
+        Renaming, CalledGoal, Goal) :-
     map.from_corresponding_lists(HeadVars, ArgVars, Renaming0),
-    varset.vars(CalleeVarSet, CalleeListOfVars),
-    clone_variables(CalleeListOfVars, CalleeVarSet, CalleeVarTypes,
-        VarSet0, VarSet, VarTypes1, VarTypes, Renaming0, Renaming),
+    var_table_vars(CalleeVarTable, CalleeListOfVars),
+    clone_variables(CalleeListOfVars, CalleeVarTable,
+        VarTable0, VarTable, Renaming0, Renaming),
     must_rename_vars_in_goal(Renaming, CalledGoal, Goal).
 
 %---------------------------------------------------------------------------%
@@ -1124,7 +1133,7 @@ rename_goal(HeadVars, ArgVars, VarSet0, CalleeVarSet, VarSet, VarTypes1,
 should_inline_at_call_site(Info, GoalExpr0, GoalInfo0, ShouldInline) :-
     Info = inline_info(ModuleInfo, _VarThresh, HighLevelCode,
         _ExternalTypeParams, ShouldInlineTailProcs, ShouldInlineProcs,
-        _VarSet, _VarTypes, _TypeVarSet, _RttiVarMaps, _DidInlining,
+        _TypeVarSet, _VarTypes, _RttiVarMaps, _DidInlining,
         _InlinedParallel, _DetChanged, _PurityChanged),
     GoalExpr0 =
         plain_call(PredId, ProcId, _ArgVars, Builtin, _Context, _SymName),
@@ -1302,24 +1311,17 @@ ok_to_inline_language(lang_csharp, target_csharp).
 
 origin_involves_daio(Origin, InvolvesDAIO) :-
     (
-        ( Origin = origin_special_pred(_SpecialPredId, _TypeCtor)
-        ; Origin = origin_instance_method(_SymName, _Constraints)
-        ; Origin = origin_class_method(_ClassId, _PFSymNameArity)
-        ; Origin = origin_created(_Creation)
-        ; Origin = origin_assertion(_, _)
-        ; Origin = origin_lambda(_FileNam, _LineNum, _Seq)
-        ; Origin = origin_solver_type(_SymName, _Arity, _PredKind)
-        ; Origin = origin_tabling(_PFSymNameArity, _PredKind)
-        ; Origin = origin_mutable(_ModuleName, _MutableName, _PredKind)
-        ; Origin = origin_initialise
-        ; Origin = origin_finalise
-        ; Origin = origin_user(_SymName)
+        ( Origin = origin_user(_)
+        ; Origin = origin_compiler(_)
         ),
         InvolvesDAIO = does_not_involve_daio
     ;
-        Origin = origin_transformed(Transform, SubOrigin, _PredId),
+        Origin = origin_pred_transform(_Transform, SubOrigin, _PredId),
+        origin_involves_daio(SubOrigin, InvolvesDAIO)
+    ;
+        Origin = origin_proc_transform(Transform, SubOrigin, _PredId, _ProcId),
         ( if
-            ( origin_transformation_involves_daio(Transform, does_involve_daio)
+            ( origin_proc_transform_involves_daio(Transform, does_involve_daio)
             ; origin_involves_daio(SubOrigin, does_involve_daio)
             )
         then
@@ -1329,31 +1331,27 @@ origin_involves_daio(Origin, InvolvesDAIO) :-
         )
     ).
 
-:- pred origin_transformation_involves_daio(pred_transformation::in,
+:- pred origin_proc_transform_involves_daio(proc_transform::in,
     maybe_involves_daio::out) is det.
 
-origin_transformation_involves_daio(Transform, InvolvesDAIO) :-
+origin_proc_transform_involves_daio(Transform, InvolvesDAIO) :-
     (
-        ( Transform = transform_higher_order_specialization(_)
-        ; Transform = transform_higher_order_type_specialization(_)
-        ; Transform = transform_type_specialization(_)
-        ; Transform = transform_unused_argument_elimination(_)
-        ; Transform = transform_accumulator(_)
-        ; Transform = transform_loop_invariant(_)
-        ; Transform = transform_tuple(_)
-        ; Transform = transform_untuple(_)
-        ; Transform = transform_dependent_parallel_conjunction
-        ; Transform = transform_parallel_loop_control
-        ; Transform = transform_return_via_ptr(_, _)
-        ; Transform = transform_table_generator
-        ; Transform = transform_stm_expansion
-        ; Transform = transform_dnf(_)
-        ; Transform = transform_structure_reuse
-        ; Transform = transform_source_to_source_debug
+        ( Transform = proc_transform_user_type_spec(_, _)
+        ; Transform = proc_transform_higher_order_spec(_)
+        ; Transform = proc_transform_unused_args(_)
+        ; Transform = proc_transform_accumulator(_, _)
+        ; Transform = proc_transform_loop_inv(_, _)
+        ; Transform = proc_transform_tuple(_, _)
+        ; Transform = proc_transform_untuple(_, _)
+        ; Transform = proc_transform_dep_par_conj(_)
+        ; Transform = proc_transform_par_loop_ctrl
+        ; Transform = proc_transform_lcmc(_, _)
+        ; Transform = proc_transform_io_tabling
+        ; Transform = proc_transform_stm_expansion
         ),
         InvolvesDAIO = does_not_involve_daio
     ;
-        Transform = transform_direct_arg_in_out,
+        Transform = proc_transform_direct_arg_in_out,
         InvolvesDAIO = does_involve_daio
     ).
 

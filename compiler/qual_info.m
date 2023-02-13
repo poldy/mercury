@@ -17,18 +17,20 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
+:- import_module hlds.status.
 :- import_module mdbcomp.
+:- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.equiv_type.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.module_qual.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.vartypes.
 :- import_module recompilation.
 
-:- import_module list.
 :- import_module bool.
+:- import_module list.
 
 %-----------------------------------------------------------------------------%
 
@@ -42,14 +44,14 @@
     maybe_opt_imported::in, qual_info::in, qual_info::out) is det.
 
 :- pred qual_info_get_tvarset(qual_info::in, tvarset::out) is det.
-:- pred qual_info_get_var_types(qual_info::in, vartypes::out) is det.
+:- pred qual_info_get_explicit_var_types(qual_info::in, vartypes::out) is det.
 :- pred qual_info_get_mq_info(qual_info::in, mq_info::out) is det.
 :- pred qual_info_get_maybe_opt_imported(qual_info::in,
     maybe_opt_imported::out) is det.
 :- pred qual_info_get_found_syntax_error(qual_info::in, bool::out) is det.
 :- pred qual_info_get_found_trace_goal(qual_info::in, bool::out) is det.
 
-:- pred qual_info_set_var_types(vartypes::in,
+:- pred qual_info_set_explicit_var_types(vartypes::in,
     qual_info::in, qual_info::out) is det.
 :- pred qual_info_set_mq_info(mq_info::in,
     qual_info::in, qual_info::out) is det.
@@ -85,14 +87,14 @@
     unify_main_context::in, unify_sub_contexts::in, hlds_goal::out,
     qual_info::in, qual_info::out) is det.
 
-:- pred record_called_pred_or_func(pred_or_func::in, sym_name::in, arity::in,
-    qual_info::in, qual_info::out) is det.
+:- pred record_called_pred_or_func(pred_or_func::in, sym_name::in,
+    user_arity::in, qual_info::in, qual_info::out) is det.
 
-:- pred construct_pred_or_func_call(pred_id::in, pred_or_func::in,
+:- pred construct_and_record_pred_or_func_call(pred_id::in, pred_or_func::in,
     sym_name::in, list(prog_var)::in, hlds_goal_info::in, hlds_goal::out,
     qual_info::in, qual_info::out) is det.
 
-:- pred do_construct_pred_or_func_call(pred_id::in, pred_or_func::in,
+:- pred construct_pred_or_func_call(pred_id::in, pred_or_func::in,
     sym_name::in, list(prog_var)::in, hlds_goal_info::in, hlds_goal::out)
     is det.
 
@@ -131,7 +133,7 @@
                 % argument types indexed by name.
                 qual_tvar_name_map      :: tvar_name_map,
 
-                qual_vartypes           :: vartypes,
+                qual_explicit_vartypes  :: vartypes,
 
                 % Module qualification info.
                 qual_mq_info            :: mq_info,
@@ -166,8 +168,8 @@ update_qual_info(TVarNameMap, TVarSet, VarTypes, MaybeOptImported,
 
 qual_info_get_tvarset(Info, X) :-
     X = Info ^ qual_tvarset.
-qual_info_get_var_types(Info, X) :-
-    X = Info ^ qual_vartypes.
+qual_info_get_explicit_var_types(Info, X) :-
+    X = Info ^ qual_explicit_vartypes.
 qual_info_get_mq_info(Info, X) :-
     X = Info ^ qual_mq_info.
 qual_info_get_maybe_opt_imported(Info, X) :-
@@ -177,8 +179,8 @@ qual_info_get_found_syntax_error(Info, X) :-
 qual_info_get_found_trace_goal(Info, X) :-
     X = Info ^ qual_found_trace_goal.
 
-qual_info_set_var_types(X, !Info) :-
-    !Info ^ qual_vartypes := X.
+qual_info_set_explicit_var_types(X, !Info) :-
+    !Info ^ qual_explicit_vartypes := X.
 qual_info_set_mq_info(X, !Info) :-
     !Info ^ qual_mq_info := X.
 qual_info_set_found_syntax_error(X, !Info) :-
@@ -226,7 +228,7 @@ process_type_qualification(Var, Type0, VarSet, Context, !ModuleInfo,
 
     % Find any new type variables introduced by this type, and
     % add them to the var-name index and the variable renaming.
-    type_vars(Type1, TVars),
+    type_vars_in_type(Type1, TVars),
     get_new_tvars(TVars, VarSet, TVarSet0, TVarSet1,
         TVarNameMap0, TVarNameMap, TVarRenaming0, TVarRenaming),
 
@@ -285,8 +287,9 @@ make_atomic_unification(Var, RHS, Context, MainContext, SubContext,
     make_atomic_unification(Var, RHS, Context, MainContext, SubContext,
         purity_pure, Goal, !QualInfo).
 
-record_called_pred_or_func(PredOrFunc, SymName, Arity, !QualInfo) :-
-    Id = item_name(SymName, Arity),
+record_called_pred_or_func(PredOrFunc, SymName, UserArity, !QualInfo) :-
+    UserArity = user_arity(UserArityInt),
+    Id = recomp_item_name(SymName, UserArityInt),
     ( PredOrFunc = pf_predicate, UsedItemType = used_predicate
     ; PredOrFunc = pf_function,  UsedItemType = used_function
     ),
@@ -297,7 +300,7 @@ record_called_pred_or_func(PredOrFunc, SymName, Arity, !QualInfo) :-
 
 record_used_functor(ConsId, !QualInfo) :-
     ( if ConsId = cons(SymName, Arity, _) then
-        Id = item_name(SymName, Arity),
+        Id = recomp_item_name(SymName, Arity),
         apply_to_recompilation_info(record_used_item(used_functor, Id, Id),
             !QualInfo)
     else
@@ -306,30 +309,30 @@ record_used_functor(ConsId, !QualInfo) :-
 
 %-----------------------------------------------------------------------------%
 
-construct_pred_or_func_call(PredId, PredOrFunc, SymName, Args, GoalInfo, Goal,
-        !QualInfo) :-
-    do_construct_pred_or_func_call(PredId, PredOrFunc, SymName, Args,
+construct_and_record_pred_or_func_call(PredId, PredOrFunc, SymName, ArgVars,
+        GoalInfo, Goal, !QualInfo) :-
+    construct_pred_or_func_call(PredId, PredOrFunc, SymName, ArgVars,
         GoalInfo, Goal),
-    list.length(Args, Arity),
-    adjust_func_arity(PredOrFunc, OrigArity, Arity),
-    record_called_pred_or_func(PredOrFunc, SymName, OrigArity, !QualInfo).
+    PredFormArity = arg_list_arity(ArgVars),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+    record_called_pred_or_func(PredOrFunc, SymName, UserArity, !QualInfo).
 
-do_construct_pred_or_func_call(PredId, PredOrFunc, SymName, Args,
+construct_pred_or_func_call(PredId, PredOrFunc, SymName, ArgVars,
         GoalInfo, Goal) :-
     (
         PredOrFunc = pf_predicate,
-        GoalExpr = plain_call(PredId, invalid_proc_id, Args, not_builtin, no,
-            SymName),
+        GoalExpr = plain_call(PredId, invalid_proc_id, ArgVars, not_builtin,
+            no, SymName),
         Goal = hlds_goal(GoalExpr, GoalInfo)
     ;
         PredOrFunc = pf_function,
-        pred_args_to_func_args(Args, FuncArgs, RetArg),
-        list.length(FuncArgs, Arity),
+        pred_args_to_func_args(ArgVars, FuncArgVars, RetArgVar),
+        list.length(FuncArgVars, Arity),
         TypeCtor = cons_id_dummy_type_ctor,
         ConsId = cons(SymName, Arity, TypeCtor),
         Context = goal_info_get_context(GoalInfo),
-        RHS = rhs_functor(ConsId, is_not_exist_constr, FuncArgs),
-        create_pure_atomic_complicated_unification(RetArg, RHS,
+        RHS = rhs_functor(ConsId, is_not_exist_constr, FuncArgVars),
+        create_pure_atomic_complicated_unification(RetArgVar, RHS,
             Context, umc_explicit, [], hlds_goal(GoalExpr, _)),
         Goal = hlds_goal(GoalExpr, GoalInfo)
     ).

@@ -51,7 +51,7 @@
 
 :- import_module libs.
 :- import_module libs.globals.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_inst_mode_name.
 :- import_module parse_tree.parse_pragma_foreign.
 :- import_module parse_tree.parse_sym_name.
@@ -65,6 +65,7 @@
 :- import_module maybe.
 :- import_module pair.
 :- import_module string.
+:- import_module term_vars.
 :- import_module unit.
 
 %-----------------------------------------------------------------------------e
@@ -90,10 +91,11 @@ parse_initialise_item(_ModuleName, VarSet, ArgTerms, Context, SeqNum,
                 MaybeIOM = error1([Spec])
             ;
                 SymNameSpecifier =
-                    sym_name_specifier_name_arity(SymName, Arity),
-                ( if ( Arity = 0 ; Arity = 2 ) then
-                    ItemInitialise = item_initialise_info(SymName, Arity,
-                        item_origin_user, Context, SeqNum),
+                    sym_name_specifier_name_arity(SymName, UserArity),
+                UserArity = user_arity(UserArityInt),
+                ( if ( UserArityInt = 0 ; UserArityInt = 2 ) then
+                    ItemInitialise = item_initialise_info(SymName,
+                        UserArity, item_origin_user, Context, SeqNum),
                     Item = item_initialise(ItemInitialise),
                     MaybeIOM = ok1(iom_item(Item))
                 else
@@ -141,9 +143,10 @@ parse_finalise_item(_ModuleName, VarSet, ArgTerms, Context, SeqNum,
                 MaybeIOM = error1([Spec])
             ;
                 SymNameSpecifier =
-                    sym_name_specifier_name_arity(SymName, Arity),
-                ( if ( Arity = 0 ; Arity = 2 ) then
-                    ItemFinalise = item_finalise_info(SymName, Arity,
+                    sym_name_specifier_name_arity(SymName, UserArity),
+                UserArity = user_arity(UserArityInt),
+                ( if ( UserArityInt = 0 ; UserArityInt = 2 ) then
+                    ItemFinalise = item_finalise_info(SymName, UserArity,
                         item_origin_user, Context, SeqNum),
                     Item = item_finalise(ItemFinalise),
                     MaybeIOM = ok1(iom_item(Item))
@@ -268,7 +271,7 @@ parse_mutable_name(NameTerm, MaybeName) :-
 :- pred parse_mutable_type(varset::in, term::in, maybe1(mer_type)::out) is det.
 
 parse_mutable_type(VarSet, TypeTerm, MaybeType) :-
-    ( if term.contains_var(TypeTerm, _) then
+    ( if term_vars.term_contains_var(TypeTerm, _) then
         TypeTermStr = describe_error_term(VarSet, TypeTerm),
         Pieces = [words("Error: the type in a"), decl("mutable"),
             words("declaration may not contain variables, but"),
@@ -288,7 +291,7 @@ parse_mutable_inst(VarSet, InstTerm, MaybeInst) :-
     % XXX We should check whether the *inst* contains variables, not whether
     % the *term* does, but (a) inst_contains_inst_var is in inst_match.m,
     % not in inst_util.m, and (b) it is not exported.
-    ( if term.contains_var(InstTerm, _) then
+    ( if term_vars.term_contains_var(InstTerm, _) then
         InstTermStr = describe_error_term(VarSet, InstTerm),
         Pieces = [words("Error: the inst in a"), decl("mutable"),
             words("declaration cannot contain variables:"),
@@ -347,7 +350,7 @@ parse_mutable_attrs(VarSet, MutAttrsTerm, MaybeMutAttrs) :-
             MaybeMutAttrs = error1(Specs)
         )
     else
-        MutAttrsStr = mercury_term_to_string(VarSet, print_name_only,
+        MutAttrsStr = mercury_term_to_string_vs(VarSet, print_name_only,
             MutAttrsTerm),
         Pieces = [words("In fifth argument of"),
             decl("mutable"), words("declaration:"),
@@ -380,8 +383,10 @@ record_mutable_attributes(VarSet, [Term - Attr | TermAttrs], !LangMap,
         Attr = mutable_attr_foreign_name(ForeignName),
         ForeignName = foreign_name(Lang, Name),
         ( if map.search(!.LangMap, Lang, Term0 - _Name0) then
-            TermStr0 = mercury_term_to_string(VarSet, print_name_only, Term0),
-            TermStr = mercury_term_to_string(VarSet, print_name_only, Term),
+            TermStr0 =
+                mercury_term_to_string_vs(VarSet, print_name_only, Term0),
+            TermStr =
+                mercury_term_to_string_vs(VarSet, print_name_only, Term),
             Pieces = [words("Error: attributes"), quote(TermStr0),
                 words("and"), quote(TermStr), words("conflict."), nl],
             Spec = simplest_spec($pred, severity_error,
@@ -468,7 +473,7 @@ check_attribute_fit(VarSet, OnlyLangMap, MaybeTrailed, MaybeConst, MaybeIO,
                 ;
                     MaybeTrailed = no,
                     % Local is wrong, but will not be used due to !:Specs.
-                    LocalTermStr = mercury_term_to_string(VarSet,
+                    LocalTermStr = mercury_term_to_string_vs(VarSet,
                         print_name_only, LocalTerm),
                     Pieces = [words("Error: attribute"), quote(LocalTermStr),
                         words("conflicts with the default,"),
@@ -544,12 +549,12 @@ default_mutable_attributes =
 
 report_repeated_or_conflicting_attributes(VarSet, Term0, Attr0, Term, Attr,
         !Specs) :-
-    TermStr = mercury_term_to_string(VarSet, print_name_only, Term),
+    TermStr = mercury_term_to_string_vs(VarSet, print_name_only, Term),
     ( if Attr0 = Attr then
         Pieces = [words("Error: attribute"), quote(TermStr),
             words("is repeated."), nl]
     else
-        TermStr0 = mercury_term_to_string(VarSet, print_name_only, Term0),
+        TermStr0 = mercury_term_to_string_vs(VarSet, print_name_only, Term0),
         Pieces = [words("Error: attributes"), quote(TermStr0),
             words("and"), quote(TermStr), words("conflict."), nl]
     ),
@@ -561,8 +566,8 @@ report_repeated_or_conflicting_attributes(VarSet, Term0, Attr0, Term, Attr,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 report_conflicting_attributes(VarSet, Term0, Term, !Specs) :-
-    TermStr0 = mercury_term_to_string(VarSet, print_name_only, Term0),
-    TermStr = mercury_term_to_string(VarSet, print_name_only, Term),
+    TermStr0 = mercury_term_to_string_vs(VarSet, print_name_only, Term0),
+    TermStr = mercury_term_to_string_vs(VarSet, print_name_only, Term),
     Pieces = [words("Error: attributes"), quote(TermStr0),
         words("and"), quote(TermStr), words("conflict."), nl],
     Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,

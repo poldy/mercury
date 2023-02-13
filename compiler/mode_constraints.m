@@ -29,10 +29,10 @@
 
 %-----------------------------------------------------------------------------%
 
-:- pred mc_process_module(module_info::in, module_info::out,
-    io::di, io::uo) is det.
+:- pred mc_process_module(io.text_output_stream::in,
+    module_info::in, module_info::out, io::di, io::uo) is det.
 
-    % dump_abstract_constraints(ModuleInfo, Varset, PredConstraintsMap, !IO)
+    % dump_abstract_constraints(ModuleInfo, VarSet, PredConstraintsMap, !IO)
     %
     % Dumps the constraints in the PredConstraintsMap to file
     % modulename.mode_constraints
@@ -62,7 +62,6 @@
 :- import_module hlds.inst_graph.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
@@ -76,6 +75,7 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.vartypes.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -112,7 +112,7 @@
     func 'ho_modes :='(T, ho_modes) = T
 ].
 
-mc_process_module(!ModuleInfo, !IO) :-
+mc_process_module(ProgressStream, !ModuleInfo, !IO) :-
     module_info_get_valid_pred_ids(!.ModuleInfo, PredIds),
     module_info_get_globals(!.ModuleInfo, Globals),
     globals.lookup_bool_option(Globals, simple_mode_constraints, Simple),
@@ -120,7 +120,8 @@ mc_process_module(!ModuleInfo, !IO) :-
 
     (
         New = no,
-        list.foldl2(convert_pred_to_hhf(Simple), PredIds, !ModuleInfo, !IO),
+        list.foldl2(convert_pred_to_hhf(ProgressStream, Simple),
+            PredIds, !ModuleInfo, !IO),
         get_predicate_sccs(!.ModuleInfo, SCCs),
 
         % Stage 1: Process SCCs bottom-up to determine variable producers.
@@ -165,10 +166,10 @@ mc_process_module(!ModuleInfo, !IO) :-
         globals.lookup_bool_option(Globals, debug_mode_constraints, Debug),
         (
             Debug = yes,
-            ConstraintVarset = mc_varset(VarInfo),
+            ConstraintVarSet = mc_varset(VarInfo),
             trace [io(!TIO)] (
                 pretty_print_pred_constraints_map(!.ModuleInfo,
-                    ConstraintVarset, AbstractModeConstraints, !TIO)
+                    ConstraintVarSet, AbstractModeConstraints, !TIO)
             )
         ;
             Debug = no
@@ -192,7 +193,7 @@ mc_process_module(!ModuleInfo, !IO) :-
         )
     ).
 
-dump_abstract_constraints(ModuleInfo, ConstraintVarset, ModeConstraints,
+dump_abstract_constraints(ModuleInfo, ConstraintVarSet, ModeConstraints,
         !IO) :-
     module_info_get_globals(ModuleInfo, Globals),
     module_info_get_name(ModuleInfo, ModuleName),
@@ -204,7 +205,7 @@ dump_abstract_constraints(ModuleInfo, ConstraintVarset, ModeConstraints,
     (
         IOResult = ok(OutputStream),
         io.set_output_stream(OutputStream, OldOutStream, !IO),
-        pretty_print_pred_constraints_map(ModuleInfo, ConstraintVarset,
+        pretty_print_pred_constraints_map(ModuleInfo, ConstraintVarSet,
             ModeConstraints, !IO),
         io.set_output_stream(OldOutStream, _, !IO),
         io.close_output(OutputStream, !IO)
@@ -223,29 +224,32 @@ dump_abstract_constraints(ModuleInfo, ConstraintVarset, ModeConstraints,
 
 correct_nonlocals_in_pred(PredId, !ModuleInfo) :-
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
-    some [!ClausesInfo, !Varset, !Vartypes, !Clauses, !Goals, !RttiVarMaps] (
+    some [!ClausesInfo, !VarSet, !VarTypes, !Clauses, !Goals, !RttiVarMaps] (
         pred_info_get_clauses_info(PredInfo0, !:ClausesInfo),
         clauses_info_clauses(!:Clauses, ItemNumbers, !ClausesInfo),
         clauses_info_get_headvar_list(!.ClausesInfo, HeadVars),
-        clauses_info_get_varset(!.ClausesInfo, !:Varset),
-        clauses_info_get_vartypes(!.ClausesInfo, !:Vartypes),
+        % XXX If this code is ever actually used, it should be updated
+        % to use !VarTable instead of !VarSet and !VarTypes.
+        clauses_info_get_var_table(!.ClausesInfo, VarTable0),
+        split_var_table(VarTable0, !:VarSet, !:VarTypes),
+
         clauses_info_get_rtti_varmaps(!.ClausesInfo, !:RttiVarMaps),
         !:Goals = list.map(func(X) = clause_body(X), !.Clauses),
         list.map_foldl3(correct_nonlocals_in_clause_body(HeadVars), !Goals,
-            !Varset, !Vartypes, !RttiVarMaps),
+            !VarSet, !VarTypes, !RttiVarMaps),
         !:Clauses = list.map_corresponding(
             func(Clause, Goal) = 'clause_body :='(Clause, Goal),
             !.Clauses, !.Goals),
         set_clause_list(!.Clauses, ClausesRep),
         clauses_info_set_clauses_rep(ClausesRep, ItemNumbers, !ClausesInfo),
-        clauses_info_set_varset(!.Varset, !ClausesInfo),
-        clauses_info_set_vartypes(!.Vartypes, !ClausesInfo),
+        make_var_table(!.ModuleInfo, !.VarSet, !.VarTypes, VarTable),
+        clauses_info_set_var_table(VarTable, !ClausesInfo),
         clauses_info_set_rtti_varmaps(!.RttiVarMaps, !ClausesInfo),
         pred_info_set_clauses_info(!.ClausesInfo, PredInfo0, PredInfo)
     ),
     module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
-    % correct_nonlocals_in_clause_body(Headvars, !Goals, !Varset, !Vartypes,
+    % correct_nonlocals_in_clause_body(Headvars, !Goals, !VarSet, !VarTypes,
     %   RttiVarMaps)
     % requantifies the clause body Goal. This is to ensure that no variable
     % appears in the nonlocal set of a goal that doesn't also appear
@@ -255,11 +259,10 @@ correct_nonlocals_in_pred(PredId, !ModuleInfo) :-
     hlds_goal::in, hlds_goal::out, prog_varset::in, prog_varset::out,
     vartypes::in, vartypes::out, rtti_varmaps::in, rtti_varmaps::out) is det.
 
-correct_nonlocals_in_clause_body(Headvars, !Goals, !Varset, !Vartypes,
+correct_nonlocals_in_clause_body(Headvars, !Goals, !VarSet, !VarTypes,
         !RttiVarMaps) :-
-    implicitly_quantify_clause_body_general(ordinary_nonlocals_maybe_lambda,
-        Headvars, Warnings, !Goals, !Varset,
-        !Vartypes, !RttiVarMaps),
+    implicitly_quantify_clause_body_general_vs(ord_nl_maybe_lambda,
+        Headvars, Warnings, !Goals, !VarSet, !VarTypes, !RttiVarMaps),
     (
         Warnings = []
     ;
@@ -372,7 +375,10 @@ number_robdd_variables_in_pred(PredId, !ModuleInfo, !MCI) :-
 
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     clauses_info_get_headvar_list(ClausesInfo0, HeadVars),
-    clauses_info_get_vartypes(ClausesInfo0, VarTypes),
+    % XXX If this code is ever actually used, it should be updated
+    % to use VarTable instead of VarTypes.
+    clauses_info_get_var_table(ClausesInfo0, VarTable),
+    split_var_table(VarTable, _VarSet, VarTypes),
 
     pred_info_get_clauses_info(PredInfo0, ClausesInfo0),
     fill_goal_id_slots_in_clauses(!.ModuleInfo, ContainingGoalMap,
@@ -616,9 +622,8 @@ mc_process_pred(PredId, SCC, !ModeConstraint, !MCI,
         !ModuleInfo) :-
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     trace [io(!IO)] (
-        write_pred_progress_message(!.ModuleInfo,
-            "Calculating mode constraints for ", PredId, !IO),
-        io.flush_output(!IO)
+        maybe_write_pred_progress_message(!.ModuleInfo,
+            "Calculating mode constraints for ", PredId, !IO)
     ),
 
     pred_info_get_inst_graph_info(PredInfo0, InstGraphInfo),
@@ -1032,7 +1037,10 @@ do_process_inst(ModuleInfo, InstGraph, Free, Bound, DoHO,
 
 process_clauses_info(ModuleInfo, SCC, !ClausesInfo,
         InstGraph, HOModes0, !Constraint, !MCI) :-
-    clauses_info_get_varset(!.ClausesInfo, VarSet0),
+    % XXX If this code is ever actually used, it should be updated
+    % to use VarTable instead of VarTypes.
+    clauses_info_get_var_table(!.ClausesInfo, VarTable0),
+    split_var_table(VarTable0, VarSet0, VarTypes0),
     module_info_get_globals(ModuleInfo, Globals),
     globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
     (
@@ -1075,7 +1083,10 @@ process_clauses_info(ModuleInfo, SCC, !ClausesInfo,
     %   GCInfo ^ mc_info, "after_higher_order.dot", !IO),
     % io.flush_output(!IO),
 
-    clauses_info_set_varset(GCInfo ^ prog_varset, !ClausesInfo),
+    VarSet = GCInfo ^ prog_varset,
+    % XXX Not adding any variables in VarSet to VarTypes0 is a bug.
+    make_var_table(ModuleInfo, VarSet, VarTypes0, VarTable),
+    clauses_info_set_var_table(VarTable, !ClausesInfo),
     !:MCI = GCInfo ^ mc_info.
 
     % 1.2.1 Input output constraints.
@@ -1175,10 +1186,10 @@ goal_constraints(ParentNonLocals, CanSucceed, Goal0, Goal,
 
     % DEBUGGING CODE
     % ModuleInfo = !GCInfo ^ module_info,
-    % ProgVarset = !GCInfo ^ prog_varset,
+    % ProgVarSet = !GCInfo ^ prog_varset,
     % functor(GoalExpr, Functor, _),
     % unsafe_perform_io(io.format("\nFunctor: %s\n", [s(Functor)])),
-    % unsafe_perform_io(dump_constraints(ModuleInfo, ProgVarset,
+    % unsafe_perform_io(dump_constraints(ModuleInfo, ProgVarSet,
     %   !.Constraint)),
 
     % DMO document
@@ -1205,7 +1216,7 @@ goal_constraints(ParentNonLocals, CanSucceed, Goal0, Goal,
         GoalId, !Constraint, !GCInfo),
 
     % DEBUGGING CODE
-    % unsafe_perform_io(dump_constraints(ModuleInfo, ProgVarset,
+    % unsafe_perform_io(dump_constraints(ModuleInfo, ProgVarSet,
     %   !.Constraint)),
     % goal_info_set_mode_constraint(GoalInfo0, !.Constraint, GoalInfo).
 

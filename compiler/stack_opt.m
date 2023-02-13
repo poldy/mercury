@@ -104,7 +104,6 @@
 :- import_module hlds.hlds_out.hlds_out_util.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.optimization_options.
@@ -121,8 +120,9 @@
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
-:- import_module array.
 :- import_module bool.
 :- import_module counter.
 :- import_module int.
@@ -196,54 +196,52 @@ stack_opt_cell(PredProcId, !ProcInfo, !ModuleInfo) :-
     % (see tests/valid/stack_opt_simplify.m)
     module_info_get_globals(!.ModuleInfo, Globals),
     SimplifyTasks = list_to_simplify_tasks(Globals, []),
-    simplify_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo, !ProcInfo),
+    simplify_proc(maybe.no, SimplifyTasks, PredId, ProcId,
+        !ModuleInfo, !ProcInfo),
     detect_liveness_proc(!.ModuleInfo, PredProcId, !ProcInfo),
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
     initial_liveness(!.ModuleInfo, PredInfo, !.ProcInfo, Liveness0),
     body_should_use_typeinfo_liveness(PredInfo, Globals, TypeInfoLiveness),
     globals.lookup_bool_option(Globals, opt_no_return_calls,
         OptNoReturnCalls),
-    array.init(1, is_not_dummy_type, DummyDummyTypeArray),
     AllocData = alloc_data(!.ModuleInfo, !.ProcInfo, PredProcId,
-        TypeInfoLiveness, OptNoReturnCalls, DummyDummyTypeArray),
+        no_var_is_dummy, TypeInfoLiveness, OptNoReturnCalls),
     fill_goal_id_slots_in_proc(!.ModuleInfo, _, !ProcInfo),
     proc_info_get_goal(!.ProcInfo, Goal2),
     OptStackAlloc0 = init_opt_stack_alloc,
     set.init(FailVars),
     set.init(NondetLiveness0),
-    build_live_sets_in_goal_no_par_stack(Goal2, Goal, set_to_bitset(FailVars),
-        AllocData, OptStackAlloc0, OptStackAlloc, Liveness0, _Liveness,
+    build_live_sets_in_goal_no_par_stack(AllocData, set_to_bitset(FailVars),
+        Goal2, Goal, OptStackAlloc0, OptStackAlloc, Liveness0, _Liveness,
         set_to_bitset(NondetLiveness0), _NondetLiveness),
     proc_info_set_goal(Goal, !ProcInfo),
     allocate_store_maps(for_stack_opt, !.ModuleInfo, PredProcId, !ProcInfo),
     globals.lookup_int_option(Globals, debug_stack_opt, DebugStackOpt),
     pred_id_to_int(PredId, PredIdInt),
     trace [io(!IO)] (
-        maybe_write_progress_message(
-            "\nbefore stack opt cell",
-            DebugStackOpt, PredIdInt, !.ProcInfo, !.ModuleInfo, !IO)
+        maybe_write_progress_message(!.ModuleInfo, !.ProcInfo,
+            PredIdInt, DebugStackOpt, "\nbefore stack opt cell", !IO)
     ),
     optimize_live_sets(!.ModuleInfo, OptStackAlloc, !ProcInfo,
         Changed, DebugStackOpt, PredIdInt),
     (
         Changed = yes,
         trace [io(!IO)] (
-            maybe_write_progress_message(
-                "\nafter stack opt transformation",
-                DebugStackOpt, PredIdInt, !.ProcInfo, !.ModuleInfo, !IO)
+            maybe_write_progress_message(!.ModuleInfo, !.ProcInfo,
+                PredIdInt, DebugStackOpt,
+                "\nafter stack opt transformation", !IO)
         ),
-        requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
+        requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
         trace [io(!IO)] (
-            maybe_write_progress_message(
-                "\nafter stack opt requantify",
-                DebugStackOpt, PredIdInt, !.ProcInfo, !.ModuleInfo, !IO)
+            maybe_write_progress_message(!.ModuleInfo, !.ProcInfo,
+                PredIdInt, DebugStackOpt,
+                "\nafter stack opt requantify", !IO)
         ),
-        recompute_instmap_delta_proc(recompute_atomic_instmap_deltas,
-            !ProcInfo, !ModuleInfo),
+        recompute_instmap_delta_proc(recomp_atomics, !ProcInfo, !ModuleInfo),
         trace [io(!IO)] (
-            maybe_write_progress_message("
-                \nafter stack opt recompute instmaps",
-                DebugStackOpt, PredIdInt, !.ProcInfo, !.ModuleInfo, !IO)
+            maybe_write_progress_message(!.ModuleInfo, !.ProcInfo,
+                PredIdInt, DebugStackOpt,
+                "\nafter stack opt recompute instmaps", !IO)
         )
     ;
         Changed = no
@@ -259,10 +257,9 @@ init_opt_stack_alloc = opt_stack_alloc(set_of_var.init).
 optimize_live_sets(ModuleInfo, OptAlloc, !ProcInfo, Changed, DebugStackOpt,
         PredIdInt) :-
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     OptAlloc = opt_stack_alloc(ParConjOwnSlot),
-    arg_info.partition_proc_args(!.ProcInfo, ModuleInfo,
+    arg_info.partition_proc_args(ModuleInfo, !.ProcInfo,
         InputArgs, OutputArgs, UnusedArgs),
     HeadVars = set.union_list([InputArgs, OutputArgs, UnusedArgs]),
     module_info_get_globals(ModuleInfo, Globals),
@@ -298,7 +295,7 @@ optimize_live_sets(ModuleInfo, OptAlloc, !ProcInfo, Changed, DebugStackOpt,
     FullPath = OptTuple ^ ot_opt_svcell_full_path,
     OnStack = OptTuple ^ ot_opt_svcell_on_stack,
     globals.lookup_bool_option(Globals, opt_no_return_calls, OptNoReturnCalls),
-    IntParams = interval_params(ModuleInfo, VarTypes0, OptNoReturnCalls),
+    IntParams = interval_params(ModuleInfo, VarTable0, OptNoReturnCalls),
     IntervalInfo0 = interval_info(IntParams,
         set_of_var.init, set_to_bitset(OutputArgs),
         map.init, map.init, map.init, CurIntervalId, Counter1,
@@ -324,14 +321,12 @@ optimize_live_sets(ModuleInfo, OptAlloc, !ProcInfo, Changed, DebugStackOpt,
     ( if map.is_empty(InsertMap) then
         Changed = no
     else
-        record_decisions_in_goal(Goal0, Goal1, VarSet0, VarSet,
-            VarTypes0, VarTypes, map.init, RenameMap,
-            InsertMap, yes(feature_stack_opt)),
-        apply_headvar_correction(set_to_bitset(HeadVars), RenameMap,
+        record_decisions_in_goal(yes(feature_stack_opt), InsertMap,
+            Goal0, Goal1, VarTable0, VarTable, map.init, RenameMap),
+        apply_headvar_correction(set_of_var.set_to_bitset(HeadVars), RenameMap,
             Goal1, Goal),
         proc_info_set_goal(Goal, !ProcInfo),
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
         Changed = yes
     ).
 
@@ -431,8 +426,8 @@ use_cell(CellVar, FieldVarList, ConsId, Goal, !IntervalInfo, !StackOptInfo) :-
     else if
         ConsId = cons(_Name, _Arity, _TypeCtor),
         IntParams = !.IntervalInfo ^ ii_interval_params,
-        VarTypes = IntParams ^ ip_var_types,
-        lookup_var_type(VarTypes, CellVar, Type),
+        VarTable = IntParams ^ ip_var_table,
+        lookup_var_type(VarTable, CellVar, Type),
         ( if
             type_is_tuple(Type, _)
         then
@@ -1046,21 +1041,21 @@ compress_paths(Paths) = Paths.
 
 % This predicate can help debug the correctness of the transformation.
 
-:- pred maybe_write_progress_message(string::in, int::in, int::in,
-    proc_info::in, module_info::in, io::di, io::uo) is det.
+:- pred maybe_write_progress_message(module_info::in, proc_info::in,
+    int::in, int::in, string::in, io::di, io::uo) is det.
 
-maybe_write_progress_message(Message, DebugStackOpt, PredIdInt, ProcInfo,
-        ModuleInfo, !IO) :-
+maybe_write_progress_message(ModuleInfo, ProcInfo, PredIdInt, DebugStackOpt,
+        Message, !IO) :-
     ( if DebugStackOpt = PredIdInt then
         proc_info_get_goal(ProcInfo, Goal),
-        proc_info_get_varset(ProcInfo, VarSet),
+        proc_info_get_var_table(ProcInfo, VarTable),
         module_info_get_globals(ModuleInfo, Globals),
         io.output_stream(Stream, !IO),
         io.write_string(Stream, Message, !IO),
         io.write_string(Stream, ":\n", !IO),
         OutInfo = init_hlds_out_info(Globals, output_debug),
-        write_goal(OutInfo, Stream, ModuleInfo, VarSet, print_name_and_num,
-            0, "\n", Goal, !IO),
+        write_goal(OutInfo, Stream, ModuleInfo, vns_var_table(VarTable),
+            print_name_and_num, 0, "\n", Goal, !IO),
         io.write_string(Stream, "\n", !IO)
     else
         true

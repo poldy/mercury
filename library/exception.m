@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1997-2008, 2010-2011 The University of Melbourne.
-% Copyright (C) 2014-2018 The Mercury team.
+% Copyright (C) 2014-2023 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -52,6 +52,11 @@
     %
 :- func throw(T) = _ is erroneous.
 :- pred throw(T::in) is erroneous.
+% The termination analyzer can infer termination of throw/1 itself but
+% declaring it to be terminating here means that all of the standard library
+% will treat it as terminating as well.
+:- pragma terminates(func(throw/1)).
+:- pragma terminates(pred(throw/1)).
 
     % rethrow(ExceptionResult):
     %
@@ -198,7 +203,7 @@
     % no matter whether P succeeds or throws an exception.
     % PRes is bound to the output of P.
     % CleanupRes is bound to the output of Cleanup.
-    % A exception thrown by P will be rethrown after Cleanup
+    % An exception thrown by P will be rethrown after Cleanup
     % is called, unless Cleanup throws an exception.
     % This predicate performs the same function as the `finally'
     % clause (`try {...} finally {...}') in languages such as Java.
@@ -298,12 +303,6 @@
 :- pragma no_inline(pred(throw/1)).
 :- pragma no_inline(func(rethrow/1)).
 :- pragma no_inline(pred(rethrow/1)).
-
-% The termination analyzer can infer termination of throw/1 itself but
-% declaring it to be terminating here means that all of the standard library
-% will treat it as terminating as well.
-:- pragma terminates(func(throw/1)).
-:- pragma terminates(pred(throw/1)).
 
 throw(Exception) = _ :-
     throw(Exception).
@@ -691,7 +690,7 @@ exc_univ_value(Univ) = univ.univ_value(Univ).
 % By default, we call the external implementation, but specific backends
 % can provide their own definition using foreign_proc.
 
-throw_impl(Univ::in) :-
+throw_impl(Univ) :-
     builtin_throw(Univ).
 
 :- pragma foreign_proc("C#",
@@ -1472,7 +1471,7 @@ call_handler(Handler, Exception, Result) :-
     "ML_call_goal_det").
 
 % This causes problems because the LLDS back-end does not let you export
-% code with determinism `nondet'. Instead for C backends we hand-code it...
+% code with determinism nondet. Instead for C backends we hand-code it...
 % see below. Hand-coding it also avoids the casting needed to use MR_Word
 % (which `pragma export' procedures use for polymorphically typed arguments)
 % rather than MR_Box.

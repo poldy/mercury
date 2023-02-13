@@ -19,7 +19,7 @@
 
 :- import_module libs.
 :- import_module libs.globals.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_item.
 
 :- import_module list.
@@ -148,20 +148,19 @@ generate_short_interface_int3(Globals, ParseTreeModuleSrc, ParseTreeInt3,
         _ImpDeclPragmas, _ImpImplPragmas, _ImpPromises,
         _ImpInitialises, _ImpFinalises, _ImpMutables),
 
-    map.foldl2(acc_int_includes, OrigInclMap,
-        one_or_more_map.init, IntInclMap, map.init, InclMap),
+    map.foldl(acc_int_includes, OrigInclMap, map.init, IntInclMap0),
+    IntInclMap = int_incl_context_map(IntInclMap0),
     IntTypeClasses = list.map(make_typeclass_abstract_for_int3,
         OrigIntTypeClasses),
     IntInstances = list.map(make_instance_abstract, OrigIntInstances),
     (
         IntInstances = [],
-        one_or_more_map.init(IntImportMap),
-        map.init(ImportUseMap)
+        map.init(IntImportMap0)
     ;
         IntInstances = [_ | _],
-        map.foldl2(acc_int_imports, OrigImportUseMap,
-            one_or_more_map.init, IntImportMap, map.init, ImportUseMap)
+        map.foldl(acc_int_imports, OrigImportUseMap, map.init, IntImportMap0)
     ),
+    IntImportMap = int_import_context_map(IntImportMap0),
     map.foldl(make_type_ctor_checked_defn_abstract_for_int3,
         TypeCtorCheckedMap, map.init, IntTypeCtorCheckedMap),
     map.foldl(make_inst_ctor_checked_defn_abstract_for_int3,
@@ -172,7 +171,7 @@ generate_short_interface_int3(Globals, ParseTreeModuleSrc, ParseTreeInt3,
     decide_repns_for_simple_types_for_int3(ModuleName, TypeCtorCheckedMap,
         IntTypeRepnMap),
     OrigParseTreeInt3 = parse_tree_int3(ModuleName, ModuleNameContext,
-        IntInclMap, InclMap, IntImportMap, ImportUseMap,
+        IntInclMap, IntImportMap,
         IntTypeCtorCheckedMap, IntInstCtorCheckedMap, IntModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntTypeRepnMap),
     % Any Specs this can generate would be better reported
@@ -181,32 +180,28 @@ generate_short_interface_int3(Globals, ParseTreeModuleSrc, ParseTreeInt3,
         [], _Specs).
 
 :- pred acc_int_includes(module_name::in, include_module_info::in,
-    module_names_contexts::in, module_names_contexts::out,
-    include_module_map::in, include_module_map::out) is det.
+    module_name_context::in, module_name_context::out) is det.
 
-acc_int_includes(ModuleName, InclInfo, !ContextMap, !IncludeMap) :-
+acc_int_includes(ModuleName, InclInfo, !ContextMap) :-
     InclInfo = include_module_info(Section, Context),
     (
         Section = ms_interface,
-        one_or_more_map.add(ModuleName, Context, !ContextMap),
-        map.det_insert(ModuleName, InclInfo, !IncludeMap)
+        map.det_insert(ModuleName, Context, !ContextMap)
     ;
         Section = ms_implementation
     ).
 
 :- pred acc_int_imports(module_name::in, maybe_implicit_import_and_or_use::in,
-    module_names_contexts::in, module_names_contexts::out,
-    import_and_or_use_map::in, import_and_or_use_map::out) is det.
+    module_name_context::in, module_name_context::out) is det.
 
-acc_int_imports(ModuleName, ImportUseInfo, !ContextMap, !ImportUseMap) :-
+acc_int_imports(ModuleName, ImportUseInfo, !ContextMap) :-
     (
         ImportUseInfo = implicit_avail(_, _)
     ;
         ImportUseInfo = explicit_avail(SectionImportAndOrUse),
         (
             SectionImportAndOrUse = int_import(Context),
-            one_or_more_map.add(ModuleName, Context, !ContextMap),
-            map.det_insert(ModuleName, ImportUseInfo, !ImportUseMap)
+            map.det_insert(ModuleName, Context, !ContextMap)
         ;
             ( SectionImportAndOrUse = int_use(_)
             ; SectionImportAndOrUse = imp_import(_)
@@ -483,7 +478,7 @@ generate_private_interface_int0(AugMakeIntUnit, ParseTreeInt0, !Specs) :-
     ),
 
     ParseTreeModuleSrc = parse_tree_module_src(ModuleName, ModuleNameContext,
-        IntInclMap, ImpInclMap, InclMap,
+        _IntInclsMap, _ImpInclsMap, InclMap,
         _IntImportMap, _IntUseMap, _ImpImportMap, _ImpUseMap, ImportUseMap,
         IntFIMSpecMap, ImpFIMSpecMap, IntSelfFIMLangs, ImpSelfFIMLangs,
 
@@ -499,7 +494,7 @@ generate_private_interface_int0(AugMakeIntUnit, ParseTreeInt0, !Specs) :-
         _ImpInitialises, _ImpFinalises, ImpMutables),
 
     import_and_or_use_map_to_explicit_int_imp_import_use_maps(ImportUseMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap),
+        SectionImportUseMap, _, _, _, _),
     map.keys_as_set(IntFIMSpecMap, IntFIMSpecs0),
     map.keys_as_set(ImpFIMSpecMap, ImpFIMSpecs0),
     % Add implicit self FIMs for the {Int,Imp}SelfFIMLangs
@@ -520,8 +515,7 @@ generate_private_interface_int0(AugMakeIntUnit, ParseTreeInt0, !Specs) :-
         list.map(declare_mutable_aux_preds_for_int0(ModuleName), ImpMutables)),
 
     ParseTreeInt0 = parse_tree_int0(ModuleName, ModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, ImportUseMap,
+        MaybeVersionNumbers, InclMap, SectionImportUseMap,
         IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
@@ -793,36 +787,34 @@ pre_grab_pre_qual_mode_ctor_checked_defn(ModeCtor, CheckedDefn0,
 
 generate_interfaces_int1_int2(Globals, AugMakeIntUnit,
         ParseTreeInt1, ParseTreeInt2, !Specs) :-
-    generate_interface_int1(Globals, AugMakeIntUnit, IntImportUseMap,
+    generate_interface_int1(Globals, AugMakeIntUnit,
         IntExplicitFIMSpecs, ImpExplicitFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
-        IntTypeClasses, IntInstances, TypeCtorRepnMap, ParseTreeInt1, !Specs),
-    generate_interface_int2(AugMakeIntUnit, IntImportUseMap,
+        TypeCtorRepnMap, ParseTreeInt1, !Specs),
+    generate_interface_int2(AugMakeIntUnit,
         IntExplicitFIMSpecs, ImpExplicitFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
-        IntTypeClasses, IntInstances, TypeCtorRepnMap, ParseTreeInt2).
+        TypeCtorRepnMap, ParseTreeInt2).
 
 :- pred generate_interface_int1(globals::in, aug_make_int_unit::in,
-    module_names_contexts::out, set(fim_spec)::out, set(fim_spec)::out,
+    set(fim_spec)::out, set(fim_spec)::out,
     type_ctor_checked_map::out,
     inst_ctor_checked_map::out, mode_ctor_checked_map::out,
-    list(item_typeclass_info)::out, list(item_instance_info)::out,
     type_ctor_repn_map::out, parse_tree_int1::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-generate_interface_int1(Globals, AugMakeIntUnit, IntImportUseMap,
+generate_interface_int1(Globals, AugMakeIntUnit,
         IntExplicitFIMSpecs, ImpExplicitFIMSpecs,
         IntTypeCtorCheckedMap, IntInstCtorCheckedMap, IntModeCtorCheckedMap,
-        IntTypeClasses, IntInstances, TypeCtorRepnMap,
-        ParseTreeInt1, !Specs) :-
+        TypeCtorRepnMap, ParseTreeInt1, !Specs) :-
     % We return some of our intermediate results to our caller, for use
     % in constructing the .int2 file.
     AugMakeIntUnit = aug_make_int_unit(ParseTreeModuleSrc,
         _, DirectIntSpecs, IndirectIntSpecs, _),
 
     ParseTreeModuleSrc = parse_tree_module_src(ModuleName, ModuleNameContext,
-        IntInclMap, ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, ImportUseMap0,
+        _IntInclMap, _ImpInclMap, InclMap,
+        _IntImportMap, _IntUseMap, _ImpImportMap, _ImpUseMap, ImportUseMap,
         IntFIMSpecMap, ImpFIMSpecMap, IntSelfFIMLangs, _ImpSelfFIMLangs,
 
         TypeCtorCheckedMap0, InstCtorCheckedMap0, ModeCtorCheckedMap0,
@@ -879,36 +871,9 @@ generate_interface_int1(Globals, AugMakeIntUnit, IntImportUseMap,
     %
     % Since everything we put into a .int file should be fully module
     % qualified, we convert all import_modules into use_modules.
-    one_or_more_map.merge(IntImportMap, IntUseMap, IntImportUseMap),
-    one_or_more_map.merge(ImpImportMap, ImpUseMap, ImpImportUseMap1),
     map.filter_map_values(
         make_imports_into_uses_maybe_implicit(ImpNeededModules),
-        ImportUseMap0, ImportUseMap),
-    ( if set.is_empty(ImpNeededModules) then
-        % This gets the same result as the else case, only more quickly.
-        map.init(ImpImportUseMap)
-    else
-        one_or_more_map.select(ImpImportUseMap1, ImpNeededModules,
-            ImpImportUseMap0),
-        map.keys(IntImportUseMap, IntImportUseModules),
-        list.foldl(one_or_more_map.delete, IntImportUseModules,
-            ImpImportUseMap0, ImpImportUseMap)
-        % This sanity check is commented out, because it causes the failure
-        % of tests/valid/int_imp_test.m. While the parse_tree_module_src field
-        % that holds ImportUseMap0 is guaranteed to be free of a module
-        % imported or used more than once (except the permitted combo of
-        % used in interface, imported in implementation), the four previous
-        % fields, which this code draws its information from, have no such
-        % guarantee. They hold raw data from the source file, which may contain
-        % redundant import_module and use_module items.
-        %
-        % map.keys_as_set(IntImportUseMap, IntImportUseModuleNameSet),
-        % map.keys_as_set(ImpImportUseMap0, ImpImportUseModuleNameSet),
-        % set.intersect(IntImportUseModuleNameSet, ImpImportUseModuleNameSet,
-        %     IntImpImportUseModuleNameSet),
-        % expect(set.is_empty(IntImpImportUseModuleNameSet), $pred,
-        %     "Int and Imp ImportUseModuleNames intersect")
-    ),
+        ImportUseMap, SectionUseOnlyMap),
 
     map.keys_as_set(IntFIMSpecMap, IntExplicitFIMSpecs),
     map.keys_as_set(ImpFIMSpecMap, ImpExplicitFIMSpecs),
@@ -965,8 +930,7 @@ generate_interface_int1(Globals, AugMakeIntUnit, IntImportUseMap,
     DummyMaybeVersionNumbers = no_version_numbers,
     % XXX TODO
     ParseTreeInt1 = parse_tree_int1(ModuleName, ModuleNameContext,
-        DummyMaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntImportUseMap, ImpImportUseMap, ImportUseMap,
+        DummyMaybeVersionNumbers, InclMap, SectionUseOnlyMap,
         IntFIMSpecs, ImpFIMSpecs,
         IntTypeCtorCheckedMap, IntInstCtorCheckedMap, IntModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
@@ -983,40 +947,23 @@ add_self_fim(ModuleName, Lang, !FIMSpecs) :-
 
 :- pred make_imports_into_uses_maybe_implicit(set(module_name)::in,
     module_name::in, maybe_implicit_import_and_or_use::in,
-    maybe_implicit_import_and_or_use::out) is semidet.
+    section_use::out) is semidet.
 
 make_imports_into_uses_maybe_implicit(ImpNeededModules, ModuleName,
-        ImportUse0, ImportUse) :-
+        ImportUse, SectionUseOnly) :-
     (
-        ImportUse0 = explicit_avail(Explicit0),
+        ImportUse = explicit_avail(Explicit),
         make_imports_into_uses(ImpNeededModules, ModuleName,
-            Explicit0, Explicit),
-        ImportUse = explicit_avail(Explicit)
+            Explicit, SectionUseOnly)
     ;
-        ImportUse0 = implicit_avail(Implicit0, MaybeExplicit0),
-        (
-            ( Implicit0 = implicit_int_import
-            ; Implicit0 = implicit_int_use
-            ),
-            Implicit = implicit_int_use
-        ;
-            Implicit0 = implicit_imp_use,
-            Implicit = implicit_imp_use
-        ),
-        (
-            MaybeExplicit0 = no,
-            MaybeExplicit = no
-        ;
-            MaybeExplicit0 = yes(Explicit0),
-            make_imports_into_uses(ImpNeededModules, ModuleName,
-                Explicit0, Explicit),
-            MaybeExplicit = yes(Explicit)
-        ),
-        ImportUse = implicit_avail(Implicit, MaybeExplicit)
+        ImportUse = implicit_avail(_Implicit, MaybeExplicit),
+        MaybeExplicit = yes(Explicit),
+        make_imports_into_uses(ImpNeededModules, ModuleName,
+            Explicit, SectionUseOnly)
     ).
 
 :- pred make_imports_into_uses(set(module_name)::in, module_name::in,
-    section_import_and_or_use::in, section_import_and_or_use::out) is semidet.
+    section_import_and_or_use::in, section_use::out) is semidet.
 
 make_imports_into_uses(ImpNeededModules, ModuleName, Explicit0, Explicit) :-
     (
@@ -1091,7 +1038,7 @@ record_modules_needed_by_typeclass_imp(ItemTypeClass,
     % The superclass constraints on the typeclass being declared
     % may refer to typeclasses that this module has imported.
     Constraints = ItemTypeClass ^ tc_superclasses,
-    list.foldl(accumulate_modules_from_constraint, Constraints,
+    list.foldl(accumulate_modules_in_qual_constraint, Constraints,
         !ImpModulesNeededByTypeClassDefns).
 
 :- pred keep_promise_item_int(item_promise_info::in) is semidet.
@@ -1107,57 +1054,6 @@ keep_promise_item_int(ItemPromise) :-
         ; PromiseType = promise_type_exhaustive
         ; PromiseType = promise_type_exclusive_exhaustive
         )
-    ).
-
-%---------------------------------------------------------------------------%
-
-:- pred accumulate_modules_from_constraint(prog_constraint::in,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_from_constraint(Constraint, !Modules) :-
-    Constraint = constraint(ClassName, ArgTypes),
-    (
-        ClassName = qualified(ModuleName, _),
-        set.insert(ModuleName, !Modules)
-    ;
-        ClassName = unqualified(_),
-        unexpected($pred, "unknown typeclass in constraint")
-    ),
-    accumulate_modules_from_types(ArgTypes, !Modules).
-
-:- pred accumulate_modules_from_types(list(mer_type)::in,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_from_types([], !Modules).
-accumulate_modules_from_types([Type | Types], !Modules) :-
-    accumulate_modules_from_type(Type, !Modules),
-    accumulate_modules_from_types(Types, !Modules).
-
-:- pred accumulate_modules_from_type(mer_type::in,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_from_type(Type, !Modules) :-
-    (
-        % Do nothing for these types - they cannot affect the set of
-        % implementation imports in an interface file.
-        ( Type = type_variable(_, _)
-        ; Type = builtin_type(_)
-        )
-    ;
-        Type = defined_type(TypeName, ArgTypes, _),
-        det_sym_name_get_module_name(TypeName, ModuleName),
-        set.insert(ModuleName, !Modules),
-        accumulate_modules_from_types(ArgTypes, !Modules)
-    ;
-        Type = kinded_type(KindedType, _),
-        accumulate_modules_from_type(KindedType, !Modules)
-    ;
-        ( Type = tuple_type(ArgTypes, _)
-        ; Type = apply_n_type(_, ArgTypes, _)
-        ; Type = higher_order_type(_, ArgTypes, _HOInstInfo, _, _)
-        ),
-        % XXX ITEM_LIST accumulate modules from _HOInstInfo
-        accumulate_modules_from_types(ArgTypes, !Modules)
     ).
 
 %---------------------------------------------------------------------------%
@@ -1518,7 +1414,7 @@ accumulate_abs_eqv_type_rhs_in_defn(ImpTypesMap, ImpItemTypeDefnInfo,
         % idempotent, there is no point in invoking them again.
         set.difference(RhsTypeCtors, !.AbsExpEqvRhsTypeCtors, NewRhsTypeCtors),
         set.union(NewRhsTypeCtors, !AbsExpEqvRhsTypeCtors),
-        set.fold(accumulate_modules_used_by_type_ctor, NewRhsTypeCtors,
+        set.fold(accumulate_modules_in_qual_type_ctor, NewRhsTypeCtors,
             !ModulesNeededByTypeDefns),
         % XXX ITEM_LIST I (zs) *think* that the reason why we ignore the
         % result of the second accumulator (!DuArgTypeCtors) in this call
@@ -1550,36 +1446,13 @@ accumulate_abs_eqv_type_rhs_in_defn(ImpTypesMap, ImpItemTypeDefnInfo,
         ctors_to_user_type_ctor_set(one_or_more_to_list(OoMCtors),
             set.init, RhsTypeCtors),
         set.union(RhsTypeCtors, !DuArgTypeCtors),
-        set.fold(accumulate_modules_used_by_type_ctor, RhsTypeCtors,
+        set.fold(accumulate_modules_in_qual_type_ctor, RhsTypeCtors,
             !ModulesNeededByTypeDefns)
     ;
         ( ImpTypeDefn = parse_tree_abstract_type(_)
         ; ImpTypeDefn = parse_tree_solver_type(_)
         ; ImpTypeDefn = parse_tree_foreign_type(_)
         )
-    ).
-
-%---------------------%
-
-:- pred accumulate_modules_used_by_type_ctor(type_ctor::in,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_used_by_type_ctor(TypeCtor, !Modules) :-
-    TypeCtor = type_ctor(SymName, _Arity),
-    (
-        SymName = qualified(ModuleName, _),
-        set.insert(ModuleName, !Modules)
-    ;
-        SymName = unqualified(_)
-        % Our ancestor generate_interfaces_int1_int2 should be invoked
-        % only *after* the module qualification of the augmented compilation
-        % unit whose contents we are now processing, and the module
-        % qualification pass would have generated an error message
-        % for this cannot-be-uniquely-qualified name. However, if the option
-        % print_errors_warnings_when_generating_interface is off, as it is
-        % by default, then the compiler ignores that error, and proceeds
-        % to call generate_interfaces_int1_int2 above, which calls us
-        % indirectly.
     ).
 
 %---------------------%
@@ -2287,35 +2160,33 @@ make_subtype_defn_abstract(SubDefn) = AbstractDefn :-
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-    % generate_interface_int2(AugMakeIntUnit, IntImportUseMap,
+    % generate_interface_int2(AugMakeIntUnit,
     %   IntExplicitFIMSpecs, ImpExplicitFIMSpecs,
-    %   IntTypeDefns, IntInstDefns, IntModeDefns, IntTypeClasses, IntInstances,
-    %   ImpTypeDefns, TypeCtorRepnMap, ParseTreeInt2):
+    %   TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
+    %   TypeCtorRepnMap, ParseTreeInt2):
     %
     % The input arguments should be the relevant parts of the .int1 file
     % computed by our parent.
     %
 :- pred generate_interface_int2(aug_make_int_unit::in,
-    module_names_contexts::in, set(fim_spec)::in, set(fim_spec)::in,
-    type_ctor_checked_map::in,
-    inst_ctor_checked_map::in, mode_ctor_checked_map::in,
-    list(item_typeclass_info)::in, list(item_instance_info)::in,
-    type_ctor_repn_map::in, parse_tree_int2::out) is det.
+    set(fim_spec)::in, set(fim_spec)::in,
+    type_ctor_checked_map::in, inst_ctor_checked_map::in,
+    mode_ctor_checked_map::in, type_ctor_repn_map::in,
+    parse_tree_int2::out) is det.
 
-generate_interface_int2(AugMakeIntUnit, IntImportUseMap,
+generate_interface_int2(AugMakeIntUnit,
         IntExplicitFIMSpecs, ImpExplicitFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
-        IntTypeClasses, IntInstances, TypeCtorRepnMap, ParseTreeInt2) :-
+        TypeCtorRepnMap, ParseTreeInt2) :-
     AugMakeIntUnit = aug_make_int_unit(ParseTreeModuleSrc, _, _, _, _),
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     ModuleNameContext = ParseTreeModuleSrc ^ ptms_module_name_context,
 
-    IntInclMap = ParseTreeModuleSrc ^ ptms_int_includes,
     InclMap = ParseTreeModuleSrc ^ ptms_include_map,
-    map.foldl(add_only_int_include, InclMap, map.init, ShortInclMap),
+    map.foldl(add_only_int_include, InclMap, map.init, ShortIntInclMap),
+    IntTypeClasses = ParseTreeModuleSrc ^ ptms_int_typeclasses,
+    IntInstances = ParseTreeModuleSrc ^ ptms_int_instances,
 
-    % XXX CLEANUP start from ParseTreeModuleSrc, not from
-    % ParseTreeInt1's components, where these are the same.
     some [!UnqualSymNames, !UsedModuleNames] (
         !:UnqualSymNames = no_unqual_symnames,
         set.init(!:UsedModuleNames),
@@ -2346,33 +2217,10 @@ generate_interface_int2(AugMakeIntUnit, IntImportUseMap,
         UsedModuleNames = !.UsedModuleNames
     ),
 
-    % We compute ShortIntUseMap from IntImportUseMap. IntImportUseMap
-    % is the set of modules imported *or used* in the interface section
-    % of the .int file. In the .int2 file, we replace all import_module
-    % declarations with use_module declarations, which is why the Import part
-    % of the name goes away. (The Short part of the new variable name refers
-    % to the destination being the .int2 file.)
-    (
-        UnqualSymNames = no_unqual_symnames,
-        % UsedModuleNames may contain references to implicitly imported
-        % builtin modules, which we do not want to *explicitly* import.
-        % Intersecting it with IntImportUseMap deletes these.
-        one_or_more_map.select(IntImportUseMap, UsedModuleNames,
-            ShortIntUseMap)
-    ;
-        UnqualSymNames = some_unqual_symnames,
-        % Since some item did not get fully qualified, the module has an error.
-        % If we deleted any element of IntImportUseMap, a compiler invocation
-        % that read the .int2 file we are generating could print
-        % an error message that points the blame at that modification,
-        % rather than at the contents of the .m file we were given.
-        ShortIntUseMap = IntImportUseMap
-    ),
     ImportUseMap = ParseTreeModuleSrc ^ ptms_import_use_map,
     map.foldl(
-        make_imports_into_uses_int_only_maybe_implicit(UnqualSymNames,
-            UsedModuleNames),
-        ImportUseMap, map.init, ShortImportUseMap),
+        make_imports_into_uses_int_only(UnqualSymNames, UsedModuleNames),
+        ImportUseMap, map.init, ShortUseOnlyMap),
 
     % If there is nothing involving a foreign language in the interface,
     % then we do not need either explicit or implicit FIMs for that
@@ -2399,9 +2247,8 @@ generate_interface_int2(AugMakeIntUnit, IntImportUseMap,
     DummyMaybeVersionNumbers = no_version_numbers,
 
     ParseTreeInt2 = parse_tree_int2(ModuleName, ModuleNameContext,
-        DummyMaybeVersionNumbers,
-        IntInclMap, ShortInclMap, ShortIntUseMap, ShortImportUseMap,
-        ShortIntFIMSpecs, ShortImpFIMSpecs,
+        DummyMaybeVersionNumbers, ShortIntInclMap,
+        ShortUseOnlyMap, ShortIntFIMSpecs, ShortImpFIMSpecs,
         ShortTypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         ShortIntTypeClasses, ShortIntInstances, TypeCtorRepnMap).
 
@@ -2415,24 +2262,25 @@ fim_spec_is_for_needed_language(NeededLangs, FIMSpec) :-
     set.contains(NeededLangs, Lang).
 
 :- pred add_only_int_include(module_name::in, include_module_info::in,
-    include_module_map::in, include_module_map::out) is det.
+    int_include_module_map::in, int_include_module_map::out) is det.
 
 add_only_int_include(ModuleName, InclInfo, !IntInclMap) :-
-    InclInfo = include_module_info(Section, _Context),
+    InclInfo = include_module_info(Section, Context),
     (
         Section = ms_interface,
-        map.det_insert(ModuleName, InclInfo, !IntInclMap)
+        IntInclInfo = include_module_info(ms_interface, Context),
+        map.det_insert(ModuleName, IntInclInfo, !IntInclMap)
     ;
         Section = ms_implementation
     ).
 
-:- pred make_imports_into_uses_int_only_maybe_implicit(
+:- pred make_imports_into_uses_int_only(
     maybe_unqual_symnames::in, set(module_name)::in,
     module_name::in, maybe_implicit_import_and_or_use::in,
-    import_and_or_use_map::in, import_and_or_use_map::out) is det.
+    section_use_map::in, section_use_map::out) is det.
 
-make_imports_into_uses_int_only_maybe_implicit(UnqualSymNames, UsedModuleNames,
-        ModuleName, ImportUse0, !ShortImportUseMap) :-
+make_imports_into_uses_int_only(UnqualSymNames, UsedModuleNames,
+        ModuleName, ImportUse0, !ShortUseOnlyMap) :-
     ( if
         UnqualSymNames = no_unqual_symnames,
         not set.contains(UsedModuleNames, ModuleName)
@@ -2447,43 +2295,25 @@ make_imports_into_uses_int_only_maybe_implicit(UnqualSymNames, UsedModuleNames,
         (
             ImportUse0 = explicit_avail(Explicit0),
             ( if make_imports_into_uses_int_only(Explicit0, Explicit) then
-                ImportUse = explicit_avail(Explicit),
-                map.det_insert(ModuleName, ImportUse, !ShortImportUseMap)
+                map.det_insert(ModuleName, Explicit, !ShortUseOnlyMap)
             else
                 true
             )
         ;
-            ImportUse0 = implicit_avail(Implicit0, MaybeExplicit0),
+            ImportUse0 = implicit_avail(_Implicit0, MaybeExplicit0),
             ( if
                 MaybeExplicit0 = yes(Explicit0),
-                make_imports_into_uses_int_only(Explicit0, Explicit1)
+                make_imports_into_uses_int_only(Explicit0, Explicit)
             then
-                MaybeExplicit = yes(Explicit1)
+                map.det_insert(ModuleName, Explicit, !ShortUseOnlyMap)
             else
-                MaybeExplicit = no
-            ),
-            (
-                ( Implicit0 = implicit_int_import
-                ; Implicit0 = implicit_int_use
-                ),
-                Implicit = implicit_int_use,
-                ImportUse = implicit_avail(Implicit, MaybeExplicit),
-                map.det_insert(ModuleName, ImportUse, !ShortImportUseMap)
-            ;
-                Implicit0 = implicit_imp_use,
-                (
-                    MaybeExplicit = yes(Explicit),
-                    ImportUse = explicit_avail(Explicit),
-                    map.det_insert(ModuleName, ImportUse, !ShortImportUseMap)
-                ;
-                    MaybeExplicit = no
-                )
+                true
             )
         )
     ).
 
 :- pred make_imports_into_uses_int_only(section_import_and_or_use::in,
-    section_import_and_or_use::out) is semidet.
+    section_use::out) is semidet.
 
 make_imports_into_uses_int_only(Explicit0, Explicit) :-
     require_complete_switch [Explicit0]
@@ -2546,7 +2376,7 @@ restrict_type_ctor_checked_defn_for_int2(TypeCtor, TypeCtorCheckedDefn0,
             checked_defn_solver(SolverTypeDefn0, SrcDefnsSolver0),
         SolverTypeDefn = SolverTypeDefn0,
         SrcDefnsSolver0 = src_defns_solver(MaybeIntDefn0, MaybeImpDefn),
-        map_fold3_maybe(restrict_type_ctor_int_defn_for_int2,
+        maybe.map_fold3_maybe(restrict_type_ctor_int_defn_for_int2,
             MaybeIntDefn0, MaybeIntDefn,
             !MaybeUnqual, !ModuleNames, !IntImplicitFIMLangs),
         SrcDefnsSolver = src_defns_solver(MaybeIntDefn, MaybeImpDefn),
@@ -2949,201 +2779,6 @@ delete_uc_preds_from_foreign_type(DetailsForeign0, DetailsForeign) :-
 
 %---------------------------------------------------------------------------%
 
-:- type maybe_unqual_symnames
-    --->    no_unqual_symnames
-    ;       some_unqual_symnames.
-
-:- pred accumulate_module(sym_name::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_module(SymName, !MaybeUnqual, !ModuleNames) :-
-    (
-        SymName = unqualified(_),
-        !:MaybeUnqual = some_unqual_symnames
-    ;
-        SymName = qualified(ModuleName, _),
-        set.insert(ModuleName, !ModuleNames)
-    ).
-
-%---------------------%
-
-:- pred accumulate_modules_in_constraint(prog_constraint::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_constraint(Constraint, !MaybeUnqual, !ModuleNames) :-
-    Constraint = constraint(ClassSymName, ArgTypes),
-    accumulate_module(ClassSymName, !MaybeUnqual, !ModuleNames),
-    accumulate_modules_in_types(ArgTypes, !MaybeUnqual, !ModuleNames).
-
-%---------------------%
-
-:- pred accumulate_modules_in_type(mer_type::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames) :-
-    (
-        ( Type = type_variable(_, _)
-        ; Type = builtin_type(_)
-        )
-    ;
-        Type = defined_type(SymName, ArgTypes, _Kind),
-        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
-        accumulate_modules_in_types(ArgTypes, !MaybeUnqual, !ModuleNames)
-    ;
-        ( Type = tuple_type(ArgTypes, _Kind)
-        ; Type = apply_n_type(_TVar, ArgTypes, _Kind)
-        ; Type = higher_order_type(_PredOrFunc, ArgTypes,
-            _HOInstInfo, _Purity, _EvalMethod)
-        ),
-        accumulate_modules_in_types(ArgTypes, !MaybeUnqual, !ModuleNames)
-    ;
-        Type = kinded_type(ArgType, _Kind),
-        accumulate_modules_in_type(ArgType, !MaybeUnqual, !ModuleNames)
-    ).
-
-%---------------------%
-
-:- pred accumulate_modules_in_inst(mer_inst::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_inst(Inst, !MaybeUnqual, !ModuleNames) :-
-    (
-        ( Inst = free
-        ; Inst = not_reached
-        ; Inst = ground(_Uniq, _HOInstInfo)
-        ; Inst = inst_var(_InstVar)
-        ; Inst = any(_Uniq, _HOInstInfo)
-        )
-    ;
-        Inst = free(Type),
-        accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames)
-    ;
-        Inst = bound(_Uniq, _InstTestsResults, BoundInsts),
-        accumulate_modules_in_bound_insts(BoundInsts,
-            !MaybeUnqual, !ModuleNames)
-    ;
-        Inst = constrained_inst_vars(_InstVars, ArgInst),
-        accumulate_modules_in_inst(ArgInst, !MaybeUnqual, !ModuleNames)
-    ;
-        Inst = defined_inst(InstName),
-        accumulate_modules_in_inst_name(InstName, !MaybeUnqual, !ModuleNames)
-    ;
-        Inst = abstract_inst(SymName, ArgInsts),
-        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
-        accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames)
-    ).
-
-:- pred accumulate_modules_in_inst_name(inst_name::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_inst_name(InstName, !MaybeUnqual, !ModuleNames) :-
-    (
-        InstName = user_inst(SymName, ArgInsts),
-        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
-        accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames)
-    ;
-        ( InstName = unify_inst(_IsLive, _IsReal, ArgInstA, ArgInstB)
-        ; InstName = merge_inst(ArgInstA, ArgInstB)
-        ),
-        accumulate_modules_in_insts([ArgInstA, ArgInstB],
-            !MaybeUnqual, !ModuleNames)
-    ;
-        ( InstName = ground_inst(ArgInstName, _Uniq, _IsLive, _IsReal)
-        ; InstName = any_inst(ArgInstName, _Uniq, _IsLive, _IsReal)
-        ; InstName = shared_inst(ArgInstName)
-        ; InstName = mostly_uniq_inst(ArgInstName)
-        ),
-        accumulate_modules_in_inst_name(ArgInstName,
-            !MaybeUnqual, !ModuleNames)
-    ;
-        InstName = typed_ground(_Uniq, Type),
-        accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames)
-    ;
-        InstName = typed_inst(Type, ArgInstName),
-        accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames),
-        accumulate_modules_in_inst_name(ArgInstName,
-            !MaybeUnqual, !ModuleNames)
-    ).
-
-:- pred accumulate_modules_in_bound_inst(bound_inst::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_bound_inst(BoundInst, !MaybeUnqual, !ModuleNames) :-
-    BoundInst = bound_functor(ConsId, ArgInsts),
-    ( if ConsId = cons(SymName, _ConsArity, TypeCtor) then
-        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
-        TypeCtor = type_ctor(TypeCtorSymName, _Arity),
-        accumulate_module(TypeCtorSymName, !MaybeUnqual, !ModuleNames)
-    else
-        true
-    ),
-    accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames).
-
-%---------------------%
-
-:- pred accumulate_modules_in_mode(mer_mode::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_mode(Mode, !MaybeUnqual, !ModuleNames) :-
-    (
-        Mode = from_to_mode(InstA, InstB),
-        accumulate_modules_in_inst(InstA, !MaybeUnqual, !ModuleNames),
-        accumulate_modules_in_inst(InstB, !MaybeUnqual, !ModuleNames)
-    ;
-        Mode = user_defined_mode(SymName, ArgInsts),
-        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
-        accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames)
-    ).
-
-%---------------------%
-
-:- pred accumulate_modules_in_constraints(list(prog_constraint)::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_constraints([], !MaybeUnqual, !ModuleNames).
-accumulate_modules_in_constraints([Constraint | Constraints],
-        !MaybeUnqual, !ModuleNames) :-
-    accumulate_modules_in_constraint(Constraint, !MaybeUnqual, !ModuleNames),
-    accumulate_modules_in_constraints(Constraints, !MaybeUnqual, !ModuleNames).
-
-:- pred accumulate_modules_in_types(list(mer_type)::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_types([], !MaybeUnqual, !ModuleNames).
-accumulate_modules_in_types([Type | Types], !MaybeUnqual, !ModuleNames) :-
-    accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames),
-    accumulate_modules_in_types(Types, !MaybeUnqual, !ModuleNames).
-
-:- pred accumulate_modules_in_bound_insts(list(bound_inst)::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_bound_insts([], !MaybeUnqual, !ModuleNames).
-accumulate_modules_in_bound_insts([BoundInst | BoundInsts],
-        !MaybeUnqual, !ModuleNames) :-
-    accumulate_modules_in_bound_inst(BoundInst, !MaybeUnqual, !ModuleNames),
-    accumulate_modules_in_bound_insts(BoundInsts, !MaybeUnqual, !ModuleNames).
-
-:- pred accumulate_modules_in_insts(list(mer_inst)::in,
-    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
-    set(module_name)::in, set(module_name)::out) is det.
-
-accumulate_modules_in_insts([], !MaybeUnqual, !ModuleNames).
-accumulate_modules_in_insts([Inst | Insts], !MaybeUnqual, !ModuleNames) :-
-    accumulate_modules_in_inst(Inst, !MaybeUnqual, !ModuleNames),
-    accumulate_modules_in_insts(Insts, !MaybeUnqual, !ModuleNames).
-
-%---------------------------------------------------------------------------%
-
 :- func make_inst_defn_abstract(item_inst_defn_info) = item_inst_defn_info.
 
 make_inst_defn_abstract(InstDefn) =
@@ -3301,6 +2936,274 @@ record_foreign_lang_in_type_defn(TypeDefnInfo, !Langs) :-
 record_foreign_lang_in_foreign_enum(ForeignEnumInfo, !Langs) :-
     ForeignEnumInfo = item_foreign_enum_info(Lang, _, _, _, _),
     set.insert(Lang, !Langs).
+
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+
+:- pred accumulate_modules_in_constraints(list(prog_constraint)::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_constraints([], !MaybeUnqual, !ModuleNames).
+accumulate_modules_in_constraints([Constraint | Constraints],
+        !MaybeUnqual, !ModuleNames) :-
+    accumulate_modules_in_constraint(Constraint, !MaybeUnqual, !ModuleNames),
+    accumulate_modules_in_constraints(Constraints, !MaybeUnqual, !ModuleNames).
+
+:- pred accumulate_modules_in_constraint(prog_constraint::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_constraint(Constraint, !MaybeUnqual, !ModuleNames) :-
+    Constraint = constraint(ClassSymName, ArgTypes),
+    accumulate_module(ClassSymName, !MaybeUnqual, !ModuleNames),
+    accumulate_modules_in_types(ArgTypes, !MaybeUnqual, !ModuleNames).
+
+%---------------------%
+
+:- pred accumulate_modules_in_qual_constraint(prog_constraint::in,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_qual_constraint(Constraint, !Modules) :-
+    Constraint = constraint(ClassSymName, ArgTypes),
+    (
+        ClassSymName = qualified(ModuleName, _),
+        set.insert(ModuleName, !Modules)
+    ;
+        ClassSymName = unqualified(_),
+        unexpected($pred, "unknown typeclass in constraint")
+    ),
+    accumulate_modules_in_qual_types(ArgTypes, !Modules).
+
+%---------------------%
+
+:- pred accumulate_modules_in_types(list(mer_type)::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_types([], !MaybeUnqual, !ModuleNames).
+accumulate_modules_in_types([Type | Types], !MaybeUnqual, !ModuleNames) :-
+    accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames),
+    accumulate_modules_in_types(Types, !MaybeUnqual, !ModuleNames).
+
+:- pred accumulate_modules_in_type(mer_type::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames) :-
+    (
+        ( Type = type_variable(_, _)
+        ; Type = builtin_type(_)
+        )
+    ;
+        Type = defined_type(SymName, ArgTypes, _Kind),
+        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
+        accumulate_modules_in_types(ArgTypes, !MaybeUnqual, !ModuleNames)
+    ;
+        ( Type = tuple_type(ArgTypes, _Kind)
+        ; Type = apply_n_type(_TVar, ArgTypes, _Kind)
+        ; Type = higher_order_type(_PredOrFunc, ArgTypes,
+            _HOInstInfo, _Purity, _EvalMethod)
+        ),
+        accumulate_modules_in_types(ArgTypes, !MaybeUnqual, !ModuleNames)
+    ;
+        Type = kinded_type(ArgType, _Kind),
+        accumulate_modules_in_type(ArgType, !MaybeUnqual, !ModuleNames)
+    ).
+
+%---------------------%
+
+:- pred accumulate_modules_in_qual_types(list(mer_type)::in,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_qual_types([], !Modules).
+accumulate_modules_in_qual_types([Type | Types], !Modules) :-
+    accumulate_modules_in_qual_type(Type, !Modules),
+    accumulate_modules_in_qual_types(Types, !Modules).
+
+:- pred accumulate_modules_in_qual_type(mer_type::in,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_qual_type(Type, !Modules) :-
+    (
+        % Do nothing for these types - they cannot affect the set of
+        % implementation imports in an interface file.
+        ( Type = type_variable(_, _)
+        ; Type = builtin_type(_)
+        )
+    ;
+        Type = defined_type(TypeName, ArgTypes, _),
+        det_sym_name_get_module_name(TypeName, ModuleName),
+        set.insert(ModuleName, !Modules),
+        accumulate_modules_in_qual_types(ArgTypes, !Modules)
+    ;
+        Type = kinded_type(KindedType, _),
+        accumulate_modules_in_qual_type(KindedType, !Modules)
+    ;
+        ( Type = tuple_type(ArgTypes, _)
+        ; Type = apply_n_type(_, ArgTypes, _)
+        ; Type = higher_order_type(_, ArgTypes, _HOInstInfo, _, _)
+        ),
+        % XXX ITEM_LIST accumulate modules from _HOInstInfo
+        accumulate_modules_in_qual_types(ArgTypes, !Modules)
+    ).
+
+:- pred accumulate_modules_in_qual_type_ctor(type_ctor::in,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_qual_type_ctor(TypeCtor, !Modules) :-
+    TypeCtor = type_ctor(SymName, _Arity),
+    (
+        SymName = qualified(ModuleName, _),
+        set.insert(ModuleName, !Modules)
+    ;
+        SymName = unqualified(_)
+        % Our ancestor generate_interfaces_int1_int2 should be invoked
+        % only *after* the module qualification of the augmented compilation
+        % unit whose contents we are now processing, and the module
+        % qualification pass would have generated an error message
+        % for this cannot-be-uniquely-qualified name. However, if the
+        % user has turned off the halt_at_invalid_interface option,
+        % which is on by default, then the compiler ignores that error,
+        % and proceeds to call generate_interfaces_int1_int2 above,
+        % which calls us indirectly.
+    ).
+
+%---------------------%
+
+:- pred accumulate_modules_in_insts(list(mer_inst)::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_insts([], !MaybeUnqual, !ModuleNames).
+accumulate_modules_in_insts([Inst | Insts], !MaybeUnqual, !ModuleNames) :-
+    accumulate_modules_in_inst(Inst, !MaybeUnqual, !ModuleNames),
+    accumulate_modules_in_insts(Insts, !MaybeUnqual, !ModuleNames).
+
+:- pred accumulate_modules_in_inst(mer_inst::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_inst(Inst, !MaybeUnqual, !ModuleNames) :-
+    (
+        ( Inst = free
+        ; Inst = not_reached
+        ; Inst = ground(_Uniq, _HOInstInfo)
+        ; Inst = inst_var(_InstVar)
+        ; Inst = any(_Uniq, _HOInstInfo)
+        )
+    ;
+        Inst = free(Type),
+        accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames)
+    ;
+        Inst = bound(_Uniq, _InstTestsResults, BoundInsts),
+        accumulate_modules_in_bound_insts(BoundInsts,
+            !MaybeUnqual, !ModuleNames)
+    ;
+        Inst = constrained_inst_vars(_InstVars, ArgInst),
+        accumulate_modules_in_inst(ArgInst, !MaybeUnqual, !ModuleNames)
+    ;
+        Inst = defined_inst(InstName),
+        accumulate_modules_in_inst_name(InstName, !MaybeUnqual, !ModuleNames)
+    ;
+        Inst = abstract_inst(SymName, ArgInsts),
+        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
+        accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames)
+    ).
+
+:- pred accumulate_modules_in_inst_name(inst_name::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_inst_name(InstName, !MaybeUnqual, !ModuleNames) :-
+    (
+        InstName = user_inst(SymName, ArgInsts),
+        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
+        accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames)
+    ;
+        ( InstName = unify_inst(_IsLive, _IsReal, ArgInstA, ArgInstB)
+        ; InstName = merge_inst(ArgInstA, ArgInstB)
+        ),
+        accumulate_modules_in_insts([ArgInstA, ArgInstB],
+            !MaybeUnqual, !ModuleNames)
+    ;
+        ( InstName = ground_inst(ArgInstName, _Uniq, _IsLive, _IsReal)
+        ; InstName = any_inst(ArgInstName, _Uniq, _IsLive, _IsReal)
+        ; InstName = shared_inst(ArgInstName)
+        ; InstName = mostly_uniq_inst(ArgInstName)
+        ),
+        accumulate_modules_in_inst_name(ArgInstName,
+            !MaybeUnqual, !ModuleNames)
+    ;
+        InstName = typed_ground(_Uniq, Type),
+        accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames)
+    ;
+        InstName = typed_inst(Type, ArgInstName),
+        accumulate_modules_in_type(Type, !MaybeUnqual, !ModuleNames),
+        accumulate_modules_in_inst_name(ArgInstName,
+            !MaybeUnqual, !ModuleNames)
+    ).
+
+:- pred accumulate_modules_in_bound_insts(list(bound_inst)::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_bound_insts([], !MaybeUnqual, !ModuleNames).
+accumulate_modules_in_bound_insts([BoundInst | BoundInsts],
+        !MaybeUnqual, !ModuleNames) :-
+    accumulate_modules_in_bound_inst(BoundInst, !MaybeUnqual, !ModuleNames),
+    accumulate_modules_in_bound_insts(BoundInsts, !MaybeUnqual, !ModuleNames).
+
+:- pred accumulate_modules_in_bound_inst(bound_inst::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_bound_inst(BoundInst, !MaybeUnqual, !ModuleNames) :-
+    BoundInst = bound_functor(ConsId, ArgInsts),
+    ( if ConsId = cons(SymName, _ConsArity, TypeCtor) then
+        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
+        TypeCtor = type_ctor(TypeCtorSymName, _Arity),
+        accumulate_module(TypeCtorSymName, !MaybeUnqual, !ModuleNames)
+    else
+        true
+    ),
+    accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames).
+
+%---------------------%
+
+:- pred accumulate_modules_in_mode(mer_mode::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_modules_in_mode(Mode, !MaybeUnqual, !ModuleNames) :-
+    (
+        Mode = from_to_mode(InstA, InstB),
+        accumulate_modules_in_inst(InstA, !MaybeUnqual, !ModuleNames),
+        accumulate_modules_in_inst(InstB, !MaybeUnqual, !ModuleNames)
+    ;
+        Mode = user_defined_mode(SymName, ArgInsts),
+        accumulate_module(SymName, !MaybeUnqual, !ModuleNames),
+        accumulate_modules_in_insts(ArgInsts, !MaybeUnqual, !ModuleNames)
+    ).
+
+%---------------------%
+
+:- type maybe_unqual_symnames
+    --->    no_unqual_symnames
+    ;       some_unqual_symnames.
+
+:- pred accumulate_module(sym_name::in,
+    maybe_unqual_symnames::in, maybe_unqual_symnames::out,
+    set(module_name)::in, set(module_name)::out) is det.
+
+accumulate_module(SymName, !MaybeUnqual, !ModuleNames) :-
+    (
+        SymName = unqualified(_),
+        !:MaybeUnqual = some_unqual_symnames
+    ;
+        SymName = qualified(ModuleName, _),
+        set.insert(ModuleName, !ModuleNames)
+    ).
 
 %---------------------------------------------------------------------------%
 :- end_module parse_tree.comp_unit_interface.

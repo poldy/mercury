@@ -83,8 +83,8 @@
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module ml_backend.ml_type_gen.   % for ml_gen_type_name
-:- import_module ml_backend.mlds_to_target_util.
 :- import_module ml_backend.mlds_to_java_name.
+:- import_module ml_backend.mlds_to_target_util.
 :- import_module parse_tree.builtin_lib_types.
 
 :- import_module bool.
@@ -187,7 +187,7 @@ type_to_string_for_java(Info, MLDS_Type, String, ArrayDims) :-
             String = "/* Array */ java.lang.Object",
             ArrayDims = []
         else
-            % For primitive element types we use arrays of the primitive type.
+            % For primitive element types, we use arrays of the primitive type.
             % For non-primitive element types, we just use
             % `java.lang.Object []'. We used to use more specific types,
             % but then to create an array of the right type we need to use
@@ -472,9 +472,9 @@ boxed_type_to_string_for_java(Info, Type, String) :-
 java_builtin_type(MLDS_Type, JavaUnboxedType, JavaBoxedType, UnboxMethod) :-
     require_complete_switch [MLDS_Type]
     (
-        % NOTE: Java's `char' type is not large enough for code points so we
-        % must use `int'.  Java has no unsigned types so we represent them
-        % as `int'.
+        % NOTE: Java's `char' type is not large enough to hold a code point,
+        % so we must use an integer. Java has no unsigned types, so we
+        % represent them as `int'.
         ( MLDS_Type = mlds_builtin_type_char
         ; MLDS_Type = mlds_builtin_type_int(int_type_int)
         ; MLDS_Type = mlds_builtin_type_int(int_type_uint)
@@ -526,10 +526,11 @@ java_builtin_type(MLDS_Type, JavaUnboxedType, JavaBoxedType, UnboxMethod) :-
             unexpected($pred, "mercury_nb_type but builtin_type")
         ;
             MerType = defined_type(_, _, _),
-            require_complete_switch [TypeCtorCat] (
-                % io.state and store.store(S) are dummy variables for which we
-                % pass an arbitrary integer. For this reason they should have
-                % the Java type `int'.
+            require_complete_switch [TypeCtorCat]
+            (
+                % Values of type io.state and store.store(S) are dummies
+                % for which we pass an arbitrary integer. This is why
+                % they should have the Java type `int'.
                 TypeCtorCat = ctor_cat_builtin_dummy,
                 JavaUnboxedType = "int",
                 JavaBoxedType = "java.lang.Integer",
@@ -638,7 +639,6 @@ java_primitive_foreign_language_type(ForeignLangType, PrimitiveType,
         UnboxMethod = "charValue",
         DefaultValue = "'\\u0000'"
     ).
-
 
 %---------------------------------------------------------------------------%
 :- end_module ml_backend.mlds_to_java_type.

@@ -93,7 +93,7 @@
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
 :- import_module transform_hlds.
@@ -119,7 +119,7 @@ simplify_goal(Goal0, Goal, NestedContext0, InstMap0, !Common, !Info) :-
     ),
     Detism = goal_info_get_determinism(GoalInfo0),
     simplify_info_get_module_info(!.Info, ModuleInfo0),
-    goal_can_loop_or_throw(Goal0, Goal0CanLoopOrThrow,
+    goal_can_loop_or_throw_imaf(Goal0, Goal0CanLoopOrThrow,
         ModuleInfo0, ModuleInfo),
     simplify_info_set_module_info(ModuleInfo, !Info),
     Purity = goal_info_get_purity(GoalInfo0),
@@ -187,8 +187,8 @@ simplify_goal(Goal0, Goal, NestedContext0, InstMap0, !Common, !Info) :-
         InstMapDelta = goal_info_get_instmap_delta(GoalInfo0),
         NonLocalVars = goal_info_get_nonlocals(GoalInfo0),
         simplify_info_get_module_info(!.Info, ModuleInfo),
-        simplify_info_get_var_types(!.Info, VarTypes),
-        instmap_delta_no_output_vars(ModuleInfo, VarTypes,
+        simplify_info_get_var_table(!.Info, VarTable),
+        instmap_delta_no_output_vars(ModuleInfo, VarTable,
             InstMap0, InstMapDelta, NonLocalVars),
         ( Purity = purity_pure
         ; Purity = purity_semipure

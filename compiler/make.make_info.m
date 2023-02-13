@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2002-2012 The University of Melbourne.
-% Copyright (C) 2013-2021 The Mercury team.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -28,14 +28,12 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.file_names.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.module_dep_info.
 :- import_module parse_tree.read_modules.
 
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
-:- import_module pair.
 :- import_module set.
 :- import_module version_array.
 :- import_module version_hash_table.
@@ -57,10 +55,21 @@
                 mki_module_dependencies :: map(module_name,
                                             maybe_module_dep_info),
 
+                % A map of last known timestamps by file name. This assumes
+                % that no external process is updating the same files without
+                % our knowledge.
+                %
+                % If a file is updated or removed, then you need to remove an
+                % entry from this map. Also, there may be an entry in the
+                % following map for a target_file that needs to be invalidated.
+                % If that is difficult, it is simplest to reset the
+                % mki_target_file_timestamps map.
                 mki_file_timestamps     :: file_timestamps,
 
-                % Cache chosen file names for a module name and extension.
-                mki_search_file_name_cache :: map(module_name_ext, file_name),
+                % A map of last known timestamps for the file that corresponds
+                % to a target_file.
+                mki_target_file_timestamps
+                                        :: target_file_timestamps,
 
                 % Any flags required to set detected library grades.
                 mki_detected_grade_flags :: list(string),
@@ -91,12 +100,21 @@
                 mki_cached_non_intermod_direct_imports
                                         :: cached_direct_imports,
 
+                mki_cached_indirect_imports
+                                        :: cached_indirect_imports,
+
                 % The boolean is `yes' if the result is complete.
                 % XXX Use a better representation for the sets.
                 mki_cached_transitive_dependencies
                                         :: cached_transitive_dependencies,
 
-                mki_cached_foreign_imports :: cached_foreign_imports,
+                mki_cached_transitive_foreign_imports
+                                        :: cached_transitive_foreign_imports,
+
+                % This cache holds dependency sets that are a simple
+                % computation (union) on other dependency sets.
+                mki_cached_computed_module_deps
+                                        :: cached_computed_module_deps,
 
                 % Should the `.module_dep' files be rebuilt?
                 % Set to `do_not_rebuild_module_deps' for `mmc --make clean'.
@@ -113,8 +131,7 @@
                 mki_importing_module    :: maybe(import_or_include),
 
                 % Targets specified on the command line.
-                mki_command_line_targets
-                                        :: set(pair(module_name, target_type)),
+                mki_command_line_targets :: set(top_target_file),
 
                 % The remaining number of analysis passes that we will allow
                 % on `suboptimal' modules. It starts at the value of
@@ -144,23 +161,28 @@
 
 :- type file_timestamps == map(string, maybe_error(timestamp)).
 
-:- type module_name_ext
-    --->    module_name_ext(module_name, ext).
+:- type target_file_timestamps == version_hash_table(target_file, timestamp).
+
+% NOTE Having version_arrays be indexed by uints, not ints
+% that just happen to never be negative, would avoid some casts
+% from uint to int when accessing the reverse maps in the next two types.
 
 :- type module_index_map
     --->    module_index_map(
                 mim_forward_map         :: version_hash_table(module_name,
                                             module_index),
                 mim_reverse_map         :: version_array(module_name),
-                mim_counter             :: int
+                mim_counter             :: uint
             ).
 
 :- type dependency_file_index_map
     --->    dependency_file_index_map(
-                dfim_forward_map        :: version_hash_table(dependency_file,
+                dfim_forward_map        :: version_hash_table(
+                                            dependency_file_with_module_index,
                                             dependency_file_index),
-                dfim_reverse_map        :: version_array(dependency_file),
-                dfim_counter            :: int
+                dfim_reverse_map        :: version_array(
+                                            dependency_file_with_module_index),
+                dfim_counter            :: uint
             ).
 
 :- type dependency_status
@@ -248,6 +270,12 @@
     --->    linked_target_file(
                 linked_tf_name      :: module_name,
                 linked_tf_type      :: linked_target_type
+            ).
+
+:- type top_target_file
+    --->    top_target_file(
+                ttf_name            :: module_name,
+                ttf_type            :: target_type
             ).
 
 %---------------------------------------------------------------------------%

@@ -99,8 +99,8 @@
 :- interface.
 
 :- import_module hlds.
-:- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_module.
+:- import_module hlds.hlds_pred.
 
 %-----------------------------------------------------------------------------%
 
@@ -127,12 +127,12 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.instmap.
 :- import_module hlds.make_goal.
+:- import_module hlds.pred_name.
 :- import_module hlds.quantification.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
-:- import_module parse_tree.prog_util.
 :- import_module parse_tree.set_of_var.
 
 :- import_module assoc_list.
@@ -141,8 +141,7 @@
 :- import_module maybe.
 :- import_module pair.
 :- import_module require.
-:- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -236,7 +235,7 @@ hoist_loop_invariants(PredProcId, PredInfo, !ProcInfo, !ModuleInfo) :-
         % Create the pred for the aux proc. This is initially a copy of the
         % in proc with the head vars extended with the list of computed
         % inv vars. The body is adjusted appropriately in the next step.
-        create_aux_pred(PredProcId, HeadVars, ComputedInvVars,
+        create_loop_inv_aux_pred(PredProcId, HeadVars, ComputedInvVars,
             InitialAuxInstMap, AuxPredProcId, Replacement,
             AuxPredInfo, AuxProcInfo, !ModuleInfo),
 
@@ -733,27 +732,26 @@ compute_initial_aux_instmap(Gs, IM) = list.foldl(ApplyGoalInstMap, Gs, IM) :-
 
 %-----------------------------------------------------------------------------%
 
-:- pred create_aux_pred(pred_proc_id::in,
+:- pred create_loop_inv_aux_pred(pred_proc_id::in,
     list(prog_var)::in, list(prog_var)::in, instmap::in, pred_proc_id::out,
     hlds_goal::out, pred_info::out, proc_info::out,
     module_info::in, module_info::out) is det.
 
-create_aux_pred(PredProcId, HeadVars, ComputedInvArgs,
-        InitialAuxInstMap, AuxPredProcId, Replacement,
-        AuxPredInfo, AuxProcInfo, ModuleInfo0, ModuleInfo) :-
+create_loop_inv_aux_pred(PredProcId, HeadVars, ComputedInvArgs,
+        InitialAuxInstMap, AuxPredProcId, ReplacementGoal,
+        AuxPredInfo, AuxProcInfo, !ModuleInfo) :-
     PredProcId = proc(PredId, ProcId),
 
     AuxHeadVars = HeadVars ++ ComputedInvArgs,
 
-    module_info_pred_proc_info(ModuleInfo0, PredId, ProcId,
+    module_info_pred_proc_info(!.ModuleInfo, PredId, ProcId,
         PredInfo, ProcInfo),
 
     proc_info_get_goal(ProcInfo, Goal @ hlds_goal(_GoalExpr, GoalInfo)),
     pred_info_get_typevarset(PredInfo, TVarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     pred_info_get_class_context(PredInfo, ClassContext),
     proc_info_get_rtti_varmaps(ProcInfo, RttiVarMaps),
-    proc_info_get_varset(ProcInfo, VarSet),
     proc_info_get_inst_varset(ProcInfo, InstVarSet),
     pred_info_get_markers(PredInfo, Markers),
     pred_info_get_origin(PredInfo, OrigOrigin),
@@ -764,55 +762,45 @@ create_aux_pred(PredProcId, HeadVars, ComputedInvArgs,
     PredName = pred_info_name(PredInfo),
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
     Context = goal_info_get_context(GoalInfo),
-    term.context_line(Context, Line),
-    ( if Line = 0 then
-        % Use the predicate number to distinguish between similarly named
-        % generated predicates, e.g. special predicates.
-        Counter = pred_id_to_int(PredId)
-    else
-        Counter = 1
-    ),
-    make_pred_name_with_context(PredModule, "loop_inv",
-        PredOrFunc, PredName, Line, Counter, AuxPredSymName0),
-    hlds_pred.proc_id_to_int(ProcId, ProcNo),
-    Suffix = string.format("_%d", [i(ProcNo)]),
-    add_sym_name_suffix(AuxPredSymName0, Suffix, AuxPredSymName),
+    LineNum = term_context.context_line(Context),
+    module_info_next_loop_inv_count(Context, SeqNum, !ModuleInfo),
+    ProcNum = proc_id_to_int(ProcId),
+    Transform = tn_loop_inv(PredOrFunc, ProcNum, lnc(LineNum, SeqNum)),
+    make_transformed_pred_sym_name(PredModule, PredName, Transform,
+        AuxPredSymName),
 
-    Origin = origin_transformed(transform_loop_invariant(ProcNo),
-        OrigOrigin, PredId),
+    Origin = origin_proc_transform(proc_transform_loop_inv(LineNum, SeqNum),
+        OrigOrigin, PredId, ProcId),
     hlds_pred.define_new_pred(
-        Origin,         % in    - The origin of this new predicate
-        Goal,           % in    - The goal for the new aux proc.
-        Replacement,    % out   - How we can call the new aux proc.
-        AuxHeadVars,    % in    - The args for the new aux proc.
-        _ExtraArgs,     % out   - Extra args prepended to Args for typeinfo
-                        %           liveness purposes.
-        InitialAuxInstMap,
-                        % in    - The initial instmap for the new aux proc.
         AuxPredSymName, % in    - The name of the new aux proc.
+        Origin,         % in    - The origin of this new predicate
         TVarSet,        % in    - ???
-        VarTypes,       % in    - The var -> type mapping for the new aux proc.
-        ClassContext,   % in    - Typeclass constraints on the new aux proc.
-        RttiVarMaps,    % in    - type_info and typeclass_info locations.
-        VarSet,         % in    - ???
         InstVarSet,     % in    - ???
+        VarTable,       % in    - The var -> type mapping for the new aux proc.
+        RttiVarMaps,    % in    - type_info and typeclass_info locations.
+        ClassContext,   % in    - Typeclass constraints on the new aux proc.
+        InitialAuxInstMap, % in - The initial instmap for the new aux proc.
+        VarNameRemap,   % in
         Markers,        % in    - Markers for the new aux proc.
         address_is_not_taken,
                         % in    - The address of the new aux proc is not taken.
         HasParallelConj, % in
-        VarNameRemap,   % in
-        ModuleInfo0,
-        ModuleInfo,
-        AuxPredProcId   % out   - The pred_proc_id for the new aux proc.
+        AuxPredProcId,  % out   - The pred_proc_id for the new aux proc.
+        AuxHeadVars,    % in    - The args for the new aux proc.
+        _ExtraArgs,     % out   - Extra args prepended to Args for typeinfo
+                        %           liveness purposes.
+        Goal,           % in    - The goal for the new aux proc.
+        ReplacementGoal,% out   - How we can call the new aux proc.
+        !ModuleInfo
     ),
 
-    % Note on Replacement:
+    % Note on ReplacementGoal:
     % - we change the call args as necessary in gen_aux_call;
     % - we handle the changes to nonlocals by requantifying
     %   over the entire goal after we've transformed it.
 
     AuxPredProcId = proc(AuxPredId, AuxProcId),
-    module_info_pred_proc_info(ModuleInfo, AuxPredId, AuxProcId, AuxPredInfo,
+    module_info_pred_proc_info(!.ModuleInfo, AuxPredId, AuxProcId, AuxPredInfo,
         AuxProcInfo).
 
 %-----------------------------------------------------------------------------%
@@ -842,11 +830,8 @@ gen_aux_proc(InvGoals, PredProcId, AuxPredProcId, Replacement, Body,
     % Put the new proc body and instmap into the module_info.
     AuxPredProcId = proc(AuxPredId, AuxProcId),
     hlds_pred.proc_info_set_goal(AuxBody, !AuxProcInfo),
-
-    requantify_proc_general(ordinary_nonlocals_no_lambda, !AuxProcInfo),
-    recompute_instmap_delta_proc(do_not_recompute_atomic_instmap_deltas,
-        !AuxProcInfo, !ModuleInfo),
-
+    requantify_proc_general(ord_nl_no_lambda, !AuxProcInfo),
+    recompute_instmap_delta_proc(no_recomp_atomics, !AuxProcInfo, !ModuleInfo),
     module_info_set_pred_proc_info(AuxPredId, AuxProcId,
         AuxPredInfo, !.AuxProcInfo, !ModuleInfo).
 
@@ -944,20 +929,14 @@ gen_out_proc(PredProcId, PredInfo0, ProcInfo0, ProcInfo, Replacement, Body0,
 
     % Put the new procedure body into the module_info.
     PredProcId = proc(PredId, ProcId),
-
-    proc_info_get_varset(ProcInfo0, VarSet),
-    proc_info_get_vartypes(ProcInfo0, VarTypes),
+    proc_info_get_var_table(ProcInfo0, VarTable),
     proc_info_get_headvars(ProcInfo0, HeadVars),
     proc_info_get_rtti_varmaps(ProcInfo0, RttiVarMaps),
-
-    proc_info_set_body(VarSet, VarTypes, HeadVars, Body,
-        RttiVarMaps, ProcInfo0, ProcInfo1),
-
-    requantify_proc_general(ordinary_nonlocals_no_lambda,
-        ProcInfo1, ProcInfo2),
-    recompute_instmap_delta_proc(do_not_recompute_atomic_instmap_deltas,
+    proc_info_set_body(VarTable, HeadVars, Body, RttiVarMaps,
+        ProcInfo0, ProcInfo1),
+    requantify_proc_general(ord_nl_no_lambda, ProcInfo1, ProcInfo2),
+    recompute_instmap_delta_proc(no_recomp_atomics,
         ProcInfo2, ProcInfo, !ModuleInfo),
-
     module_info_set_pred_proc_info(PredId, ProcId,
         PredInfo0, ProcInfo, !ModuleInfo).
 

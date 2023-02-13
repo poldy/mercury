@@ -1,10 +1,10 @@
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % Copyright (C) 1996-2007, 2009-2012 The University of Melbourne.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % File: hlds_rtti.m.
 % Main authors: Mark Brown.
@@ -12,27 +12,28 @@
 % This module defines the part of the HLDS that keeps track of information
 % relating to RTTI.
 %
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- module hlds.hlds_rtti.
 :- interface.
 
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
+:- import_module hlds.pred_name.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module array.
 :- import_module assoc_list.
 :- import_module bool.
 :- import_module list.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- type prog_var_name == string.
 
@@ -46,7 +47,7 @@
                 rpl_this_module             ::  module_name,
                 rpl_proc_module             ::  module_name,
                 rpl_proc_name               ::  string,
-                rpl_proc_arity              ::  arity,
+                rpl_proc_arity              ::  pred_form_arity,
                 rpl_proc_arg_types          ::  list(mer_type),
                 rpl_pred_id                 ::  pred_id,
                 rpl_proc_id                 ::  proc_id,
@@ -96,30 +97,10 @@
 :- pred proc_label_pred_proc_id(rtti_proc_label::in,
     pred_id::out, proc_id::out) is det.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % Types and predicates to store information about RTTI.
 %
-
-    % Describes the class constraints on an instance method implementation.
-    % This information is used by polymorphism.m to ensure that the
-    % type_info and typeclass_info arguments are added in the order in
-    % which they will be passed in by do_call_class_method.
-    %
-:- type instance_method_constraints
-    --->    instance_method_constraints(
-                class_id,
-
-                % The types in the head of the instance declaration.
-                list(mer_type),
-
-                % The universal constraints on the instance declaration.
-                list(prog_constraint),
-
-                % The constraints on the method's type declaration in the
-                % `:- typeclass' declaration.
-                prog_constraints
-            ).
 
     %  A type_info_locn specifies how to access a type_info.
     %
@@ -324,14 +305,14 @@
     % for accurate garbage collection - live variables need to have
     % their typeinfos stay live too.
     %
-:- pred get_typeinfo_vars(set_of_progvar::in, vartypes::in, rtti_varmaps::in,
-    set_of_progvar::out) is det.
+:- pred get_typeinfo_vars(var_table::in, rtti_varmaps::in,
+    set_of_progvar::in, set_of_progvar::out) is det.
 
-:- pred maybe_complete_with_typeinfo_vars(set_of_progvar::in,
-    bool::in, vartypes::in, rtti_varmaps::in, set_of_progvar::out) is det.
+:- pred maybe_complete_with_typeinfo_vars(var_table::in, rtti_varmaps::in,
+    bool::in, set_of_progvar::in, set_of_progvar::out) is det.
 
-%-----------------------------------------------------------------------------%
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- implementation.
 
@@ -346,9 +327,8 @@
 :- import_module set_tree234.
 :- import_module string.
 :- import_module term.
-:- import_module varset.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 make_rtti_proc_label(ModuleInfo, PredId, ProcId) = ProcLabel :-
     module_info_get_name(ModuleInfo, ThisModule),
@@ -356,9 +336,9 @@ make_rtti_proc_label(ModuleInfo, PredId, ProcId) = ProcLabel :-
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
     PredModule = pred_info_module(PredInfo),
     PredName = pred_info_name(PredInfo),
-    Arity = pred_info_orig_arity(PredInfo),
+    PredFormArity = pred_info_pred_form_arity(PredInfo),
     pred_info_get_arg_types(PredInfo, ArgTypes),
-    proc_info_get_varset(ProcInfo, ProcVarSet),
+    proc_info_get_var_table(ProcInfo, ProcVarTable),
     proc_info_get_headvars(ProcInfo, ProcHeadVars),
     proc_info_get_argmodes(ProcInfo, ProcModes),
     proc_info_interface_determinism(ProcInfo, ProcDetism),
@@ -372,8 +352,8 @@ make_rtti_proc_label(ModuleInfo, PredId, ProcId) = ProcLabel :-
             then yes else no),
     pred_info_get_origin(PredInfo, Origin),
     ProcHeadVarsWithNames = list.map(
-        (func(Var) = Var - Name :-
-            Name = varset.lookup_name(ProcVarSet, Var)
+        ( func(Var) = Var - Name :-
+            Name = var_table_entry_name(ProcVarTable, Var)
         ), ProcHeadVars),
     ( if
         (
@@ -388,7 +368,7 @@ make_rtti_proc_label(ModuleInfo, PredId, ProcId) = ProcLabel :-
         ProcIsImported = no
     ),
     ProcLabel = rtti_proc_label(PredOrFunc, ThisModule, PredModule,
-        PredName, Arity, ArgTypes, PredId, ProcId,
+        PredName, PredFormArity, ArgTypes, PredId, ProcId,
         ProcHeadVarsWithNames, ProcTopModes, ProcDetism,
         PredIsImported, PredIsPseudoImp, Origin,
         ProcIsExported, ProcIsImported).
@@ -397,7 +377,7 @@ proc_label_pred_proc_id(RttiProcLabel, PredId, ProcId) :-
     PredId = RttiProcLabel ^ rpl_pred_id,
     ProcId = RttiProcLabel ^ rpl_proc_id.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 type_info_locn_var(type_info(Var), Var).
 type_info_locn_var(typeclass_info(Var, _), Var).
@@ -867,57 +847,57 @@ rtti_varmaps_overlay(VarMapsA, VarMapsB, VarMaps) :-
 
     VarMaps = rtti_varmaps(TCImap, TImap, TypeMap, ConstraintMap).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
-get_typeinfo_vars(Vars, VarTypes, RttiVarMaps, TypeInfoVars) :-
+get_typeinfo_vars(VarTable, RttiVarMaps, Vars, TypeInfoVars) :-
     TVarMap = RttiVarMaps ^ rv_ti_varmap,
     VarList = set_of_var.to_sorted_list(Vars),
-    get_typeinfo_vars_acc(VarList, VarTypes, TVarMap,
+    get_typeinfo_vars_acc(VarTable, TVarMap, VarList,
         set_of_var.init, TypeInfoVars).
 
     % Auxiliary predicate - traverses variables and builds a list of
     % variables that store typeinfos for these variables.
     %
-:- pred get_typeinfo_vars_acc(list(prog_var)::in, vartypes::in,
-    type_info_varmap::in, set_of_progvar::in, set_of_progvar::out) is det.
+:- pred get_typeinfo_vars_acc(var_table::in, type_info_varmap::in,
+    list(prog_var)::in, set_of_progvar::in, set_of_progvar::out) is det.
 
-get_typeinfo_vars_acc([], _, _, !TypeInfoVars).
-get_typeinfo_vars_acc([Var | Vars], VarTypes, TVarMap, !TypeInfoVars) :-
-    lookup_var_type(VarTypes, Var, Type),
-    type_vars(Type, TypeVars),
+get_typeinfo_vars_acc(_, _, [], !TypeInfoVars).
+get_typeinfo_vars_acc(VarTable, TVarMap, [Var | Vars], !TypeInfoVars) :-
+    lookup_var_type(VarTable, Var, Type),
+    type_vars_in_type(Type, TypeVars),
     (
-        TypeVars = [],
+        TypeVars = []
         % Optimize common case,
-        get_typeinfo_vars_acc(Vars, VarTypes, TVarMap, !TypeInfoVars)
     ;
         TypeVars = [_ | _],
         % XXX It is possible there are some complications with higher order
         % pred types here -- if so, maybe treat them specially.
-
         % The type_info is either stored in a variable, or in a
         % typeclass_info. Either get the type_info variable or
         % the typeclass_info variable.
-        LookupVar = (pred(TVar::in, TVarVar::out) is det :-
-            map.lookup(TVarMap, TVar, Locn),
-            type_info_locn_var(Locn, TVarVar)
-        ),
+        LookupVar =
+            ( pred(TVar::in, TVarVar::out) is det :-
+                map.lookup(TVarMap, TVar, Locn),
+                type_info_locn_var(Locn, TVarVar)
+            ),
         list.map(LookupVar, TypeVars, TypeInfoVarsHead),
+        set_of_var.insert_list(TypeInfoVarsHead, !TypeInfoVars)
+    ),
+    get_typeinfo_vars_acc(VarTable, TVarMap, Vars, !TypeInfoVars).
 
-        set_of_var.insert_list(TypeInfoVarsHead, !TypeInfoVars),
-        get_typeinfo_vars_acc(Vars, VarTypes, TVarMap, !TypeInfoVars)
-    ).
+%---------------------%
 
-maybe_complete_with_typeinfo_vars(Vars0, TypeInfoLiveness, VarTypes,
-        RttiVarMaps, Vars) :-
+maybe_complete_with_typeinfo_vars(VarTable, RttiVarMaps, TypeInfoLiveness,
+        Vars0, Vars) :-
     (
         TypeInfoLiveness = yes,
-        get_typeinfo_vars(Vars0, VarTypes, RttiVarMaps, TypeInfoVars),
+        get_typeinfo_vars(VarTable, RttiVarMaps, Vars0, TypeInfoVars),
         set_of_var.union(Vars0, TypeInfoVars, Vars)
     ;
         TypeInfoLiveness = no,
         Vars = Vars0
     ).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 :- end_module hlds.hlds_rtti.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%

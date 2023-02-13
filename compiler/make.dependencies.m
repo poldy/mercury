@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2002-2011 The University of Melbourne.
+% Copyright (C) 2013-2017, 2019-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -22,37 +23,17 @@
 :- import_module libs.globals.
 :- import_module libs.maybe_succeeded.
 :- import_module libs.timestamp.
-:- import_module make.build.
 :- import_module make.deps_set.
 :- import_module make.make_info.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 
-:- import_module enum.
 :- import_module io.
 :- import_module list.
-:- import_module map.
 :- import_module maybe.
 :- import_module set.
 
 %---------------------------------------------------------------------------%
-
-    % find_module_deps(Globals, ModuleIndex, Succeeded, Deps, !Info, !IO).
-    %
-    % The reason we don't return maybe(Deps) is that with `--keep-going'
-    % we want to do as much work as possible.
-    %
-:- type find_module_deps(T) ==
-    pred(globals, module_index, maybe_succeeded, deps_set(T),
-        make_info, make_info, io, io).
-:- inst find_module_deps ==
-    (pred(in, in, out, out, in, out, di, uo) is det).
-
-:- type find_module_deps_plain_set(T) ==
-    pred(globals, module_index, maybe_succeeded, set(T),
-        make_info, make_info, io, io).
-:- inst find_module_deps_plain_set ==
-    (pred(in, in, out, out, in, out, di, uo) is det).
 
 :- type dependency_file
     --->    dep_target(target_file)
@@ -61,33 +42,30 @@
     ;       dep_file(file_name).
             % An ordinary file which `mmc --make' does not know how to rebuild.
 
-    % Return a closure which will find the dependencies for a target type
-    % given a module name.
+    % Like dependency_file but refers to a module by index instead of by name,
+    % which is more efficient when the name is not required.
     %
-:- func target_dependencies(globals::in, module_target_type::in) =
-    (find_module_deps(dependency_file_index)::out(find_module_deps)) is det.
+:- type dependency_file_with_module_index
+    --->    dfmi_target(module_index, module_target_type)
+    ;       dfmi_file(file_name).
 
 %---------------------------------------------------------------------------%
 
-    % Union the output set of dependencies for a given module
-    % with the accumulated set. This is used with
-    % foldl3_maybe_stop_at_error to iterate over a list of
-    % module_names to find all target files for those modules.
+    % find_target_dependencies_of_modules(KeepGoing, Globals, TargetType,
+    %     ModuleIndexes, !Succeeded, !Deps, !Info, !IO):
     %
-:- pred union_deps(find_module_deps(T)::in(find_module_deps), globals::in,
-    module_index::in, maybe_succeeded::out, deps_set(T)::in, deps_set(T)::out,
+    % The TargetType and ModuleIndexes arguments define a set of make targets.
+    % Add to !Deps the dependency_file_indexes of all the files that 
+    % these make targets depend on, and which therefore have to be built
+    % before we can build those make targets.
+    %
+:- pred find_target_dependencies_of_modules(maybe_keep_going::in, globals::in,
+    module_target_type::in, list(module_index)::in,
+    maybe_succeeded::in, maybe_succeeded::out,
+    deps_set(dependency_file_index)::in, deps_set(dependency_file_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-:- pred union_deps_plain_set(
-    find_module_deps_plain_set(T)::in(find_module_deps_plain_set),
-    globals::in, module_index::in, maybe_succeeded::out,
-    set(T)::in, set(T)::out,
-    make_info::in, make_info::out, io::di, io::uo) is det.
-
-:- pred deps_set_foldl3_maybe_stop_at_error(maybe_keep_going::in,
-    foldl3_pred_with_status(T, Acc, Info, IO)::in(foldl3_pred_with_status),
-    globals::in, deps_set(T)::in, maybe_succeeded::out, Acc::in, Acc::out,
-    Info::in, Info::out, IO::di, IO::uo) is det <= enum(T).
+%---------------------------------------------------------------------------%
 
     % Find all modules in the current directory which are reachable
     % (by import or include) from the given module.
@@ -151,11 +129,18 @@
 :- type cached_direct_imports.
 :- func init_cached_direct_imports = cached_direct_imports.
 
-:- type cached_foreign_imports.
-:- func init_cached_foreign_imports = cached_foreign_imports.
+:- type cached_indirect_imports.
+:- func init_cached_indirect_imports = cached_indirect_imports.
+
+:- type cached_transitive_foreign_imports.
+:- func init_cached_transitive_foreign_imports =
+    cached_transitive_foreign_imports.
 
 :- type cached_transitive_dependencies.
 :- func init_cached_transitive_dependencies = cached_transitive_dependencies.
+
+:- type cached_computed_module_deps.
+:- func init_cached_computed_module_deps = cached_computed_module_deps.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -169,12 +154,14 @@
 :- import_module make.util.
 :- import_module parse_tree.
 :- import_module parse_tree.file_names.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.module_baggage.
+:- import_module parse_tree.module_dep_info.
 :- import_module parse_tree.prog_data_foreign.
 
 :- import_module assoc_list.
 :- import_module bool.
 :- import_module dir.
+:- import_module map.
 :- import_module pair.
 :- import_module require.
 :- import_module sparse_bitset.
@@ -183,45 +170,85 @@
 
 %---------------------------------------------------------------------------%
 
-target_dependencies(Globals, Target) = FindDeps :-
-    (
-        ( Target = module_target_source
-        ; Target = module_target_track_flags
-        ),
-        FindDeps = no_deps
-    ;
-        ( Target = module_target_int0
-        ; Target = module_target_int1
-        ; Target = module_target_int2
-        ),
-        FindDeps = interface_file_dependencies
-    ;
-        Target = module_target_int3,
-        FindDeps = module_target_source `of` self
-    ;
-        ( Target = module_target_c_code
-        ; Target = module_target_csharp_code
-        ; Target = module_target_java_code
-        ; Target = module_target_errors
-        ),
-        FindDeps = compiled_code_dependencies(Globals)
-    ;
-        Target = module_target_c_header(_),
-        FindDeps = target_dependencies(Globals, module_target_c_code)
-    ;
-        Target = module_target_java_class_code,
-        FindDeps = module_target_java_code `of` self
-    ;
-        ( Target = module_target_foreign_object(PIC, _)
-        ; Target = module_target_fact_table_object(PIC, _)
-        ),
-        FindDeps = get_foreign_deps(Globals, PIC)
-    ;
-        Target = module_target_object_code(PIC),
-        globals.get_target(Globals, CompilationTarget),
-        TargetCode = target_to_module_target_code(CompilationTarget, PIC),
-        globals.lookup_bool_option(Globals, highlevel_code, HighLevelCode),
+    % find_module_deps(Globals, ModuleIndex, Succeeded, Deps, !Info, !IO).
+    %
+    % The reason we don't return maybe(Deps) is that with `--keep-going'
+    % we want to do as much work as possible.
+    %
+:- type find_module_deps(T) ==
+    pred(globals, module_index, maybe_succeeded, deps_set(T),
+        make_info, make_info, io, io).
+:- inst find_module_deps ==
+    (pred(in, in, out, out, in, out, di, uo) is det).
 
+:- type find_module_deps_plain_set(T) ==
+    pred(globals, module_index, maybe_succeeded, set(T),
+        make_info, make_info, io, io).
+:- inst find_module_deps_plain_set ==
+    (pred(in, in, out, out, in, out, di, uo) is det).
+
+:- type deps_result(T)
+    --->    deps_result(
+                dr_success  :: maybe_succeeded,
+                dr_set      :: deps_set(T)
+            ).
+
+:- type module_deps_result == deps_result(module_index).
+
+%---------------------------------------------------------------------------%
+
+find_target_dependencies_of_modules(_KeepGoing, _Globals, _TargetType,
+        [], !Succeeded, !Deps, !Info, !IO).
+find_target_dependencies_of_modules(KeepGoing, Globals, TargetType,
+        [ModuleIndex | ModuleIndexes], !Succeeded, !Deps, !Info, !IO) :-
+    (
+        ( TargetType = module_target_source
+        ; TargetType = module_target_track_flags
+        ),
+        NewSucceeded = succeeded
+    ;
+        TargetType = module_target_int3,
+        % module_target_source of self
+        add_targets_of_modules_as_deps(module_target_source,
+            [ModuleIndex], !Deps, !Info),
+        NewSucceeded = succeeded
+    ;
+        ( TargetType = module_target_int0
+        ; TargetType = module_target_int1
+        ; TargetType = module_target_int2
+        ),
+        FindDeps = interface_file_dependencies,
+        FindDeps(Globals, ModuleIndex, NewSucceeded, NewDeps, !Info, !IO),
+        union(NewDeps, !Deps)
+    ;
+        ( TargetType = module_target_c_code
+        ; TargetType = module_target_c_header(_)
+        ; TargetType = module_target_csharp_code
+        ; TargetType = module_target_java_code
+        ; TargetType = module_target_errors
+        ),
+        FindDeps = compiled_code_dependencies(Globals),
+        FindDeps(Globals, ModuleIndex, NewSucceeded, NewDeps, !Info, !IO),
+        union(NewDeps, !Deps)
+    ;
+        TargetType = module_target_java_class_code,
+        % module_target_java_code of self
+        add_targets_of_modules_as_deps(module_target_java_code,
+            [ModuleIndex], !Deps, !Info),
+        NewSucceeded = succeeded
+    ;
+        ( TargetType = module_target_foreign_object(PIC, _)
+        ; TargetType = module_target_fact_table_object(PIC, _)
+        ),
+        add_compilation_targets_of_module_as_deps(Globals, PIC, ModuleIndex,
+            !Deps, !Info),
+        NewSucceeded = succeeded
+    ;
+        TargetType = module_target_object_code(PIC),
+        add_compilation_targets_of_module_as_deps(Globals, PIC, ModuleIndex,
+            !Deps, !Info),
+        globals.get_target(Globals, CompilationTarget),
+        globals.lookup_bool_option(Globals, highlevel_code, HighLevelCode),
         % For --highlevel-code, the `.c' file will #include the header file
         % for all imported modules.
         ( if
@@ -238,42 +265,68 @@ target_dependencies(Globals, Target) = FindDeps :-
             HeaderDeps = no_deps
         ),
         FindDeps = combine_deps_list([
-            TargetCode `of` self,
             module_target_c_header(header_mh) `of` foreign_imports,
             HeaderDeps
-        ])
+        ]),
+        FindDeps(Globals, ModuleIndex, NewSucceeded, NewDeps, !Info, !IO),
+        union(NewDeps, !Deps)
     ;
-        ( Target = module_target_opt
-        ; Target = module_target_xml_doc
+        ( TargetType = module_target_opt
+        ; TargetType = module_target_xml_doc
         ),
+        % module_target_java_code of self
+        add_targets_of_modules_as_deps(module_target_source, [ModuleIndex],
+            !Deps, !Info),
+        % module_target_int0 of ancestors
+        add_targets_of_ancestors_as_deps(module_target_int0, ModuleIndex,
+            !Deps, !Info),
         FindDeps = combine_deps_list([
-            module_target_source `of` self,
-            module_target_int0 `of` ancestors,
             module_target_int1 `of` non_intermod_direct_imports,
             module_target_int2 `of` non_intermod_indirect_imports
-        ])
+        ]),
+        FindDeps(Globals, ModuleIndex, NewSucceeded, NewDeps, !Info, !IO),
+        union(NewDeps, !Deps)
     ;
-        Target = module_target_analysis_registry,
+        TargetType = module_target_analysis_registry,
+        % module_target_java_code of self
+        add_targets_of_modules_as_deps(module_target_source, [ModuleIndex],
+            !Deps, !Info),
+        % module_target_int0 of ancestors
+        add_targets_of_ancestors_as_deps(module_target_int0, ModuleIndex,
+            !Deps, !Info),
         FindDeps = combine_deps_list([
-            module_target_source `of` self,
-            module_target_int0 `of` ancestors,
             module_target_int1 `of` non_intermod_direct_imports,
             module_target_int2 `of` non_intermod_indirect_imports,
             module_target_opt `of` direct_imports,
             module_target_opt `of` indirect_imports,
             module_target_opt `of` intermod_imports
-        ])
+        ]),
+        FindDeps(Globals, ModuleIndex, NewSucceeded, NewDeps, !Info, !IO),
+        union(NewDeps, !Deps)
+    ),
+    ( if
+        ( NewSucceeded = succeeded
+        ; KeepGoing = do_keep_going
+        )
+    then
+        !:Succeeded = !.Succeeded `and` NewSucceeded,
+        find_target_dependencies_of_modules(KeepGoing, Globals, TargetType,
+            ModuleIndexes, !Succeeded, !Deps, !Info, !IO)
+    else
+        !:Succeeded = did_not_succeed
     ).
 
-:- func get_foreign_deps(globals::in, pic::in) =
-    (find_module_deps(dependency_file_index)::out(find_module_deps)) is det.
+:- pred add_compilation_targets_of_module_as_deps(globals::in, pic::in,
+    module_index::in,
+    deps_set(dependency_file_index)::in, deps_set(dependency_file_index)::out,
+    make_info::in, make_info::out) is det.
 
-get_foreign_deps(Globals, PIC) = Deps :-
+add_compilation_targets_of_module_as_deps(Globals, PIC, ModuleIndex,
+        !Deps, !Info) :-
     globals.get_target(Globals, CompilationTarget),
     TargetCode = target_to_module_target_code(CompilationTarget, PIC),
-    Deps = combine_deps_list([
-        TargetCode `of` self
-    ]).
+    % TargetCode of self
+    add_targets_of_modules_as_deps(TargetCode, [ModuleIndex], !Deps, !Info).
 
 :- func target_to_module_target_code(compilation_target, pic)
     = module_target_type.
@@ -299,33 +352,27 @@ interface_file_dependencies =
 
 compiled_code_dependencies(Globals) = Deps :-
     % We build up Deps in stages.
-    % XXX The *order* of the dependencies this computes looks wrong to me (zs).
-    % For example, why does Deps call for imported modules' .opt files
-    % to be built before their .int files? The dependencies of the .opt files
-    % won't let them be built before the files *they* depend on are ready,
-    % but still ...
 
     % Stage 0: dependencies on flags.
     globals.lookup_bool_option(Globals, track_flags, TrackFlags),
     (
         TrackFlags = yes,
-        Deps0 = module_target_track_flags `of` self
+        DepsTracks = [module_target_track_flags `of` self]
     ;
         TrackFlags = no,
-        Deps0 = no_deps
+        DepsTracks = []
     ),
 
     % Stage 1: dependencies on the source file, and on the fact table files,
     % foreign language files and Mercury interface files it imports.
-    Deps1 = combine_deps_list([
+    DepsSrcInts = [
         module_target_source `of` self,
         fact_table_files `files_of` self,
         foreign_include_files `files_of` self,
         module_target_int1 `of` self,
         module_target_int1 `of` ancestors,
-        map_find_module_deps(imports, self),
-        Deps0
-    ]),
+        find_own_imports_012
+    ],
 
     globals.lookup_bool_option(Globals, intermodule_optimization, IntermodOpt),
     globals.lookup_bool_option(Globals, intermodule_analysis,
@@ -335,42 +382,52 @@ compiled_code_dependencies(Globals) = Deps :-
     % Stage 2: dependencies on optimization files.
     (
         AnyIntermod = yes,
-        Deps2 = combine_deps_list([
+        DepsOpts = [
             module_target_opt `of` self,
             module_target_opt `of` intermod_imports,
-            map_find_module_deps(imports,
-                map_find_module_deps(ancestors, intermod_imports)),
-            Deps1
-        ])
+            get_intermod_imports_their_ancestors_and_012
+        ]
     ;
         AnyIntermod = no,
-        Deps2 = Deps1
+        DepsOpts = []
     ),
 
     % Stage 3: dependencies on analysis result files.
     (
         IntermodAnalysis = yes,
-        Deps = combine_deps_list([
+        DepsRegistries = [
             module_target_analysis_registry `of` self,
-            module_target_analysis_registry `of` direct_imports,
-            Deps2
-        ])
+            module_target_analysis_registry `of` direct_imports
+        ]
     ;
         IntermodAnalysis = no,
-        Deps = Deps2
-    ).
+        DepsRegistries = []
+    ),
 
-:- func imports =
+    DepsAll = inst_preserving_condense(
+        [DepsTracks, DepsSrcInts, DepsOpts, DepsRegistries]),
+    Deps = combine_deps_list(DepsAll).
+
+:- func imports_012 =
     (find_module_deps(dependency_file_index)::out(find_module_deps)) is det.
 
-imports = combine_deps_list([
-        module_target_int0 `of` ancestors,
-        module_target_int1 `of` direct_imports,
-        module_target_int2 `of` indirect_imports
-    ]).
+imports_012 =
+    cache_computed_module_deps(computed_module_deps_import_012,
+        combine_deps_list([
+            module_target_int0 `of` ancestors,
+            module_target_int1 `of` direct_imports,
+            module_target_int2 `of` indirect_imports
+        ])
+    ).
 
 %---------------------------------------------------------------------------%
 
+    % TargetType `of` F is function that returns the set of TargetType targets
+    % based on the modules generated by F.
+    %
+    % e.g. module_target_int0 `of` ancestors takes a module and returns the
+    % set of .int0 targets for the module's ancestor modules.
+    %
 :- func of(module_target_type, find_module_deps(module_index)) =
     find_module_deps(dependency_file_index).
 :- mode of(in, in(find_module_deps)) = out(find_module_deps) is det.
@@ -386,18 +443,46 @@ of(FileType, FindDeps) =
 
 of_2(FileType, FindDeps, Globals, ModuleIndex, Succeeded, TargetFiles,
         !Info, !IO) :-
-    FindDeps(Globals, ModuleIndex, Succeeded, ModuleIndexs, !Info, !IO),
-    foldl2(of_3(FileType), ModuleIndexs, init, TargetFiles, !Info).
+    FindDeps(Globals, ModuleIndex, Succeeded, ModuleIndexes, !Info, !IO),
+    foldl2(of_3(FileType), ModuleIndexes, [], TargetFileIndexes, !Info),
+    list_to_set(TargetFileIndexes, TargetFiles).
 
 :- pred of_3(module_target_type::in, module_index::in,
+    list(dependency_file_index)::in, list(dependency_file_index)::out,
+    make_info::in, make_info::out) is det.
+
+of_3(FileType, ModuleIndex, !List, !Info) :-
+    TargetFile = dfmi_target(ModuleIndex, FileType),
+    dependency_file_to_index(TargetFile, TargetFileIndex, !Info),
+    !:List = [TargetFileIndex | !.List].
+
+%---------------------------------------------------------------------------%
+
+:- pred add_targets_of_modules_as_deps(module_target_type::in,
+    list(module_index)::in,
     deps_set(dependency_file_index)::in, deps_set(dependency_file_index)::out,
     make_info::in, make_info::out) is det.
 
-of_3(FileType, ModuleIndex, !Set, !Info) :-
-    module_index_to_name(!.Info, ModuleIndex, ModuleName),
-    TargetFile = dep_target(target_file(ModuleName, FileType)),
-    dependency_file_to_index(TargetFile, TargetFileIndex, !Info),
-    insert(TargetFileIndex, !Set).
+add_targets_of_modules_as_deps(TargetType, ModuleIndexes, !Deps, !Info) :-
+    list.map_foldl(target_of_module_to_dep_file_index(TargetType),
+        ModuleIndexes, TargetFileIndexes, !Info),
+    % Converting TargetFileIndexes to a set, and then unioning !.Deps
+    % with that set should usually be faster than inserting its elements
+    % into !.Deps one by one. This is because TargetFileIndexes can be expected
+    % to usually be not-seen-before indexes, which means that calling
+    % insert_list here would end up repeatedly appending to the end of !.Deps.
+    union(list_to_set(TargetFileIndexes), !Deps).
+
+:- pred target_of_module_to_dep_file_index(module_target_type::in,
+    module_index::in, dependency_file_index::out,
+    make_info::in, make_info::out) is det.
+
+target_of_module_to_dep_file_index(TargetType, ModuleIndex, TargetFileIndex,
+        !Info) :-
+    TargetFile = dfmi_target(ModuleIndex, TargetType),
+    dependency_file_to_index(TargetFile, TargetFileIndex, !Info).
+
+%---------------------------------------------------------------------------%
 
 :- func files_of(find_module_deps_plain_set(dependency_file),
     find_module_deps(module_index)) = find_module_deps(dependency_file_index).
@@ -426,24 +511,23 @@ files_of_2(FindFiles, FindDeps, Globals, ModuleIndex, Succeeded, DepIndices,
         Succeeded = did_not_succeed,
         DepIndices = init
     else
-        deps_set_foldl3_maybe_stop_at_error(KeepGoing,
-            union_deps_plain_set(FindFiles),
-            Globals, ModuleIndices, Succeeded2, init, FileNames, !Info, !IO),
+        deps_set_foldl3_maybe_stop_at_error_find_plain_union_mi(KeepGoing,
+            FindFiles, Globals, to_sorted_list(ModuleIndices),
+            succeeded, Succeeded2, init, FileNames, !Info, !IO),
         Succeeded = Succeeded1 `and` Succeeded2,
         dependency_files_to_index_set(set.to_sorted_list(FileNames),
             DepIndices, !Info)
     ).
 
-:- pred map_find_module_deps(
-    find_module_deps(T)::in(find_module_deps),
-    find_module_deps(module_index)::in(find_module_deps),
-    globals::in, module_index::in, maybe_succeeded::out, deps_set(T)::out,
+:- pred get_intermod_imports_and_their_ancestors(
+    globals::in, module_index::in, maybe_succeeded::out,
+    deps_set(module_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-map_find_module_deps(FindDeps2, FindDeps1, Globals, ModuleIndex, Succeeded,
+get_intermod_imports_and_their_ancestors(Globals, ModuleIndex, Succeeded,
         Result, !Info, !IO) :-
     KeepGoing = !.Info ^ mki_keep_going,
-    FindDeps1(Globals, ModuleIndex, Succeeded1, Modules1, !Info, !IO),
+    intermod_imports(Globals, ModuleIndex, Succeeded1, Modules1, !Info, !IO),
     ( if
         Succeeded1 = did_not_succeed,
         KeepGoing = do_not_keep_going
@@ -451,10 +535,44 @@ map_find_module_deps(FindDeps2, FindDeps1, Globals, ModuleIndex, Succeeded,
         Succeeded = did_not_succeed,
         Result = init
     else
-        deps_set_foldl3_maybe_stop_at_error(KeepGoing, union_deps(FindDeps2),
-            Globals, Modules1, Succeeded2, init, Result, !Info, !IO),
+        deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+            ancestors, Globals, to_sorted_list(Modules1),
+            succeeded, Succeeded2, init, Result, !Info, !IO),
         Succeeded = Succeeded1 `and` Succeeded2
     ).
+
+:- pred get_intermod_imports_their_ancestors_and_012(globals::in,
+    module_index::in, maybe_succeeded::out,
+    deps_set(dependency_file_index)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+get_intermod_imports_their_ancestors_and_012(Globals, ModuleIndex,
+        Succeeded, Result, !Info, !IO) :-
+    KeepGoing = !.Info ^ mki_keep_going,
+    get_intermod_imports_and_their_ancestors(Globals,
+        ModuleIndex, Succeeded1, Modules1, !Info, !IO),
+    ( if
+        Succeeded1 = did_not_succeed,
+        KeepGoing = do_not_keep_going
+    then
+        Succeeded = did_not_succeed,
+        Result = init
+    else
+        deps_set_foldl3_maybe_stop_at_error_find_union_fi(KeepGoing,
+            imports_012, Globals, to_sorted_list(Modules1),
+            succeeded, Succeeded2, init, Result, !Info, !IO),
+        Succeeded = Succeeded1 `and` Succeeded2
+    ).
+
+:- pred find_own_imports_012(globals::in, module_index::in,
+    maybe_succeeded::out, deps_set(dependency_file_index)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+find_own_imports_012(Globals, ModuleIndex, Succeeded, Result, !Info, !IO) :-
+    KeepGoing = !.Info ^ mki_keep_going,
+    deps_set_foldl3_maybe_stop_at_error_find_union_fi(KeepGoing,
+        imports_012, Globals, [ModuleIndex],
+        succeeded, Succeeded, init, Result, !Info, !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -479,6 +597,18 @@ ancestors(_Globals, ModuleIndex, succeeded, AncestorIndices, !Info, !IO) :-
     module_index_to_name(!.Info, ModuleIndex, ModuleName),
     Ancestors = get_ancestors(ModuleName),
     module_names_to_index_set(Ancestors, AncestorIndices, !Info).
+
+:- pred add_targets_of_ancestors_as_deps(module_target_type::in,
+    module_index::in,
+    deps_set(dependency_file_index)::in, deps_set(dependency_file_index)::out,
+    make_info::in, make_info::out) is det.
+
+add_targets_of_ancestors_as_deps(TargetType, ModuleIndex, !Deps, !Info) :-
+    module_index_to_name(!.Info, ModuleIndex, ModuleName),
+    module_names_to_index_set(get_ancestors(ModuleName),
+        AncestorModuleIndexSet, !Info),
+    add_targets_of_modules_as_deps(TargetType,
+        to_sorted_list(AncestorModuleIndexSet), !Deps, !Info).
 
 %---------------------------------------------------------------------------%
 
@@ -512,13 +642,13 @@ direct_imports(Globals, ModuleIndex, Succeeded, Modules, !Info, !IO) :-
                 Succeeded = did_not_succeed,
                 Modules = init
             else
-                deps_set_foldl3_maybe_stop_at_error(KeepGoing,
-                    union_deps(non_intermod_direct_imports), Globals,
-                    IntermodModules, Succeeded2,
-                    union(Modules0, IntermodModules), Modules1,
-                    !Info, !IO),
+                union(Modules0, IntermodModules, Modules1),
+                deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+                    non_intermod_direct_imports, Globals,
+                    to_sorted_list(IntermodModules), succeeded, Succeeded2,
+                    Modules1, Modules2, !Info, !IO),
                 Succeeded = Succeeded0 `and` Succeeded1 `and` Succeeded2,
-                Modules = delete(Modules1, ModuleIndex)
+                Modules = delete(Modules2, ModuleIndex)
             )
         ),
         Result = deps_result(Succeeded, Modules),
@@ -542,8 +672,8 @@ non_intermod_direct_imports(Globals, ModuleIndex, Succeeded, Modules,
     ( if map.search(CachedNonIntermodDirectImports0, ModuleIndex, Result0) then
         Result0 = deps_result(Succeeded, Modules)
     else
-        non_intermod_direct_imports_2(Globals, ModuleIndex, Succeeded, Modules,
-            !Info, !IO),
+        non_intermod_direct_imports_uncached(Globals, ModuleIndex, Succeeded,
+            Modules, !Info, !IO),
         Result = deps_result(Succeeded, Modules),
         CachedNonIntermodDirectImports1 =
             !.Info ^ mki_cached_non_intermod_direct_imports,
@@ -553,11 +683,11 @@ non_intermod_direct_imports(Globals, ModuleIndex, Succeeded, Modules,
             := CachedNonIntermodDirectImports
     ).
 
-:- pred non_intermod_direct_imports_2(globals::in, module_index::in,
+:- pred non_intermod_direct_imports_uncached(globals::in, module_index::in,
     maybe_succeeded::out, deps_set(module_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-non_intermod_direct_imports_2(Globals, ModuleIndex, Succeeded, Modules,
+non_intermod_direct_imports_uncached(Globals, ModuleIndex, Succeeded, Modules,
         !Info, !IO) :-
     module_index_to_name(!.Info, ModuleIndex, ModuleName),
     get_module_dependencies(Globals, ModuleName, MaybeModuleDepInfo,
@@ -604,8 +734,18 @@ non_intermod_direct_imports_2(Globals, ModuleIndex, Succeeded, Modules,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
 indirect_imports(Globals, ModuleIndex, Succeeded, Modules, !Info, !IO) :-
-    indirect_imports_2(Globals, direct_imports, ModuleIndex,
-        Succeeded, Modules, !Info, !IO).
+    CachedIndirectImports0 = !.Info ^ mki_cached_indirect_imports,
+    ( if map.search(CachedIndirectImports0, ModuleIndex, CachedResult) then
+        CachedResult = deps_result(Succeeded, Modules)
+    else
+        indirect_imports_uncached(Globals, direct_imports, ModuleIndex,
+            Succeeded, Modules, !Info, !IO),
+        Result = deps_result(Succeeded, Modules),
+        CachedIndirectImports1 = !.Info ^ mki_cached_indirect_imports,
+        map.det_insert(ModuleIndex, Result,
+            CachedIndirectImports1, CachedIndirectImports),
+        !Info ^ mki_cached_indirect_imports := CachedIndirectImports
+    ).
 
     % Return the list of modules for which we should read `.int2' files,
     % ignoring those which need to be read as a result of importing modules
@@ -617,15 +757,15 @@ indirect_imports(Globals, ModuleIndex, Succeeded, Modules, !Info, !IO) :-
 
 non_intermod_indirect_imports(Globals, ModuleIndex, Succeeded, Modules,
         !Info, !IO) :-
-    indirect_imports_2(Globals, non_intermod_direct_imports, ModuleIndex,
-        Succeeded, Modules, !Info, !IO).
+    indirect_imports_uncached(Globals, non_intermod_direct_imports,
+        ModuleIndex, Succeeded, Modules, !Info, !IO).
 
-:- pred indirect_imports_2(globals::in,
+:- pred indirect_imports_uncached(globals::in,
     find_module_deps(module_index)::in(find_module_deps),
     module_index::in, maybe_succeeded::out, deps_set(module_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-indirect_imports_2(Globals, FindDirectImports, ModuleIndex, Succeeded,
+indirect_imports_uncached(Globals, FindDirectImports, ModuleIndex, Succeeded,
         IndirectImports, !Info, !IO) :-
     FindDirectImports(Globals, ModuleIndex, DirectSucceeded, DirectImports,
         !Info, !IO),
@@ -640,9 +780,9 @@ indirect_imports_2(Globals, FindDirectImports, ModuleIndex, Succeeded,
         Succeeded = did_not_succeed,
         IndirectImports = init
     else
-        deps_set_foldl3_maybe_stop_at_error(KeepGoing,
-            union_deps(find_transitive_implementation_imports), Globals,
-            DirectImports, IndirectSucceeded,
+        deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+            find_transitive_implementation_imports, Globals,
+            to_sorted_list(DirectImports), succeeded, IndirectSucceeded,
             init, IndirectImports0, !Info, !IO),
         IndirectImports = difference(
             delete(IndirectImports0, ModuleIndex),
@@ -693,10 +833,11 @@ foreign_imports(Globals, ModuleIndex, Succeeded, Modules, !Info, !IO) :-
     globals.get_backend_foreign_languages(Globals, Languages),
     intermod_imports(Globals, ModuleIndex, IntermodSucceeded, IntermodModules,
         !Info, !IO),
-    deps_set_foldl3_maybe_stop_at_error(!.Info ^ mki_keep_going,
-        union_deps(find_module_foreign_imports(set.list_to_set(Languages))),
-        Globals, insert(IntermodModules, ModuleIndex),
-        ForeignSucceeded, init, Modules, !Info, !IO),
+    KeepGoing = !.Info ^ mki_keep_going,
+    deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+        find_module_foreign_imports(set.list_to_set(Languages)),
+        Globals, to_sorted_list(insert(IntermodModules, ModuleIndex)),
+        succeeded, ForeignSucceeded, init, Modules, !Info, !IO),
     Succeeded = IntermodSucceeded `and` ForeignSucceeded.
 
 :- pred find_module_foreign_imports(set(foreign_language)::in,
@@ -706,47 +847,41 @@ foreign_imports(Globals, ModuleIndex, Succeeded, Modules, !Info, !IO) :-
 
 find_module_foreign_imports(Languages, Globals, ModuleIndex, Succeeded,
         ForeignModules, !Info, !IO) :-
-    find_transitive_implementation_imports(Globals, ModuleIndex, Succeeded0,
-        ImportedModules, !Info, !IO),
-    (
-        Succeeded0 = succeeded,
-        deps_set_foldl3_maybe_stop_at_error(!.Info ^ mki_keep_going,
-            union_deps(find_module_foreign_imports_2(Languages)),
-            Globals, insert(ImportedModules, ModuleIndex),
-            Succeeded, init, ForeignModules, !Info, !IO)
-    ;
-        Succeeded0 = did_not_succeed,
-        Succeeded = did_not_succeed,
-        ForeignModules = init
-    ).
-
-:- pred find_module_foreign_imports_2(set(foreign_language)::in,
-    globals::in, module_index::in,
-    maybe_succeeded::out, deps_set(module_index)::out,
-    make_info::in, make_info::out, io::di, io::uo) is det.
-
-find_module_foreign_imports_2(Languages, Globals, ModuleIndex, Succeeded,
-        ForeignModules, !Info, !IO) :-
-    % Languages should be constant for the duration of the process.
-    CachedForeignImports0 = !.Info ^ mki_cached_foreign_imports,
-    ( if map.search(CachedForeignImports0, ModuleIndex, Result0) then
-        Result0 = deps_result(Succeeded, ForeignModules)
+    % Languages should be constant for the duration of the process,
+    % so is unnecessary to include in the cache key.
+    CachedForeignImports0 = !.Info ^ mki_cached_transitive_foreign_imports,
+    ( if map.search(CachedForeignImports0, ModuleIndex, CachedResult) then
+        CachedResult = deps_result(Succeeded, ForeignModules)
     else
-        find_module_foreign_imports_3(Languages, Globals, ModuleIndex,
-            Succeeded, ForeignModules, !Info, !IO),
-        Result = deps_result(Succeeded, ForeignModules),
-        CachedForeignImports1 = !.Info ^ mki_cached_foreign_imports,
-        map.det_insert(ModuleIndex, Result,
-            CachedForeignImports1, CachedForeignImports),
-        !Info ^ mki_cached_foreign_imports := CachedForeignImports
+        find_transitive_implementation_imports(Globals, ModuleIndex,
+            Succeeded0, ImportedModules, !Info, !IO),
+        (
+            Succeeded0 = succeeded,
+            KeepGoing = !.Info ^ mki_keep_going,
+            deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+                find_module_foreign_imports_uncached(Languages),
+                Globals, to_sorted_list(insert(ImportedModules, ModuleIndex)),
+                succeeded, Succeeded, init, ForeignModules, !Info, !IO),
+            Result = deps_result(Succeeded, ForeignModules),
+            CachedForeignImports1 =
+                !.Info ^ mki_cached_transitive_foreign_imports,
+            map.det_insert(ModuleIndex, Result,
+                CachedForeignImports1, CachedForeignImports),
+            !Info ^ mki_cached_transitive_foreign_imports :=
+                CachedForeignImports
+        ;
+            Succeeded0 = did_not_succeed,
+            Succeeded = did_not_succeed,
+            ForeignModules = init
+        )
     ).
 
-:- pred find_module_foreign_imports_3(set(foreign_language)::in,
+:- pred find_module_foreign_imports_uncached(set(foreign_language)::in,
     globals::in, module_index::in,
     maybe_succeeded::out, deps_set(module_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-find_module_foreign_imports_3(Languages, Globals, ModuleIndex,
+find_module_foreign_imports_uncached(Languages, Globals, ModuleIndex,
         Succeeded, ForeignModules, !Info, !IO) :-
     module_index_to_name(!.Info, ModuleIndex, ModuleName),
     get_module_dependencies(Globals, ModuleName, MaybeModuleDepInfo,
@@ -834,24 +969,6 @@ get_foreign_include_files_2(Languages, SourceFileName, ForeignInclude, File) :-
 
 %---------------------------------------------------------------------------%
 
-:- type deps_result(T)
-    --->    deps_result(
-                dr_success  :: maybe_succeeded,
-                dr_set      :: deps_set(T)
-            ).
-
-:- type module_deps_result == deps_result(module_index).
-
-union_deps(FindDeps, Globals, ModuleIndex, Succeeded, Deps0, Deps,
-        !Info, !IO) :-
-    FindDeps(Globals, ModuleIndex, Succeeded, Deps1, !Info, !IO),
-    Deps = union(Deps0, Deps1).
-
-union_deps_plain_set(FindDeps, Globals, ModuleName, Succeeded, Deps0, Deps,
-        !Info, !IO) :-
-    FindDeps(Globals, ModuleName, Succeeded, Deps1, !Info, !IO),
-    Deps = set.union(Deps0, Deps1).
-
     % Note that we go to some effort in this module to stop dependency
     % calculation as soon as possible if there are errors.
     % This is important, because the calls to get_module_dependencies from
@@ -896,10 +1013,157 @@ combine_deps_list([FindDeps]) = FindDeps.
 combine_deps_list([FindDeps1, FindDeps2 | FindDepsTail]) =
     combine_deps(FindDeps1, combine_deps_list([FindDeps2 | FindDepsTail])).
 
-deps_set_foldl3_maybe_stop_at_error(KeepGoing, P, Globals, Ts,
-        Succeeded, !Acc, !Info, !IO) :-
-    foldl3_maybe_stop_at_error(KeepGoing, P, Globals, to_sorted_list(Ts),
-        Succeeded, !Acc, !Info, !IO).
+%---------------------------------------------------------------------------%
+
+    % cache_computed_module_deps(Label, FindDeps) adds caching to FindDeps.
+    % Label is used to discriminate cache entries for the same module;
+    % it must uniquely identify the set that is computed by FindDeps.
+    %
+:- pred cache_computed_module_deps(computed_module_deps_label::in,
+    find_module_deps(dependency_file_index)::in(find_module_deps),
+    globals::in, module_index::in, maybe_succeeded::out,
+    deps_set(dependency_file_index)::out, make_info::in, make_info::out,
+    io::di, io::uo) is det.
+
+cache_computed_module_deps(Label, FindDeps, Globals, ModuleIndex, Succeeded,
+        Deps, !Info, !IO) :-
+    Cache0 = !.Info ^ mki_cached_computed_module_deps,
+    Key = computed_module_deps_key(ModuleIndex, Label),
+    ( if map.search(Cache0, Key, CachedResult) then
+        CachedResult = deps_result(Succeeded, Deps)
+    else
+        FindDeps(Globals, ModuleIndex, Succeeded, Deps, !Info, !IO),
+        Cache1 = !.Info ^ mki_cached_computed_module_deps,
+        Result = deps_result(Succeeded, Deps),
+        map.det_insert(Key, Result, Cache1, Cache),
+        !Info ^ mki_cached_computed_module_deps := Cache
+    ).
+
+%---------------------------------------------------------------------------%
+
+    % XXX Document me.
+    %
+:- pred deps_set_foldl3_find_trans_deps(maybe_keep_going::in,
+    transitive_dependencies_type::in, process_modules_where::in,
+    globals::in, list(module_index)::in,
+    maybe_succeeded::in, maybe_succeeded::out,
+    deps_set(module_index)::in, deps_set(module_index)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+deps_set_foldl3_find_trans_deps(_KeepGoing, _DependenciesType,
+        _IsModuleInCurDir, _Globals, [], !Succeeded, !Acc, !Info, !IO).
+deps_set_foldl3_find_trans_deps(KeepGoing, DependenciesType,
+        IsModuleInCurDir, Globals, [T | Ts], !Succeeded, !Acc, !Info, !IO) :-
+    find_transitive_module_dependencies_uncached(KeepGoing, DependenciesType,
+        IsModuleInCurDir, Globals, T, NewSucceeded, !Acc, !Info, !IO),
+    ( if
+        ( NewSucceeded = succeeded
+        ; KeepGoing = do_keep_going
+        )
+    then
+        !:Succeeded = !.Succeeded `and` NewSucceeded,
+        deps_set_foldl3_find_trans_deps(KeepGoing, DependenciesType,
+            IsModuleInCurDir, Globals, Ts, !Succeeded, !Acc, !Info, !IO)
+    else
+        !:Succeeded = did_not_succeed
+    ).
+
+%---------------------------------------------------------------------------%
+
+:- pred deps_set_foldl3_maybe_stop_at_error_find_union_mi(
+    maybe_keep_going::in,
+    find_module_deps(module_index)::in(find_module_deps),
+    globals::in, list(module_index)::in,
+    maybe_succeeded::in, maybe_succeeded::out,
+    deps_set(module_index)::in, deps_set(module_index)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+deps_set_foldl3_maybe_stop_at_error_find_union_mi(_KeepGoing,
+        _FindDeps, _Globals, [], !Succeeded, !Deps, !Info, !IO).
+deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+        FindDeps, Globals, [MI | MIs], !Succeeded, !Deps, !Info, !IO) :-
+    FindDeps(Globals, MI, NewSucceeded, NewDeps, !Info, !IO),
+    union(NewDeps, !Deps),
+    ( if
+        ( NewSucceeded = succeeded
+        ; KeepGoing = do_keep_going
+        )
+    then
+        !:Succeeded = !.Succeeded `and` NewSucceeded,
+        deps_set_foldl3_maybe_stop_at_error_find_union_mi(KeepGoing,
+            FindDeps, Globals, MIs, !Succeeded, !Deps, !Info, !IO)
+    else
+        !:Succeeded = did_not_succeed
+    ).
+
+%---------------------%
+
+:- pred deps_set_foldl3_maybe_stop_at_error_find_plain_union_mi(
+    maybe_keep_going::in,
+    find_module_deps_plain_set(dependency_file)::
+        in(find_module_deps_plain_set),
+    globals::in, list(module_index)::in,
+    maybe_succeeded::in, maybe_succeeded::out,
+    set(dependency_file)::in, set(dependency_file)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+deps_set_foldl3_maybe_stop_at_error_find_plain_union_mi(_KeepGoing,
+        _FindDeps, _Globals, [], !Succeeded, !Deps, !Info, !IO).
+deps_set_foldl3_maybe_stop_at_error_find_plain_union_mi(KeepGoing,
+        FindDeps, Globals, [MI | MIs], !Succeeded, !Deps, !Info, !IO) :-
+    FindDeps(Globals, MI, NewSucceeded, NewDeps, !Info, !IO),
+    set.union(NewDeps, !Deps),
+    ( if
+        ( NewSucceeded = succeeded
+        ; KeepGoing = do_keep_going
+        )
+    then
+        !:Succeeded = !.Succeeded `and` NewSucceeded,
+        deps_set_foldl3_maybe_stop_at_error_find_plain_union_mi(KeepGoing,
+            FindDeps, Globals, MIs, !Succeeded, !Deps, !Info, !IO)
+    else
+        !:Succeeded = did_not_succeed
+    ).
+
+%---------------------%
+
+    % XXX Document me.
+    %
+    % The difference between this predicate (and its local siblings) and
+    % the old deps_set_foldl3_maybe_stop_at_error (now replaced by these
+    % predicates) is that the second argument has a more specific job.
+    % That job used to be done by a predicate, union_deps, whose documentation
+    % used to say this:
+    %
+    % "Union the output set of dependencies for a given module
+    % with the accumulated set. This is used with
+    % deps_set_foldl3_maybe_stop_at_error to iterate over a list of
+    % module_names to find all target files for those modules."
+    %
+:- pred deps_set_foldl3_maybe_stop_at_error_find_union_fi(maybe_keep_going::in,
+    find_module_deps(dependency_file_index)::in(find_module_deps),
+    globals::in, list(module_index)::in,
+    maybe_succeeded::in, maybe_succeeded::out,
+    deps_set(dependency_file_index)::in, deps_set(dependency_file_index)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+deps_set_foldl3_maybe_stop_at_error_find_union_fi(_KeepGoing,
+        _FindDeps, _Globals, [], !Succeeded, !Deps, !Info, !IO).
+deps_set_foldl3_maybe_stop_at_error_find_union_fi(KeepGoing,
+        FindDeps, Globals, [MI | MIs], !Succeeded, !Deps, !Info, !IO) :-
+    FindDeps(Globals, MI, NewSucceeded, NewDeps, !Info, !IO),
+    union(NewDeps, !Deps),
+    ( if
+        ( NewSucceeded = succeeded
+        ; KeepGoing = do_keep_going
+        )
+    then
+        !:Succeeded = !.Succeeded `and` NewSucceeded,
+        deps_set_foldl3_maybe_stop_at_error_find_union_fi(KeepGoing,
+            FindDeps, Globals, MIs, !Succeeded, !Deps, !Info, !IO)
+    else
+        !:Succeeded = did_not_succeed
+    ).
 
 %---------------------------------------------------------------------------%
 
@@ -907,7 +1171,8 @@ find_reachable_local_modules(Globals, ModuleName, Succeeded, Modules,
         !Info, !IO) :-
     module_name_to_index(ModuleName, ModuleIndex, !Info),
     find_transitive_module_dependencies(Globals, all_dependencies,
-        local_module, ModuleIndex, Succeeded, Modules0, !Info, !IO),
+        process_only_modules_in_cur_dir, ModuleIndex, Succeeded, Modules0,
+        !Info, !IO),
     module_index_set_to_plain_set(!.Info, Modules0, Modules).
 
 :- pred find_transitive_implementation_imports(globals::in, module_index::in,
@@ -916,41 +1181,44 @@ find_reachable_local_modules(Globals, ModuleName, Succeeded, Modules,
 
 find_transitive_implementation_imports(Globals, ModuleIndex,
         Succeeded, Modules, !Info, !IO) :-
-    find_transitive_module_dependencies(Globals, all_imports, any_module,
-        ModuleIndex, Succeeded, Modules0, !Info, !IO),
+    find_transitive_module_dependencies(Globals, all_imports,
+        process_modules_anywhere, ModuleIndex, Succeeded, Modules0,
+        !Info, !IO),
     Modules = insert(Modules0, ModuleIndex).
 
 :- pred find_transitive_module_dependencies(globals::in,
-    transitive_dependencies_type::in, module_locn::in, module_index::in,
+    transitive_dependencies_type::in,
+    process_modules_where::in, module_index::in,
     maybe_succeeded::out, deps_set(module_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-find_transitive_module_dependencies(Globals, DependenciesType, ModuleLocn,
-        ModuleIndex, Succeeded, Modules, !Info, !IO) :-
+find_transitive_module_dependencies(Globals, DependenciesType,
+        IsModuleInCurDir, ModuleIndex, Succeeded, Modules, !Info, !IO) :-
     DepsRoot = transitive_dependencies_root(ModuleIndex, DependenciesType,
-        ModuleLocn),
+        IsModuleInCurDir),
     CachedTransDeps0 = !.Info ^ mki_cached_transitive_dependencies,
     ( if map.search(CachedTransDeps0, DepsRoot, Result0) then
         Result0 = deps_result(Succeeded, Modules)
     else
         KeepGoing = !.Info ^ mki_keep_going,
-        find_transitive_module_dependencies_2(KeepGoing, DependenciesType,
-            ModuleLocn, Globals, ModuleIndex, Succeeded, init, Modules,
-            !Info, !IO),
+        find_transitive_module_dependencies_uncached(KeepGoing,
+            DependenciesType, IsModuleInCurDir, Globals, ModuleIndex,
+            Succeeded, init, Modules, !Info, !IO),
         Result = deps_result(Succeeded, Modules),
         CachedTransDeps1 = !.Info ^ mki_cached_transitive_dependencies,
         map.det_insert(DepsRoot, Result, CachedTransDeps1, CachedTransDeps),
         !Info ^ mki_cached_transitive_dependencies := CachedTransDeps
     ).
 
-:- pred find_transitive_module_dependencies_2(maybe_keep_going::in,
-    transitive_dependencies_type::in, module_locn::in, globals::in,
+:- pred find_transitive_module_dependencies_uncached(maybe_keep_going::in,
+    transitive_dependencies_type::in, process_modules_where::in, globals::in,
     module_index::in, maybe_succeeded::out,
     deps_set(module_index)::in, deps_set(module_index)::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-find_transitive_module_dependencies_2(KeepGoing, DependenciesType, ModuleLocn,
-        Globals, ModuleIndex, Succeeded, Modules0, Modules, !Info, !IO) :-
+find_transitive_module_dependencies_uncached(KeepGoing, DependenciesType,
+        IsModuleInCurDir, Globals, ModuleIndex, Succeeded, Modules0, Modules,
+        !Info, !IO) :-
     ( if
         member(ModuleIndex, Modules0)
     then
@@ -958,7 +1226,7 @@ find_transitive_module_dependencies_2(KeepGoing, DependenciesType, ModuleLocn,
         Modules = Modules0
     else if
         DepsRoot = transitive_dependencies_root(ModuleIndex,
-            DependenciesType, ModuleLocn),
+            DependenciesType, IsModuleInCurDir),
         map.search(!.Info ^ mki_cached_transitive_dependencies, DepsRoot,
             Result0)
     then
@@ -973,67 +1241,16 @@ find_transitive_module_dependencies_2(KeepGoing, DependenciesType, ModuleLocn,
             module_dep_info_get_source_file_dir(ModuleDepInfo, ModuleDir),
             ( if
                 (
-                    ModuleLocn = any_module
+                    IsModuleInCurDir = process_modules_anywhere
                 ;
-                    ModuleLocn = local_module,
+                    IsModuleInCurDir = process_only_modules_in_cur_dir,
                     ModuleDir = dir.this_directory
                 )
             then
-                module_dep_info_get_fims(ModuleDepInfo, FIMSpecs),
-                module_dep_info_get_module_name(ModuleDepInfo, MDI_ModuleName),
-                expect(unify(ModuleName, MDI_ModuleName), $pred,
-                    "ModuleName != MDI_ModuleName"),
-                Ancestors = get_ancestors_set(ModuleName),
-                module_dep_info_get_children(ModuleDepInfo, Children),
-                module_dep_info_get_int_deps(ModuleDepInfo, IntDeps),
-                module_dep_info_get_imp_deps(ModuleDepInfo, ImpDeps),
-                (
-                    % Ancestors don't need to be considered here.
-                    % Anywhere the interface of the child module is needed,
-                    % the ancestors must also have been imported.
-                    DependenciesType = interface_imports,
-                    ImportsToCheck = IntDeps,
-                    IncludesToCheck = set.init
-                ;
-                    DependenciesType = all_dependencies,
-                    set.map((pred(fim_spec(_, Mod)::in, Mod::out) is det),
-                        FIMSpecs, ForeignDeps),
-                    ImportsToCheck = set.union_list([
-                        Ancestors, IntDeps, ImpDeps, ForeignDeps
-                    ]),
-                    IncludesToCheck = Children
-                ;
-                    DependenciesType = all_imports,
-                    set.map((pred(fim_spec(_, Mod)::in, Mod::out) is det),
-                        FIMSpecs, ForeignDeps),
-                    ImportsToCheck = set.union_list([
-                        Ancestors, IntDeps, ImpDeps, ForeignDeps
-                    ]),
-                    IncludesToCheck = set.init
-                ),
-                module_names_to_index_set(set.to_sorted_list(ImportsToCheck),
-                    ImportsToCheckSet, !Info),
-                module_names_to_index_set(set.to_sorted_list(IncludesToCheck),
-                    IncludesToCheckSet, !Info),
-                Modules1 = insert(Modules0, ModuleIndex),
-                % XXX The pattern of use of the mki_importing_module field
-                % here suggest that it should not be a field of make_info
-                % at all, but rather a separate parameter of this predicate.
-                OldImportingModule = !.Info ^ mki_importing_module,
-                !Info ^ mki_importing_module := yes(ioi_import(ModuleName)),
-                deps_set_foldl3_maybe_stop_at_error(KeepGoing,
-                    find_transitive_module_dependencies_2(KeepGoing,
-                        DependenciesType, ModuleLocn),
-                    Globals, ImportsToCheckSet, SucceededA, Modules1, Modules2,
-                    !Info, !IO),
-                !Info ^ mki_importing_module := yes(ioi_include(ModuleName)),
-                deps_set_foldl3_maybe_stop_at_error(KeepGoing,
-                    find_transitive_module_dependencies_2(KeepGoing,
-                        DependenciesType, ModuleLocn),
-                    Globals, IncludesToCheckSet, SucceededB, Modules2, Modules,
-                    !Info, !IO),
-                !Info ^ mki_importing_module := OldImportingModule,
-                Succeeded = SucceededA `and` SucceededB
+                do_find_transitive_module_dependencies_uncached(KeepGoing,
+                    DependenciesType, IsModuleInCurDir, Globals,
+                    ModuleIndex, ModuleName, ModuleDepInfo, Succeeded,
+                    Modules0, Modules, !Info, !IO)
             else
                 Succeeded = succeeded,
                 Modules = Modules0
@@ -1044,6 +1261,68 @@ find_transitive_module_dependencies_2(KeepGoing, DependenciesType, ModuleLocn,
             Modules = Modules0
         )
     ).
+
+:- pred do_find_transitive_module_dependencies_uncached(maybe_keep_going::in,
+    transitive_dependencies_type::in, process_modules_where::in, globals::in,
+    module_index::in, module_name::in, module_dep_info::in,
+    maybe_succeeded::out,
+    deps_set(module_index)::in, deps_set(module_index)::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+do_find_transitive_module_dependencies_uncached(KeepGoing, DependenciesType,
+        IsModuleInCurDir, Globals, ModuleIndex, ModuleName, ModuleDepInfo,
+        Succeeded, Modules0, Modules, !Info, !IO) :-
+    module_dep_info_get_fims(ModuleDepInfo, FIMSpecs),
+    module_dep_info_get_module_name(ModuleDepInfo, MDI_ModuleName),
+    expect(unify(ModuleName, MDI_ModuleName), $pred,
+        "ModuleName != MDI_ModuleName"),
+    Ancestors = get_ancestors_set(ModuleName),
+    module_dep_info_get_children(ModuleDepInfo, Children),
+    module_dep_info_get_int_deps(ModuleDepInfo, IntDeps),
+    module_dep_info_get_imp_deps(ModuleDepInfo, ImpDeps),
+    (
+        % Ancestors don't need to be considered here.
+        % Anywhere the interface of the child module is needed,
+        % the ancestors must also have been imported.
+        DependenciesType = interface_imports,
+        ImportsToCheck = IntDeps,
+        IncludesToCheck = set.init
+    ;
+        DependenciesType = all_dependencies,
+        set.map((pred(fim_spec(_, Mod)::in, Mod::out) is det),
+            FIMSpecs, ForeignDeps),
+        ImportsToCheck = set.union_list([
+            Ancestors, IntDeps, ImpDeps, ForeignDeps
+        ]),
+        IncludesToCheck = Children
+    ;
+        DependenciesType = all_imports,
+        set.map((pred(fim_spec(_, Mod)::in, Mod::out) is det),
+            FIMSpecs, ForeignDeps),
+        ImportsToCheck = set.union_list([
+            Ancestors, IntDeps, ImpDeps, ForeignDeps
+        ]),
+        IncludesToCheck = set.init
+    ),
+    module_names_to_index_set(set.to_sorted_list(ImportsToCheck),
+        ImportsToCheckSet, !Info),
+    module_names_to_index_set(set.to_sorted_list(IncludesToCheck),
+        IncludesToCheckSet, !Info),
+    Modules1 = insert(Modules0, ModuleIndex),
+    % XXX The pattern of use of the mki_importing_module field
+    % here suggest that it should not be a field of make_info
+    % at all, but rather a separate parameter of this predicate.
+    OldImportingModule = !.Info ^ mki_importing_module,
+    !Info ^ mki_importing_module := yes(ioi_import(ModuleName)),
+    deps_set_foldl3_find_trans_deps(KeepGoing, DependenciesType,
+        IsModuleInCurDir, Globals, to_sorted_list(ImportsToCheckSet),
+        succeeded, SucceededImports, Modules1, Modules2, !Info, !IO),
+    !Info ^ mki_importing_module := yes(ioi_include(ModuleName)),
+    deps_set_foldl3_find_trans_deps(KeepGoing, DependenciesType,
+        IsModuleInCurDir, Globals, to_sorted_list(IncludesToCheckSet),
+        succeeded, SucceededIncludes, Modules2, Modules, !Info, !IO),
+    !Info ^ mki_importing_module := OldImportingModule,
+    Succeeded = SucceededImports `and` SucceededIncludes.
 
 %---------------------------------------------------------------------------%
 
@@ -1100,9 +1379,8 @@ make_write_target_dependency_status(Globals, DepTarget - DepStatus, !IO) :-
         DepStatus = deps_status_error,
         DepStatusStr = "deps_status_error"
     ),
-    make_write_dependency_file(Globals, DepTarget, !IO),
-    io.write_string(" - ", !IO),
-    io.write_string(DepStatusStr, !IO).
+    dependency_file_to_file_name(Globals, DepTarget, DepTargetFileName, !IO),
+    io.format("\t%s - %s\n", [s(DepTargetFileName), s(DepStatusStr)], !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -1138,8 +1416,8 @@ dependency_status(Globals, Dep, Status, !Info, !IO) :-
             % .track_flags should already have been made, if required,
             % so are also up-to-date.
             ModuleTarget = module_target(module_target_source),
-            maybe_warn_up_to_date_target(Globals, ModuleName - ModuleTarget,
-                !Info, !IO),
+            maybe_warn_up_to_date_target(Globals,
+                top_target_file(ModuleName, ModuleTarget), !Info, !IO),
             Status = deps_status_up_to_date
         else if
             DepStatusMap0 = !.Info ^ mki_dependency_status,
@@ -1160,7 +1438,6 @@ dependency_status(Globals, Dep, Status, !Info, !IO) :-
                 else
                     % Targets from libraries are always considered to be
                     % up-to-date if they exist.
-
                     get_target_timestamp(Globals, do_search, Target,
                         MaybeTimestamp, !Info, !IO),
                     (
@@ -1205,7 +1482,8 @@ check_dependencies(Globals, TargetFileName, MaybeTimestamp, BuildDepsSucceeded,
     ;
         UnbuiltDependencies = [],
         debug_make_msg(Globals,
-            io.write_string(TargetFileName ++ ": finished dependencies\n"),
+            io.format("%s: finished dependencies\n",
+                [s(TargetFileName)]),
             !IO),
         list.map_foldl2(get_dependency_timestamp(Globals), DepFiles,
             DepTimestamps, !Info, !IO),
@@ -1221,11 +1499,10 @@ check_dependencies(Globals, TargetFileName, MaybeTimestamp, BuildDepsSucceeded,
 
 check_dependencies_debug_unbuilt(Globals, TargetFileName, UnbuiltDependencies,
         !IO) :-
-    io.write_string(TargetFileName, !IO),
-    io.write_string(": dependencies could not be built.\n\t", !IO),
-    io.write_list(UnbuiltDependencies, ",\n\t",
-        make_write_target_dependency_status(Globals), !IO),
-    io.nl(!IO).
+    io.format("%s: dependencies could not be built.\n\t",
+        [s(TargetFileName)], !IO),
+    list.foldl(make_write_target_dependency_status(Globals),
+        UnbuiltDependencies, !IO).
 
 :- pred check_dependencies_timestamps_write_missing_deps(file_name::in,
     maybe_succeeded::in,
@@ -1241,9 +1518,8 @@ check_dependencies_timestamps_write_missing_deps(TargetFileName,
             Pair = DepFile - error(_)
         ), DepTimestampAL, ErrorDeps0),
     list.sort(ErrorDeps0, ErrorDeps),
-    io.write_string("** dependencies for `", !IO),
-    io.write_string(TargetFileName, !IO),
-    io.write_string("' do not exist: ", !IO),
+    io.format("** dependencies for `%s' do not exist: ",
+        [s(TargetFileName)], !IO),
     io.write_list(ErrorDeps, ", ", WriteDepFile, !IO),
     io.nl(!IO),
     (
@@ -1260,7 +1536,8 @@ check_dependency_timestamps(Globals, TargetFileName, MaybeTimestamp,
         MaybeTimestamp = error(_),
         DepsResult = deps_out_of_date,
         debug_make_msg(Globals,
-            io.write_string(TargetFileName ++ " does not exist.\n"), !IO)
+            io.format("%s does not exist.\n", [s(TargetFileName)]),
+            !IO)
     ;
         MaybeTimestamp = ok(Timestamp),
         ( if error_in_timestamps(DepTimestamps) then
@@ -1271,11 +1548,9 @@ check_dependency_timestamps(Globals, TargetFileName, MaybeTimestamp,
                     WriteDepFile, DepTimestamps),
             (
                 BuildDepsSucceeded = succeeded,
-
                 % Something has gone wrong -- building the target has
                 % succeeded, but there are some files missing.
                 % Report an error.
-
                 WriteMissingDeps(!IO)
             ;
                 BuildDepsSucceeded = did_not_succeed,
@@ -1336,10 +1611,8 @@ debug_newer_dependencies(Globals, TargetFileName, MaybeTimestamp,
 
 debug_newer_dependencies_2(TargetFileName, MaybeTimestamp,
         DepFiles, DepTimestamps, !IO) :-
-    io.write_string(TargetFileName, !IO),
-    io.write_string(" [", !IO),
-    io.write(MaybeTimestamp, !IO),
-    io.write_string("]: newer dependencies:\n", !IO),
+    io.format("%s [%s]: newer dependencies:\n",
+        [s(TargetFileName), s(string(MaybeTimestamp))], !IO),
     assoc_list.from_corresponding_lists(DepFiles, DepTimestamps,
         DepTimestampAL),
     list.filter(
@@ -1353,20 +1626,17 @@ debug_newer_dependencies_2(TargetFileName, MaybeTimestamp,
             )
         ), DepTimestampAL, NewerDepsAL0),
     list.sort(NewerDepsAL0, NewerDepsAL),
-    make_write_dependency_file_and_timestamp_list(NewerDepsAL, !IO).
+    write_dependency_file_and_timestamp_list(NewerDepsAL, !IO).
 
-:- pred make_write_dependency_file_and_timestamp_list(
+:- pred write_dependency_file_and_timestamp_list(
     assoc_list(T, maybe_error(timestamp))::in, io::di, io::uo) is det.
 
-make_write_dependency_file_and_timestamp_list([], !IO).
-make_write_dependency_file_and_timestamp_list([Head | Tail], !IO) :-
+write_dependency_file_and_timestamp_list([], !IO).
+write_dependency_file_and_timestamp_list([Head | Tail], !IO) :-
     Head = DepFile - MaybeTimestamp,
-    io.write_char('\t', !IO),
-    io.write(DepFile, !IO),
-    io.write_char(' ', !IO),
-    io.write(MaybeTimestamp, !IO),
-    io.nl(!IO),
-    make_write_dependency_file_and_timestamp_list(Tail, !IO).
+    io.format("\t%s %s\n",
+        [s(string(DepFile)), s(string(MaybeTimestamp))], !IO),
+    write_dependency_file_and_timestamp_list(Tail, !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -1374,15 +1644,20 @@ make_write_dependency_file_and_timestamp_list([Head | Tail], !IO) :-
 
 init_cached_direct_imports = map.init.
 
-:- type cached_foreign_imports == map(module_index, module_deps_result).
+:- type cached_indirect_imports == map(module_index, module_deps_result).
 
-init_cached_foreign_imports = map.init.
+init_cached_indirect_imports = map.init.
+
+:- type cached_transitive_foreign_imports
+    == map(module_index, module_deps_result).
+
+init_cached_transitive_foreign_imports = map.init.
 
 :- type transitive_dependencies_root
     --->    transitive_dependencies_root(
                 module_index,
                 transitive_dependencies_type,
-                module_locn
+                process_modules_where
             ).
 
 :- type transitive_dependencies_type
@@ -1390,15 +1665,29 @@ init_cached_foreign_imports = map.init.
     ;       all_imports             % every import_module and use_module
     ;       all_dependencies.       % all_imports plus every include_module
 
-:- type module_locn
-    --->    local_module
+:- type process_modules_where
+    --->    process_only_modules_in_cur_dir
             % The source file for the module is in the current directory.
-    ;       any_module.
+    ;       process_modules_anywhere.
 
 :- type cached_transitive_dependencies ==
     map(transitive_dependencies_root, deps_result(module_index)).
 
 init_cached_transitive_dependencies = map.init.
+
+:- type cached_computed_module_deps ==
+    map(computed_module_deps_key, deps_result(dependency_file_index)).
+
+:- type computed_module_deps_key
+    --->    computed_module_deps_key(
+                module_index,
+                computed_module_deps_label
+            ).
+
+:- type computed_module_deps_label
+    --->    computed_module_deps_import_012.
+
+init_cached_computed_module_deps = map.init.
 
 %---------------------------------------------------------------------------%
 :- end_module make.dependencies.

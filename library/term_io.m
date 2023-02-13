@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-2006, 2009, 2011-2012 The University of Melbourne.
-% Copyright (C) 2014-2018 The Mercury team.
+% Copyright (C) 2014-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -10,9 +10,10 @@
 % Main author: fjh.
 % Stability: medium to high.
 %
-% This file encapsulates all the term I/O.
-% This exports predicates to read and write terms in the
-% nice ground representation provided in term.m.
+% This module provides predicates to write out terms that use the ground
+% representation defined in term.m.
+%
+% Predicates to read in such terms are available in mercury_term_parser.m.
 %
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -29,39 +30,6 @@
 
 %---------------------------------------------------------------------------%
 
-:- type read_term(T)
-    --->    eof
-            % We have reached the end-of-file.
-    ;       error(string, int)
-            % We have found an error described the message string
-            % on the given line number in the input.
-    ;       term(varset(T), term(T)).
-            % We have read in the given term with the given varset.
-
-:- type read_term == read_term(generic).
-
-    % Read a term from the current input stream or from the given input stream.
-    %
-    % Similar to NU-Prolog read_term/2, except that resulting term
-    % is in the ground representation.
-    %
-    % Binds Result to either `eof', `term(VarSet, Term)', or
-    % `error(Message, LineNumber)'.
-    %
-:- pred read_term(read_term(T)::out, io::di, io::uo) is det.
-:- pred read_term(io.text_input_stream::in, read_term(T)::out,
-    io::di, io::uo) is det.
-
-    % As above, except uses the given operator table instead of
-    % the standard Mercury operators.
-    %
-:- pred read_term_with_op_table(Ops::in,
-    read_term(T)::out, io::di, io::uo) is det <= op_table(Ops).
-:- pred read_term_with_op_table(io.text_input_stream::in, Ops::in,
-    read_term(T)::out, io::di, io::uo) is det <= op_table(Ops).
-
-%---------------------------------------------------------------------------%
-
     % Writes a term to the current output stream or to the specified output
     % stream. Uses the variable names specified by the varset.
     % Writes _N for all unnamed variables, with N starting at 0.
@@ -73,10 +41,10 @@
     % As above, except uses the given operator table instead of the
     % standard Mercury operators.
     %
-:- pred write_term_with_op_table(Ops::in,
-    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(Ops).
-:- pred write_term_with_op_table(io.text_output_stream::in, Ops::in,
-    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(Ops).
+:- pred write_term_with_op_table(OpTable::in,
+    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(OpTable).
+:- pred write_term_with_op_table(io.text_output_stream::in, OpTable::in,
+    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(OpTable).
 
     % As above, except it appends a period and new-line.
     %
@@ -86,10 +54,10 @@
 
     % As above, except it appends a period and new-line.
     %
-:- pred write_term_nl_with_op_table(Ops::in,
-    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(Ops).
-:- pred write_term_nl_with_op_table(io.text_output_stream::in, Ops::in,
-    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(Ops).
+:- pred write_term_nl_with_op_table(OpTable::in,
+    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(OpTable).
+:- pred write_term_nl_with_op_table(io.text_output_stream::in, OpTable::in,
+    varset(T)::in, term(T)::in, io::di, io::uo) is det <= op_table(OpTable).
 
 %---------------------%
 
@@ -116,10 +84,10 @@
     % As above, except uses the given operator table instead of the
     % standard Mercury operators.
     %
-:- pred write_variable_with_op_table(Ops::in,
-    var(T)::in, varset(T)::in, io::di, io::uo) is det <= op_table(Ops).
-:- pred write_variable_with_op_table(io.text_output_stream::in, Ops::in,
-    var(T)::in, varset(T)::in, io::di, io::uo) is det <= op_table(Ops).
+:- pred write_variable_with_op_table(OpTable::in,
+    var(T)::in, varset(T)::in, io::di, io::uo) is det <= op_table(OpTable).
+:- pred write_variable_with_op_table(io.text_output_stream::in, OpTable::in,
+    var(T)::in, varset(T)::in, io::di, io::uo) is det <= op_table(OpTable).
 
 %---------------------%
 
@@ -286,28 +254,10 @@
 :- import_module integer.
 :- import_module list.
 :- import_module mercury_term_lexer.
-:- import_module mercury_term_parser.
 :- import_module string.
 :- import_module stream.string_writer.
 
 %---------------------------------------------------------------------------%
-%---------------------------------------------------------------------------%
-
-read_term(Result, !IO) :-
-    io.input_stream(InStream, !IO),
-    term_io.read_term(InStream, Result, !IO).
-
-read_term(InStream, Result, !IO) :-
-    io.get_op_table(Ops, !IO),
-    term_io.read_term_with_op_table(InStream, Ops, Result, !IO).
-
-read_term_with_op_table(Ops, Result, !IO) :-
-    io.input_stream(InStream, !IO),
-    term_io.read_term_with_op_table(InStream, Ops, Result, !IO).
-
-read_term_with_op_table(InStream, Ops, Result, !IO) :-
-    mercury_term_parser.read_term_with_op_table(InStream, Ops, Result, !IO).
-
 %---------------------------------------------------------------------------%
 
 write_term(VarSet, Term, !IO) :-
@@ -315,15 +265,15 @@ write_term(VarSet, Term, !IO) :-
     write_term(OutStream, VarSet, Term, !IO).
 
 write_term(OutStream, VarSet, Term, !IO) :-
-    io.get_op_table(Ops, !IO),
-    term_io.write_term_with_op_table(OutStream, Ops, VarSet, Term, !IO).
+    OpTable = init_mercury_op_table,
+    term_io.write_term_with_op_table(OutStream, OpTable, VarSet, Term, !IO).
 
-write_term_with_op_table(Ops, VarSet, Term, !IO) :-
+write_term_with_op_table(OpTable, VarSet, Term, !IO) :-
     io.output_stream(OutStream, !IO),
-    write_term_with_op_table(OutStream, Ops, VarSet, Term, !IO).
+    write_term_with_op_table(OutStream, OpTable, VarSet, Term, !IO).
 
-write_term_with_op_table(OutStream, Ops, VarSet, Term, !IO) :-
-    write_term_anon_vars(OutStream, Ops, Term, VarSet, _, 0, _, !IO).
+write_term_with_op_table(OutStream, OpTable, VarSet, Term, !IO) :-
+    write_term_anon_vars(OutStream, OpTable, Term, VarSet, _, 0, _, !IO).
 
 %---------------------%
 
@@ -332,35 +282,36 @@ write_term_nl(VarSet, Term, !IO) :-
     write_term_nl(OutStream, VarSet, Term, !IO).
 
 write_term_nl(OutStream, VarSet, Term, !IO) :-
-    io.get_op_table(Ops, !IO),
-    term_io.write_term_nl_with_op_table(OutStream, Ops, VarSet, Term, !IO).
+    OpTable = init_mercury_op_table,
+    term_io.write_term_nl_with_op_table(OutStream, OpTable, VarSet, Term, !IO).
 
-write_term_nl_with_op_table(Ops, VarSet, Term, !IO) :-
+write_term_nl_with_op_table(OpTable, VarSet, Term, !IO) :-
     io.output_stream(OutStream, !IO),
-    write_term_nl_with_op_table(OutStream, Ops, VarSet, Term, !IO).
+    write_term_nl_with_op_table(OutStream, OpTable, VarSet, Term, !IO).
 
-write_term_nl_with_op_table(OutStream, Ops, VarSet, Term, !IO) :-
-    term_io.write_term_with_op_table(OutStream, Ops, VarSet, Term, !IO),
+write_term_nl_with_op_table(OutStream, OpTable, VarSet, Term, !IO) :-
+    term_io.write_term_with_op_table(OutStream, OpTable, VarSet, Term, !IO),
     io.write_string(OutStream, ".\n", !IO).
 
 %---------------------------------------------------------------------------%
 
-:- pred write_term_anon_vars(io.text_output_stream::in, Ops::in,
+:- pred write_term_anon_vars(io.text_output_stream::in, OpTable::in,
     term(T)::in, varset(T)::in, varset(T)::out, int::in, int::out,
-    io::di, io::uo) is det <= op_table(Ops).
+    io::di, io::uo) is det <= op_table(OpTable).
 
-write_term_anon_vars(OutStream, Ops, Term, !VarSet, !N, !IO) :-
-    write_term_prio_anon_vars(OutStream, Ops, Term, ops.max_priority(Ops) + 1,
-        !VarSet, !N, !IO).
+write_term_anon_vars(OutStream, OpTable, Term, !VarSet, !N, !IO) :-
+    write_term_prio_anon_vars(OutStream, OpTable, Term,
+        ops.universal_priority(OpTable), !VarSet, !N, !IO).
 
-:- pred write_term_prio_anon_vars(io.text_output_stream::in, Ops::in,
+:- pred write_term_prio_anon_vars(io.text_output_stream::in, OpTable::in,
     term(T)::in, ops.priority::in, varset(T)::in, varset(T)::out,
-    int::in, int::out, io::di, io::uo) is det <= op_table(Ops).
+    int::in, int::out, io::di, io::uo) is det <= op_table(OpTable).
 
-write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
+write_term_prio_anon_vars(OutStream, OpTable, Term, Priority,
+        !VarSet, !N, !IO) :-
     (
         Term = term.variable(Var, _),
-        write_variable_anon_vars(OutStream, Ops, Var, !VarSet, !N, !IO)
+        write_variable_anon_vars(OutStream, OpTable, Var, !VarSet, !N, !IO)
     ;
         Term = term.functor(Functor, Args, _),
         ( if
@@ -368,8 +319,8 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
             Args = [ListHead, ListTail]
         then
             io.write_char(OutStream, '[', !IO),
-            write_term_arg(OutStream, Ops, ListHead, !VarSet, !N, !IO),
-            write_later_list_elements(OutStream, Ops, ListTail,
+            write_term_arg(OutStream, OpTable, ListHead, !VarSet, !N, !IO),
+            write_later_list_elements(OutStream, OpTable, ListTail,
                 !VarSet, !N, !IO),
             io.write_char(OutStream, ']', !IO)
         else if
@@ -382,7 +333,7 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
             Args = [BracedTerm]
         then
             io.write_string(OutStream, "{ ", !IO),
-            write_term_anon_vars(OutStream, Ops, BracedTerm,
+            write_term_anon_vars(OutStream, OpTable, BracedTerm,
                 !VarSet, !N, !IO),
             io.write_string(OutStream, " }", !IO)
         else if
@@ -390,8 +341,8 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
             Args = [BracedHead | BracedTail]
         then
             io.write_char(OutStream, '{', !IO),
-            write_term_arg(OutStream, Ops, BracedHead, !VarSet, !N, !IO),
-            write_term_later_args(OutStream, Ops, BracedTail,
+            write_term_arg(OutStream, OpTable, BracedHead, !VarSet, !N, !IO),
+            write_term_later_args(OutStream, OpTable, BracedTail,
                 !VarSet, !N, !IO),
             io.write_char(OutStream, '}', !IO)
         else if
@@ -401,43 +352,46 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
             Functor = term.atom(""),
             Args = [term.variable(Var, _), FirstArg | OtherArgs]
         then
-            write_variable_anon_vars(OutStream, Ops, Var, !VarSet, !N, !IO),
+            write_variable_anon_vars(OutStream, OpTable, Var,
+                !VarSet, !N, !IO),
             io.write_char(OutStream, '(', !IO),
-            write_term_arg(OutStream, Ops, FirstArg, !VarSet, !N, !IO),
-            write_term_later_args(OutStream, Ops, OtherArgs, !VarSet, !N, !IO),
+            write_term_arg(OutStream, OpTable, FirstArg, !VarSet, !N, !IO),
+            write_term_later_args(OutStream, OpTable, OtherArgs,
+                !VarSet, !N, !IO),
             io.write_char(OutStream, ')', !IO)
         else if
             Args = [PrefixArg],
             Functor = term.atom(OpName),
-            ops.lookup_prefix_op(Ops, OpName, OpPriority, OpAssoc)
+            ops.lookup_prefix_op(OpTable, OpName, OpPriority, OpGtOrGe)
         then
             maybe_write_paren(OutStream, '(', Priority, OpPriority, !IO),
             write_constant(OutStream, Functor, !IO),
             io.write_char(OutStream, ' ', !IO),
-            adjust_priority_for_assoc(OpPriority, OpAssoc, NewPriority),
-            write_term_prio_anon_vars(OutStream, Ops, PrefixArg, NewPriority,
-                !VarSet, !N, !IO),
+            NewPriority = min_priority_for_arg(OpPriority, OpGtOrGe),
+            write_term_prio_anon_vars(OutStream, OpTable, PrefixArg,
+                NewPriority, !VarSet, !N, !IO),
             maybe_write_paren(OutStream, ')', Priority, OpPriority, !IO)
         else if
             Args = [PostfixArg],
             Functor = term.atom(OpName),
-            ops.lookup_postfix_op(Ops, OpName, OpPriority, OpAssoc)
+            ops.lookup_postfix_op(OpTable, OpName, OpPriority, OpGtOrGe)
         then
             maybe_write_paren(OutStream, '(', Priority, OpPriority, !IO),
-            adjust_priority_for_assoc(OpPriority, OpAssoc, NewPriority),
-            write_term_prio_anon_vars(OutStream, Ops, PostfixArg, NewPriority,
-                !VarSet, !N, !IO),
+            NewPriority = min_priority_for_arg(OpPriority, OpGtOrGe),
+            write_term_prio_anon_vars(OutStream, OpTable, PostfixArg,
+                NewPriority, !VarSet, !N, !IO),
             io.write_char(OutStream, ' ', !IO),
             write_constant(OutStream, Functor, !IO),
             maybe_write_paren(OutStream, ')', Priority, OpPriority, !IO)
         else if
             Args = [Arg1, Arg2],
             Functor = term.atom(OpName),
-            ops.lookup_infix_op(Ops, OpName, OpPriority, LeftAssoc, RightAssoc)
+            ops.lookup_infix_op(OpTable, OpName, OpPriority,
+                LeftGtOrGe, RightGtOrGe)
         then
             maybe_write_paren(OutStream, '(', Priority, OpPriority, !IO),
-            adjust_priority_for_assoc(OpPriority, LeftAssoc, LeftPriority),
-            write_term_prio_anon_vars(OutStream, Ops, Arg1, LeftPriority,
+            LeftPriority = min_priority_for_arg(OpPriority, LeftGtOrGe),
+            write_term_prio_anon_vars(OutStream, OpTable, Arg1, LeftPriority,
                 !VarSet, !N, !IO),
             ( if OpName = "," then
                 io.write_string(OutStream, ", ", !IO)
@@ -458,33 +412,33 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
                 write_constant(OutStream, Functor, !IO),
                 io.write_char(OutStream, ' ', !IO)
             ),
-            adjust_priority_for_assoc(OpPriority, RightAssoc, RightPriority),
-            write_term_prio_anon_vars(OutStream, Ops, Arg2, RightPriority,
+            RightPriority = min_priority_for_arg(OpPriority, RightGtOrGe),
+            write_term_prio_anon_vars(OutStream, OpTable, Arg2, RightPriority,
                 !VarSet, !N, !IO),
             maybe_write_paren(OutStream, ')', Priority, OpPriority, !IO)
         else if
             Args = [Arg1, Arg2],
             Functor = term.atom(OpName),
-            ops.lookup_binary_prefix_op(Ops, OpName, OpPriority,
-                FirstAssoc, SecondAssoc)
+            ops.lookup_binary_prefix_op(OpTable, OpName, OpPriority,
+                FirstGtOrGe, SecondGtOrGe)
         then
             maybe_write_paren(OutStream, '(', Priority, OpPriority, !IO),
             write_constant(OutStream, Functor, !IO),
             io.write_char(OutStream, ' ', !IO),
-            adjust_priority_for_assoc(OpPriority, FirstAssoc, FirstPriority),
-            write_term_prio_anon_vars(OutStream, Ops, Arg1, FirstPriority,
+            FirstPriority = min_priority_for_arg(OpPriority, FirstGtOrGe),
+            write_term_prio_anon_vars(OutStream, OpTable, Arg1, FirstPriority,
                 !VarSet, !N, !IO),
             io.write_char(OutStream, ' ', !IO),
-            adjust_priority_for_assoc(OpPriority, SecondAssoc, SecondPriority),
-            write_term_prio_anon_vars(OutStream, Ops, Arg2, SecondPriority,
+            SecondPriority = min_priority_for_arg(OpPriority, SecondGtOrGe),
+            write_term_prio_anon_vars(OutStream, OpTable, Arg2, SecondPriority,
                 !VarSet, !N, !IO),
             maybe_write_paren(OutStream, ')', Priority, OpPriority, !IO)
         else
             ( if
                 Args = [],
                 Functor = term.atom(Op),
-                ops.lookup_op(Ops, Op),
-                Priority =< ops.max_priority(Ops)
+                ops.is_op(OpTable, Op),
+                priority_ge(Priority, ops.loosest_op_priority(OpTable))
             then
                 io.write_char(OutStream, '(', !IO),
                 write_constant(OutStream, Functor, !IO),
@@ -496,8 +450,9 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
             (
                 Args = [X | Xs],
                 io.write_char(OutStream, '(', !IO),
-                write_term_arg(OutStream, Ops, X, !VarSet, !N, !IO),
-                write_term_later_args(OutStream, Ops, Xs, !VarSet, !N, !IO),
+                write_term_arg(OutStream, OpTable, X, !VarSet, !N, !IO),
+                write_term_later_args(OutStream, OpTable, Xs,
+                    !VarSet, !N, !IO),
                 io.write_char(OutStream, ')', !IO)
             ;
                 Args = []
@@ -505,49 +460,51 @@ write_term_prio_anon_vars(OutStream, Ops, Term, Priority, !VarSet, !N, !IO) :-
         )
     ).
 
-:- pred write_term_arg(io.text_output_stream::in, Ops::in,
+:- pred write_term_arg(io.text_output_stream::in, OpTable::in,
     term(T)::in, varset(T)::in, varset(T)::out, int::in, int::out,
-    io::di, io::uo) is det <= op_table(Ops).
+    io::di, io::uo) is det <= op_table(OpTable).
 
-write_term_arg(OutStream, Ops, Term, !VarSet, !N, !IO) :-
-    write_term_prio_anon_vars(OutStream, Ops, Term, ops.arg_priority(Ops),
+write_term_arg(OutStream, OpTable, Term, !VarSet, !N, !IO) :-
+    write_term_prio_anon_vars(OutStream, OpTable, Term,
+    ops.arg_priority(OpTable),
         !VarSet, !N, !IO).
 
     % Write the remaining arguments.
     %
-:- pred write_term_later_args(io.text_output_stream::in, Ops::in,
+:- pred write_term_later_args(io.text_output_stream::in, OpTable::in,
     list(term(T))::in, varset(T)::in, varset(T)::out, int::in, int::out,
-    io::di, io::uo) is det <= op_table(Ops).
+    io::di, io::uo) is det <= op_table(OpTable).
 
 write_term_later_args(_, _, [], !VarSet, !N, !IO).
-write_term_later_args(OutStream, Ops, [X | Xs], !VarSet, !N, !IO) :-
+write_term_later_args(OutStream, OpTable, [X | Xs], !VarSet, !N, !IO) :-
     io.write_string(OutStream, ", ", !IO),
-    write_term_arg(OutStream, Ops, X, !VarSet, !N, !IO),
-    write_term_later_args(OutStream, Ops, Xs, !VarSet, !N, !IO).
+    write_term_arg(OutStream, OpTable, X, !VarSet, !N, !IO),
+    write_term_later_args(OutStream, OpTable, Xs, !VarSet, !N, !IO).
 
-:- pred write_later_list_elements(io.text_output_stream::in, Ops::in,
+:- pred write_later_list_elements(io.text_output_stream::in, OpTable::in,
     term(T)::in, varset(T)::in, varset(T)::out, int::in, int::out,
-    io::di, io::uo) is det <= op_table(Ops).
+    io::di, io::uo) is det <= op_table(OpTable).
 
-write_later_list_elements(OutStream, Ops, Term, !VarSet, !N, !IO) :-
+write_later_list_elements(OutStream, OpTable, Term, !VarSet, !N, !IO) :-
     ( if
         Term = term.variable(Var, _),
         varset.search_var(!.VarSet, Var, Value)
     then
-        write_later_list_elements(OutStream, Ops, Value, !VarSet, !N, !IO)
+        write_later_list_elements(OutStream, OpTable, Value, !VarSet, !N, !IO)
     else if
         Term = term.functor(term.atom("[|]"), [ListHead, ListTail], _)
     then
         io.write_string(OutStream, ", ", !IO),
-        write_term_arg(OutStream, Ops, ListHead, !VarSet, !N, !IO),
-        write_later_list_elements(OutStream, Ops, ListTail, !VarSet, !N, !IO)
+        write_term_arg(OutStream, OpTable, ListHead, !VarSet, !N, !IO),
+        write_later_list_elements(OutStream, OpTable, ListTail,
+            !VarSet, !N, !IO)
     else if
         Term = term.functor(term.atom("[]"), [], _)
     then
         true
     else
         io.write_string(OutStream, " | ", !IO),
-        write_term_anon_vars(OutStream, Ops, Term, !VarSet, !N, !IO)
+        write_term_anon_vars(OutStream, OpTable, Term, !VarSet, !N, !IO)
     ).
 
     % Succeeds iff outputting the given term would start with a digit.
@@ -651,15 +608,15 @@ write_variable(Var, VarSet, !IO) :-
     write_variable(OutStream, Var, VarSet, !IO).
 
 write_variable(OutStream, Var, VarSet, !IO) :-
-    io.get_op_table(Ops, !IO),
-    term_io.write_variable_with_op_table(OutStream, Ops, Var, VarSet, !IO).
+    OpTable = init_mercury_op_table,
+    term_io.write_variable_with_op_table(OutStream, OpTable, Var, VarSet, !IO).
 
-write_variable_with_op_table(Ops, Var, VarSet, !IO) :-
+write_variable_with_op_table(OpTable, Var, VarSet, !IO) :-
     io.output_stream(OutStream, !IO),
-    write_variable_with_op_table(OutStream, Ops, Var, VarSet, !IO).
+    write_variable_with_op_table(OutStream, OpTable, Var, VarSet, !IO).
 
-write_variable_with_op_table(OutStream, Ops, Var, VarSet, !IO) :-
-    write_variable_anon_vars(OutStream, Ops, Var, VarSet, _, 0, _, !IO).
+write_variable_with_op_table(OutStream, OpTable, Var, VarSet, !IO) :-
+    write_variable_anon_vars(OutStream, OpTable, Var, VarSet, _, 0, _, !IO).
 
     % Write a variable.
     %
@@ -682,13 +639,13 @@ write_variable_with_op_table(OutStream, Ops, Var, VarSet, !IO) :-
     % That infrastructure is the threading of the (as yet unused)
     % !N state variables through the code that writes terms.
     %
-:- pred write_variable_anon_vars(io.text_output_stream::in, Ops::in,
+:- pred write_variable_anon_vars(io.text_output_stream::in, OpTable::in,
     var(T)::in, varset(T)::in, varset(T)::out, int::in, int::out,
-    io::di, io::uo) is det <= op_table(Ops).
+    io::di, io::uo) is det <= op_table(OpTable).
 
-write_variable_anon_vars(OutStream, Ops, Var, !VarSet, !N, !IO) :-
+write_variable_anon_vars(OutStream, OpTable, Var, !VarSet, !N, !IO) :-
     ( if varset.search_var(!.VarSet, Var, Value) then
-        write_term_anon_vars(OutStream, Ops, Value, !VarSet, !N, !IO)
+        write_term_anon_vars(OutStream, OpTable, Value, !VarSet, !N, !IO)
     else if varset.search_name(!.VarSet, Var, Name) then
         io.write_string(OutStream, Name, !IO)
     else
@@ -983,7 +940,7 @@ is_mercury_punctuation_char(']').
 is_mercury_punctuation_char('^').
 is_mercury_punctuation_char('_').
 is_mercury_punctuation_char('`').
-% Codpoints in 0x7b..0x7e.
+% Codepoints in 0x7b..0x7e.
 is_mercury_punctuation_char('{').
 is_mercury_punctuation_char('|').
 is_mercury_punctuation_char('~').

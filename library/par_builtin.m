@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=8 sw=4 sts=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2006-2011 The University of Melbourne.
-% Copyright (C) 2014-2018 The Mercury team.
+% Copyright (C) 2014-2018, 2020, 2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -10,7 +10,7 @@
 % Main authors: wangp, pbone.
 % Stability: low.
 %
-% This file is automatically imported, as if via `use_module', into every
+% This file is automatically imported, as if via ":- use_module", into every
 % module in lowlevel parallel grades. It holds the builtin procedures
 % that the compiler generates implicit calls to when implementing parallel
 % conjunctions.
@@ -192,7 +192,7 @@
 
 %---------------------------------------------------------------------------%
 
-    % `wait_resume' is the piece of code we jump to when a thread suspended
+    % wait_resume is the piece of code we jump to when a thread suspended
     % on a future resumes after the future is signalled.
     %
 :- pragma foreign_decl("C",

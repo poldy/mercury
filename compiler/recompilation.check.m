@@ -73,21 +73,23 @@
                                     % type pred_id.
 :- import_module libs.options.
 :- import_module libs.timestamp.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.file_kind.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.item_util.
+:- import_module parse_tree.module_baggage.
 :- import_module parse_tree.module_cmds.
-:- import_module parse_tree.module_imports.
 :- import_module parse_tree.parse_error.
 :- import_module parse_tree.prog_item.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_util.
+:- import_module parse_tree.write_error_spec.
 :- import_module recompilation.used_file.
 
 :- import_module assoc_list.
 :- import_module bool.
 :- import_module int.
+:- import_module io.file.
 :- import_module map.
 :- import_module maybe.
 :- import_module one_or_more.
@@ -261,40 +263,48 @@ should_recompile_3(Globals, UsedFile, IsSubModule, FindTargetFiles,
     ;
         IsSubModule = is_not_inline_submodule,
         % If the module has changed, recompile.
+        MaybeProgressStream = maybe.no,
         ModuleName = !.Info ^ rci_module_name,
-        read_module_src(Globals, rrm_std(ModuleName),
-            do_not_ignore_errors, do_search, ModuleName, [], FileName,
-            dont_read_module_if_match(RecordedTimestamp),
-            MaybeNewTimestamp, ParseTree, Specs, Errors, !IO),
-        ( if
-            MaybeNewTimestamp = yes(NewTimestamp),
-            NewTimestamp \= RecordedTimestamp
-        then
-            record_read_file_src(ModuleName, FileName,
-                ModuleTimestamp ^ mts_timestamp := NewTimestamp,
-                ParseTree, Specs, Errors, !Info),
-            !Info ^ rci_modules_to_recompile := all_modules,
-            ChangedReason = recompile_for_module_changed(FileName),
-            record_recompilation_reason(ChangedReason,
-                MaybeStoppingReason0, !Info)
-        else if
-            ( set.is_non_empty(Errors)
-            ; MaybeNewTimestamp = no
+        read_module_src(MaybeProgressStream, Globals, rrm_std(ModuleName),
+            do_not_ignore_errors, do_search, ModuleName, [],
+            dont_read_module_if_match(RecordedTimestamp), HaveReadSrc, !IO),
+        (
+            HaveReadSrc = have_not_read_module(FileName, Errors),
+            % If we did not read the source file because its timestamp
+            % matched RecordedTimestamp, then there will be no errors.
+            ( if there_are_some_errors(Errors) then
+                MaybeStoppingReason0 =
+                    yes(read_module_error_stopping_reason(FileName, Errors))
+            else
+                MaybeStoppingReason0 = no
             )
-        then
-            % We are throwing away Specs, even though some of its elements
-            % could illuminate the cause of the problem. XXX Is this OK?
-            Pieces = [words("error reading file"), quote(FileName),
-                suffix("."), nl],
-            FileReason = recompile_for_file_error(FileName, Pieces),
-            % XXX Some of the errors in Errors could be errors other than
-            % syntax errors.
-            MaybeStoppingReason0 = yes(FileReason)
-        else
-            % We are throwing away Specs. Since it should be a repeat
-            % of the errors we saw when the file was first read in,
-            % this should be OK.
-            MaybeStoppingReason0 = no
+        ;
+            HaveReadSrc = have_read_module(FileName, MaybeNewTimestamp,
+                ParseTreeSrc, Errors),
+            ( if
+                MaybeNewTimestamp = yes(NewTimestamp),
+                NewTimestamp \= RecordedTimestamp
+            then
+                record_read_file_src(ModuleName, FileName,
+                    ModuleTimestamp ^ mts_timestamp := NewTimestamp,
+                    ParseTreeSrc, Errors, !Info),
+                !Info ^ rci_modules_to_recompile := all_modules,
+                ChangedReason = recompile_for_module_changed(FileName),
+                record_recompilation_reason(ChangedReason,
+                    MaybeStoppingReason0, !Info)
+            else if
+                ( there_are_some_errors(Errors)
+                ; MaybeNewTimestamp = no
+                )
+            then
+                MaybeStoppingReason0 =
+                    yes(read_module_error_stopping_reason(FileName, Errors))
+            else
+                % We are throwing away ModuleErrors. Since it should be
+                % a repeat of the errors we saw when the file was first
+                % read in, this should be OK.
+                MaybeStoppingReason0 = no
+            )
         )
     ),
     (
@@ -312,6 +322,17 @@ should_recompile_3(Globals, UsedFile, IsSubModule, FindTargetFiles,
             MaybeStoppingReason1, MaybeStoppingReason, !Info, !IO)
     ).
 
+:- func read_module_error_stopping_reason(file_name, read_module_errors)
+    = recompile_reason.
+
+read_module_error_stopping_reason(FileName, _Errors) = FileReason :-
+    % We are throwing away the error_specs in _Errors, even though they
+    % could illuminate the cause of the problem. XXX Why is this OK?
+    Pieces = [words("error reading file"), quote(FileName), suffix("."), nl],
+    % XXX Some of the errors in Errors could be errors other than
+    % syntax errors.
+    FileReason = recompile_for_file_error(FileName, Pieces).
+
 :- pred require_recompilation_if_not_up_to_date(timestamp::in, file_name::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out,
@@ -323,7 +344,7 @@ require_recompilation_if_not_up_to_date(RecordedTimestamp, TargetFile,
         !.MaybeStoppingReason = yes(_)
     ;
         !.MaybeStoppingReason = no,
-        io.file_modification_time(TargetFile, TargetModTimeResult, !IO),
+        io.file.file_modification_time(TargetFile, TargetModTimeResult, !IO),
         ( if
             TargetModTimeResult = ok(TargetModTime),
             compare(TargetModTimeCompare, time_t_to_timestamp(TargetModTime),
@@ -358,6 +379,74 @@ check_imported_modules(Globals, [HeadUsedModule | TailUsedModules],
             !MaybeStoppingReason, !Info, !IO)
     ).
 
+%---------------------------------------------------------------------------%
+
+:- typeclass check_imported_module_int_file(PT) where [
+    pred cim_search_mapN(have_read_module_map(PT)::in,
+        module_name::in, have_read_module(PT)::out) is semidet,
+    pred cim_read_module_intN(globals::in, read_reason_msg::in,
+        maybe_ignore_errors::in, maybe_search::in, module_name::in,
+        read_module_and_timestamps::in, have_read_module(PT)::out,
+        io::di, io::uo) is det,
+    pred cim_record_read_file_intN(module_name::in, file_name::in,
+        module_timestamp::in, PT::in, read_module_errors::in,
+        recompilation_check_info::in, recompilation_check_info::out) is det,
+    pred cim_get_version_numbersN(PT::in,
+        module_item_version_numbers::out) is semidet,
+    pred cim_get_ambiguity_checkablesN(PT::in,
+        ambiguity_checkables::out) is det
+].
+
+:- instance check_imported_module_int_file(parse_tree_int0) where [
+    ( cim_search_mapN(HRMM, ModuleName, HaveReadModule) :-
+        map.search(HRMM, ModuleName, HaveReadModule)
+    ),
+    pred(cim_read_module_intN/9) is read_module_int0_no_stream,
+    pred(cim_record_read_file_intN/7) is record_read_file_int0,
+    ( cim_get_version_numbersN(PT, VN) :-
+        PT ^ pti0_maybe_version_numbers = version_numbers(VN)
+    ),
+    pred(cim_get_ambiguity_checkablesN/2) is get_ambiguity_checkables_int0
+].
+
+:- instance check_imported_module_int_file(parse_tree_int1) where [
+    ( cim_search_mapN(HRMM, ModuleName, HaveReadModule) :-
+        map.search(HRMM, ModuleName, HaveReadModule)
+    ),
+    pred(cim_read_module_intN/9) is read_module_int1_no_stream,
+    pred(cim_record_read_file_intN/7) is record_read_file_int1,
+    ( cim_get_version_numbersN(PT, VN) :-
+        PT ^ pti1_maybe_version_numbers = version_numbers(VN)
+    ),
+    pred(cim_get_ambiguity_checkablesN/2) is get_ambiguity_checkables_int1
+].
+
+:- instance check_imported_module_int_file(parse_tree_int2) where [
+    ( cim_search_mapN(HRMM, ModuleName, HaveReadModule) :-
+        map.search(HRMM, ModuleName, HaveReadModule)
+    ),
+    pred(cim_read_module_intN/9) is read_module_int2_no_stream,
+    pred(cim_record_read_file_intN/7) is record_read_file_int2,
+    ( cim_get_version_numbersN(PT, VN) :-
+        PT ^ pti2_maybe_version_numbers = version_numbers(VN)
+    ),
+    pred(cim_get_ambiguity_checkablesN/2) is get_ambiguity_checkables_int2
+].
+
+:- instance check_imported_module_int_file(parse_tree_int3) where [
+    ( cim_search_mapN(HRMM, ModuleName, HaveReadModule) :-
+        map.search(HRMM, ModuleName, HaveReadModule)
+    ),
+    pred(cim_read_module_intN/9) is read_module_int3_no_stream,
+    pred(cim_record_read_file_intN/7) is record_read_file_int3,
+    ( cim_get_version_numbersN(_PT, _VN) :-
+        fail
+    ),
+    pred(cim_get_ambiguity_checkablesN/2) is get_ambiguity_checkables_int3
+].
+
+%---------------------------------------------------------------------------%
+
     % Check whether the interface file read for a module in the last
     % compilation has changed, and if so whether the items have changed
     % in a way which should cause a recompilation.
@@ -371,7 +460,7 @@ check_imported_module(Globals, UsedModule, MaybeStoppingReason, !Info, !IO) :-
     UsedModule = recomp_used_module(ImportedModuleName, ModuleTimestamp,
         MaybeUsedVersionNumbers),
     ModuleTimestamp =
-        module_timestamp(FileKind, RecordedTimestamp, RecompAvail),
+        module_timestamp(FileKind, _RecordedTimestamp, _RecompAvail),
     (
         FileKind = fk_int(IntFileKind)
     ;
@@ -382,79 +471,116 @@ check_imported_module(Globals, UsedModule, MaybeStoppingReason, !Info, !IO) :-
         unexpected($pred, "fk_opt")
     ),
     HaveReadModuleMaps = !.Info ^ rci_have_read_module_maps,
+    (
+        IntFileKind = ifk_int0,
+        check_imported_module_intN(Globals, ImportedModuleName,
+            ModuleTimestamp, MaybeUsedVersionNumbers,
+            HaveReadModuleMaps ^ hrmm_int0, MaybeStoppingReason, !Info, !IO)
+    ;
+        IntFileKind = ifk_int1,
+        check_imported_module_intN(Globals, ImportedModuleName,
+            ModuleTimestamp, MaybeUsedVersionNumbers,
+            HaveReadModuleMaps ^ hrmm_int1, MaybeStoppingReason, !Info, !IO)
+    ;
+        IntFileKind = ifk_int2,
+        check_imported_module_intN(Globals, ImportedModuleName,
+            ModuleTimestamp, MaybeUsedVersionNumbers,
+            HaveReadModuleMaps ^ hrmm_int2, MaybeStoppingReason, !Info, !IO)
+    ;
+        IntFileKind = ifk_int3,
+        check_imported_module_intN(Globals, ImportedModuleName,
+            ModuleTimestamp, MaybeUsedVersionNumbers,
+            HaveReadModuleMaps ^ hrmm_int3, MaybeStoppingReason, !Info, !IO)
+    ).
+
+:- pred check_imported_module_intN(globals::in, module_name::in,
+    module_timestamp::in, maybe(module_item_version_numbers)::in,
+    have_read_module_map(PT)::in, maybe(recompile_reason)::out,
+    recompilation_check_info::in, recompilation_check_info::out,
+    io::di, io::uo) is det <= check_imported_module_int_file(PT).
+
+check_imported_module_intN(Globals, ImportedModuleName, ModuleTimestamp,
+        MaybeUsedVersionNumbers, HRMM, MaybeStoppingReason, !Info, !IO) :-
+    ModuleTimestamp =
+        module_timestamp(_FileKind, RecordedTimestamp, _RecompAvail),
     ( if
         % If we are checking a nested submodule, don't re-read interface files
         % read for other modules checked during this compilation.
         % XXX We restrict this optimization to nested submodules?
         !.Info ^ rci_is_inline_sub_module = yes,
-        find_read_module_some_int(HaveReadModuleMaps,
-            ImportedModuleName, IntFileKind,
-            do_return_timestamp, FileNamePrime, MaybeNewTimestampPrime,
-            ParseTreeSomeIntPrime, SpecsPrime, ErrorsPrime)
+        cim_search_mapN(HRMM, ImportedModuleName, HaveReadModuleIntNPrime)
     then
         Recorded = bool.yes,
-        FileName = FileNamePrime,
-        MaybeNewTimestamp = MaybeNewTimestampPrime,
-        ParseTreeSomeInt = ParseTreeSomeIntPrime,
-        Specs = SpecsPrime,
-        Errors = ErrorsPrime
+        HaveReadModuleIntN = HaveReadModuleIntNPrime
     else
         Recorded = bool.no,
-        read_module_some_int(Globals, rrm_std(ImportedModuleName),
-            do_not_ignore_errors, do_search, ImportedModuleName, IntFileKind,
-            FileName, dont_read_module_if_match(RecordedTimestamp),
-            MaybeNewTimestamp, ParseTreeSomeInt, Specs, Errors, !IO)
+        cim_read_module_intN(Globals, rrm_std(ImportedModuleName),
+            do_not_ignore_errors, do_search, ImportedModuleName,
+            dont_read_module_if_match(RecordedTimestamp),
+            HaveReadModuleIntN, !IO)
     ),
-    ( if set.is_empty(Errors) then
-        ( if
+    (
+        HaveReadModuleIntN = have_not_read_module(FileName, Errors),
+        % If we did not read the interface file because its timestamp
+        % matched RecordedTimestamp, then there will be no errors.
+        ( if there_are_some_errors(Errors) then
+            MaybeStoppingReason =
+                yes(read_module_error_stopping_reason(FileName, Errors))
+        else
+            MaybeStoppingReason = no
+        )
+    ;
+        HaveReadModuleIntN = have_read_module(FileName, MaybeNewTimestamp,
+            ParseTreeIntN, Errors),
+        ( if there_are_some_errors(Errors) then
+            % We are throwing away Specs, even though some of its elements
+            % could illuminate the cause of the problem. XXX Is this OK?
+            MaybeStoppingReason =
+                yes(read_module_error_stopping_reason(FileName, Errors))
+        else if
             MaybeNewTimestamp = yes(NewTimestamp),
             NewTimestamp \= RecordedTimestamp
         then
             (
                 Recorded = no,
-                record_read_file_some_int(ImportedModuleName, FileName,
+                cim_record_read_file_intN(ImportedModuleName, FileName,
                     ModuleTimestamp ^ mts_timestamp := NewTimestamp,
-                    ParseTreeSomeInt, Specs, Errors, !Info)
+                    ParseTreeIntN, Errors, !Info)
             ;
                 Recorded = yes
             ),
             ( if
                 MaybeUsedVersionNumbers = yes(UsedVersionNumbers),
-                get_module_item_version_numbers_from_parse_tree_some_int(
-                    ParseTreeSomeInt, VersionNumbers)
+                cim_get_version_numbersN(ParseTreeIntN, VersionNumbers)
             then
-                check_module_used_items(ImportedModuleName, RecompAvail,
-                    RecordedTimestamp, UsedVersionNumbers, VersionNumbers,
-                    ParseTreeSomeInt, MaybeStoppingReason, !Info)
+                cim_get_ambiguity_checkablesN(ParseTreeIntN, Checkables),
+                check_module_used_items(ImportedModuleName,
+                    ModuleTimestamp, UsedVersionNumbers, VersionNumbers,
+                    Checkables, MaybeStoppingReason, !Info)
             else
                 Reason = recompile_for_module_changed(FileName),
-                record_recompilation_reason(Reason, MaybeStoppingReason, !Info)
+                record_recompilation_reason(Reason, MaybeStoppingReason,
+                    !Info)
             )
         else
-            % We are throwing away Specs. Since it should be a repeat of the
-            % errors we saw when the file was first read in, this should be OK.
+            % We are throwing away the error_specs in Errors. Since it
+            % should be a repeat of the errors we saw when the file
+            % was first read in, this should be OK.
             MaybeStoppingReason = no
         )
-    else
-        % We are throwing away Specs, even though some of its elements
-        % could illuminate the cause of the problem. XXX Is this OK?
-        Pieces = [words("error reading file"), quote(FileName),
-            suffix("."), nl],
-        Reason = recompile_for_file_error(FileName, Pieces),
-        MaybeStoppingReason = yes(Reason)
     ).
 
 %---------------------------------------------------------------------------%
 
-:- pred check_module_used_items(module_name::in, recomp_avail::in,
-    timestamp::in,
+:- pred check_module_used_items(module_name::in, module_timestamp::in,
     module_item_version_numbers::in, module_item_version_numbers::in,
-    parse_tree_some_int::in, maybe(recompile_reason)::out,
+    ambiguity_checkables::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
 
-check_module_used_items(ModuleName, RecompAvail, OldTimestamp,
-        UsedVersionNumbers, NewVersionNumbers, ParseTreeSomeInt,
+check_module_used_items(ModuleName, OldModuleTimestamp,
+        UsedVersionNumbers, NewVersionNumbers, ParseTreeCheckables,
         !:MaybeStoppingReason, !Info) :-
+    OldModuleTimestamp = module_timestamp(_FK, OldTimestamp, RecompAvail),
     UsedVersionNumbers =
         module_item_version_numbers(UsedTypeNameMap, UsedTypeDefnMap,
             UsedInstMap, UsedModeMap, UsedClassMap, UsedInstanceMap,
@@ -466,28 +592,26 @@ check_module_used_items(ModuleName, RecompAvail, OldTimestamp,
 
     !:MaybeStoppingReason = no,
     % Check whether any of the items which were used have changed.
-    check_name_arity_version_numbers(ModuleName, type_name_item,
+    check_name_arity_version_numbers(ModuleName, recomp_type_name,
         UsedTypeNameMap, NewTypeNameMap, !MaybeStoppingReason, !Info),
-    check_name_arity_version_numbers(ModuleName, type_defn_item,
+    check_name_arity_version_numbers(ModuleName, recomp_type_defn,
         UsedTypeDefnMap, NewTypeDefnMap, !MaybeStoppingReason, !Info),
-    check_name_arity_version_numbers(ModuleName, inst_item,
+    check_name_arity_version_numbers(ModuleName, recomp_inst,
         UsedInstMap, NewInstMap, !MaybeStoppingReason, !Info),
-    check_name_arity_version_numbers(ModuleName, mode_item,
+    check_name_arity_version_numbers(ModuleName, recomp_mode,
         UsedModeMap, NewModeMap, !MaybeStoppingReason, !Info),
-    check_name_arity_version_numbers(ModuleName, typeclass_item,
+    check_name_arity_version_numbers(ModuleName, recomp_typeclass,
         UsedClassMap, NewClassMap, !MaybeStoppingReason, !Info),
     check_item_name_version_numbers(ModuleName,
         UsedInstanceMap, NewInstanceMap, !MaybeStoppingReason, !Info),
-    check_name_arity_version_numbers(ModuleName, predicate_item,
+    check_name_arity_version_numbers(ModuleName, recomp_predicate,
         UsedPredMap, NewPredMap, !MaybeStoppingReason, !Info),
-    check_name_arity_version_numbers(ModuleName, function_item,
+    check_name_arity_version_numbers(ModuleName, recomp_function,
         UsedFuncMap, NewFuncMap, !MaybeStoppingReason, !Info),
 
     % Check whether added or modified items could cause name resolution
     % ambiguities with items which were used.
-    get_ambiguity_checkables_parse_tree_some_int(ParseTreeSomeInt,
-        Checkables),
-    Checkables = ambiguity_checkables(ItemTypeDefns,
+    ParseTreeCheckables = ambiguity_checkables(ItemTypeDefns,
         ItemInstDefns, ItemModeDefns, ItemTypeClasses, ItemPredDecls),
     check_items_for_ambiguities(
         check_type_defn_info_for_ambiguities(RecompAvail, OldTimestamp,
@@ -533,14 +657,15 @@ check_module_used_items(ModuleName, RecompAvail, OldTimestamp,
         )
     ).
 
-:- func make_item_id(module_name, item_type, name_arity) = item_id.
+:- func make_item_id(module_name, recomp_item_type, name_arity)
+    = recomp_item_id.
 
 make_item_id(Module, ItemType, name_arity(Name, Arity)) =
-    item_id(ItemType, item_name(qualified(Module, Name), Arity)).
+    recomp_item_id(ItemType, recomp_item_name(qualified(Module, Name), Arity)).
 
 %---------------------------------------------------------------------------%
 
-:- pred check_name_arity_version_numbers(module_name::in, item_type::in,
+:- pred check_name_arity_version_numbers(module_name::in, recomp_item_type::in,
     name_arity_version_map::in, name_arity_version_map::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
@@ -557,7 +682,7 @@ check_name_arity_version_numbers(ModuleName, ItemType,
             UsedVersionMap, !MaybeStoppingReason, !Info)
     ).
 
-:- pred check_name_arity_version_number(module_name::in, item_type::in,
+:- pred check_name_arity_version_number(module_name::in, recomp_item_type::in,
     name_arity_version_map::in, name_arity::in, version_number::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
@@ -585,7 +710,7 @@ check_name_arity_version_number(ModuleName, ItemType, NewVersionMap,
     ).
 
 :- pred check_item_name_version_numbers(module_name::in,
-    item_name_version_map::in, item_name_version_map::in,
+    recomp_item_name_version_map::in, recomp_item_name_version_map::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
 
@@ -596,7 +721,7 @@ check_item_name_version_numbers(ModuleName, UsedVersionMap, NewVersionMap,
         UsedVersionMap, !MaybeStoppingReason, !Info).
 
 :- pred check_item_name_version_number(module_name::in,
-    item_name_version_map::in, item_name::in, version_number::in,
+    recomp_item_name_version_map::in, recomp_item_name::in, version_number::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
 
@@ -659,7 +784,7 @@ check_type_defn_info_for_ambiguities(RecompAvail, OldTimestamp, VersionNumbers,
         _, _, _),
     list.length(TypeParams, TypeArity),
     check_for_simple_item_ambiguity(RecompAvail, OldTimestamp,
-        VersionNumbers ^ mivn_type_names, type_name_item,
+        VersionNumbers ^ mivn_type_names, recomp_type_name,
         TypeSymName, TypeArity, NeedsCheck, !MaybeStoppingReason, !Info),
     (
         NeedsCheck = yes,
@@ -684,7 +809,7 @@ check_inst_defn_info_for_ambiguities(RecompAvail, OldTimestamp, VersionNumbers,
         _MaybeForTypeCtor, _, _, _, _),
     list.length(InstParams, InstArity),
     check_for_simple_item_ambiguity(RecompAvail, OldTimestamp,
-        VersionNumbers ^ mivn_insts, inst_item, InstSymName, InstArity,
+        VersionNumbers ^ mivn_insts, recomp_inst, InstSymName, InstArity,
         _NeedsCheck, !MaybeStoppingReason, !Info).
 
 %---------------------%
@@ -699,7 +824,7 @@ check_mode_defn_info_for_ambiguities(RecompAvail, OldTimestamp, VersionNumbers,
     ItemModeDefn = item_mode_defn_info(ModeSymName, ModeParams, _, _, _, _),
     list.length(ModeParams, ModeArity),
     check_for_simple_item_ambiguity(RecompAvail, OldTimestamp,
-        VersionNumbers ^ mivn_modes, mode_item, ModeSymName, ModeArity,
+        VersionNumbers ^ mivn_modes, recomp_mode, ModeSymName, ModeArity,
         _NeedsCheck, !MaybeStoppingReason, !Info).
 
 %---------------------%
@@ -715,7 +840,7 @@ check_typeclass_info_for_ambiguities(RecompAvail, OldTimestamp, VersionNumbers,
         _, _, Interface, _, _, _),
     list.length(TypeClassParams, TypeClassArity),
     check_for_simple_item_ambiguity(RecompAvail, OldTimestamp,
-        VersionNumbers ^ mivn_typeclasses, typeclass_item,
+        VersionNumbers ^ mivn_typeclasses, recomp_typeclass,
         TypeClassSymName, TypeClassArity,
         NeedsCheck, !MaybeStoppingReason, !Info),
     ( if
@@ -765,8 +890,8 @@ check_pred_decl_info_for_ambiguities(RecompAvail, OldTimestamp,
 
 %---------------------------------------------------------------------------%
 
-:- pred check_for_simple_item_ambiguity(recomp_avail::in,
-    timestamp::in, name_arity_version_map::in, item_type::in(simple_item),
+:- pred check_for_simple_item_ambiguity(recomp_avail::in, timestamp::in,
+    name_arity_version_map::in, recomp_item_type::in(recomp_simple),
     sym_name::in, arity::in, bool::out,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
@@ -788,19 +913,19 @@ check_for_simple_item_ambiguity(RecompAvail, UsedFileTimestamp,
             NeedsCheck = yes,
             UsedItems = !.Info ^ rci_used_items,
             (
-                ItemType = type_name_item,
+                ItemType = recomp_type_name,
                 UsedItemMap = UsedItems ^ rui_type_names
             ;
-                ItemType = type_defn_item,
+                ItemType = recomp_type_defn,
                 unexpected($pred, "type_body_item")
             ;
-                ItemType = inst_item,
+                ItemType = recomp_inst,
                 UsedItemMap = UsedItems ^ rui_insts
             ;
-                ItemType = mode_item,
+                ItemType = recomp_mode,
                 UsedItemMap = UsedItems ^ rui_modes
             ;
-                ItemType = typeclass_item,
+                ItemType = recomp_typeclass,
                 UsedItemMap = UsedItems ^ rui_typeclasses
             ),
             NameArity = name_arity(unqualify_name(SymName), Arity),
@@ -817,7 +942,7 @@ check_for_simple_item_ambiguity(RecompAvail, UsedFileTimestamp,
         )
     ).
 
-:- pred check_for_simple_item_ambiguity_2(item_type::in,
+:- pred check_for_simple_item_ambiguity_2(recomp_item_type::in,
     recomp_avail::in, sym_name::in, arity::in,
     module_qualifier::in, module_name::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
@@ -848,10 +973,12 @@ check_for_simple_item_ambiguity_2(ItemType, RecompAvail, SymName, Arity,
             partial_sym_name_matches_full(QualifiedName, SymName),
             not SymName = qualified(OldMatchingModuleName, _)
         then
-            OldMatchingName = qualified(OldMatchingModuleName, Name),
+            OldMatchingSymName = qualified(OldMatchingModuleName, Name),
+            ItemName = recomp_item_name(SymName, Arity),
+            OldItemName = recomp_item_name(OldMatchingSymName, Arity),
             Reason = recompile_for_item_ambiguity(
-                item_id(ItemType, item_name(SymName, Arity)),
-                [item_id(ItemType, item_name(OldMatchingName, Arity))]),
+                recomp_item_id(ItemType, ItemName),
+                [recomp_item_id(ItemType, OldItemName)]),
             record_recompilation_reason(Reason, !:MaybeStoppingReason, !Info)
         else
             true
@@ -884,19 +1011,19 @@ check_for_pred_or_func_item_ambiguity(NeedsCheck, RecompAvail, OldTimestamp,
         !.MaybeStoppingReason = yes(_)
     ;
         !.MaybeStoppingReason = no,
-        list.length(Args, PredFormArity),
+        list.length(Args, PredFormArityInt),
         (
             WithType = no,
             % XXX Given that we use pred_form_arity elsewhere
             % when we process resolved_functor_pred_or_func,
             % setting Arity here to the user_arity looks to be a bug.
             % Unfortunately, ...
-            adjust_func_arity(PredOrFunc, UserArity, PredFormArity)
+            adjust_func_arity(PredOrFunc, UserArityInt, PredFormArityInt)
         ;
             WithType = yes(_),
             % ... in the presence of with_type, we have no idea what even
             % the actual pred_form_arity is.
-            UserArity = PredFormArity
+            UserArityInt = PredFormArityInt
         ),
         ( if
             (
@@ -906,30 +1033,30 @@ check_for_pred_or_func_item_ambiguity(NeedsCheck, RecompAvail, OldTimestamp,
                     PredOrFunc = pf_predicate,
                     PredMap = VersionNumbers ^ mivn_predicates,
                     item_is_new_or_changed(OldTimestamp, PredMap,
-                        SymName, UserArity)
+                        SymName, UserArityInt)
                 ;
                     PredOrFunc = pf_function,
                     FuncMap = VersionNumbers ^ mivn_functions,
                     item_is_new_or_changed(OldTimestamp, FuncMap,
-                        SymName, UserArity)
+                        SymName, UserArityInt)
                 )
             )
         then
             UsedItems = !.Info ^ rci_used_items,
             (
                 PredOrFunc = pf_predicate,
-                ItemType = predicate_item,
+                ItemType = recomp_predicate,
                 UsedItemMap = UsedItems ^ rui_predicates
             ;
                 PredOrFunc = pf_function,
-                ItemType = function_item,
+                ItemType = recomp_function,
                 UsedItemMap = UsedItems ^ rui_functions
             ),
             Name = unqualify_name(SymName),
             ( if map.search(UsedItemMap, Name, MatchingArityList) then
                 list.foldl2(
                     check_for_pred_or_func_item_ambiguity_1(WithType,
-                        ItemType, RecompAvail, SymName, UserArity),
+                        ItemType, RecompAvail, SymName, UserArityInt),
                     MatchingArityList, no, !:MaybeStoppingReason, !Info)
             else
                 !:MaybeStoppingReason = no
@@ -943,10 +1070,11 @@ check_for_pred_or_func_item_ambiguity(NeedsCheck, RecompAvail, OldTimestamp,
                     AritiesToMatch = match_arity_any
                 ;
                     WithType = no,
-                    AritiesToMatch = match_arity_less_than_or_equal(UserArity)
+                    AritiesToMatch =
+                        match_arity_less_than_or_equal(UserArityInt)
                 ),
                 ResolvedFunctor = resolved_functor_pred_or_func(InvPredId,
-                    PredOrFunc, ModuleName, pred_form_arity(PredFormArity)),
+                    PredOrFunc, ModuleName, pred_form_arity(PredFormArityInt)),
                 check_functor_ambiguities_by_name(RecompAvail, SymName,
                     AritiesToMatch, ResolvedFunctor,
                     !MaybeStoppingReason, !Info)
@@ -960,7 +1088,7 @@ check_for_pred_or_func_item_ambiguity(NeedsCheck, RecompAvail, OldTimestamp,
     ).
 
 :- pred check_for_pred_or_func_item_ambiguity_1(maybe(mer_type)::in,
-    item_type::in, recomp_avail::in, sym_name::in, arity::in,
+    recomp_item_type::in, recomp_avail::in, sym_name::in, arity::in,
     pair(arity, map(sym_name, set(pair(pred_id, module_name))))::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
     recompilation_check_info::in, recompilation_check_info::out) is det.
@@ -985,7 +1113,7 @@ check_for_pred_or_func_item_ambiguity_1(WithType, ItemType, RecompAvail,
         true
     ).
 
-:- pred check_for_pred_or_func_item_ambiguity_2(item_type::in,
+:- pred check_for_pred_or_func_item_ambiguity_2(recomp_item_type::in,
     recomp_avail::in, sym_name::in, arity::in, module_qualifier::in,
     set(pair(pred_id, module_name))::in,
     maybe(recompile_reason)::in, maybe(recompile_reason)::out,
@@ -1022,11 +1150,12 @@ check_for_pred_or_func_item_ambiguity_2(ItemType, RecompAvail,
             AmbiguousDecls = list.map(
                 ( func(_ - OldMatchingModule) = Item :-
                     OldMatchingName = qualified(OldMatchingModule, Name),
-                    Item = item_id(ItemType, item_name(OldMatchingName, Arity))
+                    Item = recomp_item_id(ItemType,
+                        recomp_item_name(OldMatchingName, Arity))
                 ),
                 set.to_sorted_list(OldMatchingModuleNames)),
-            Reason = recompile_for_item_ambiguity(item_id(ItemType,
-                item_name(SymName, Arity)), AmbiguousDecls),
+            Reason = recompile_for_item_ambiguity(recomp_item_id(ItemType,
+                recomp_item_name(SymName, Arity)), AmbiguousDecls),
             record_recompilation_reason(Reason, !:MaybeStoppingReason, !Info)
         else
             !:MaybeStoppingReason = no
@@ -1238,7 +1367,7 @@ check_functor_ambiguity(RecompAvail, SymName, Arity, ResolvedCtor,
                 rci_sub_modules             :: list(module_name),
                 rci_have_read_module_maps   :: have_read_module_maps,
                 rci_used_items              :: resolved_used_items,
-                rci_used_typeclasses        :: set(item_name),
+                rci_used_typeclasses        :: set(recomp_item_name),
                 rci_modules_to_recompile    :: modules_to_recompile,
                 rci_collect_all_reasons     :: bool,
                 rci_recompilation_reasons   :: list(recompile_reason)
@@ -1247,7 +1376,7 @@ check_functor_ambiguity(RecompAvail, SymName, Arity, ResolvedCtor,
 :- type recompile_reason
     --->    recompile_for_file_error(
                 file_name,
-                list(format_component)
+                list(format_piece)
             )
     ;       recompile_for_output_file_not_up_to_date(
                 file_name
@@ -1256,28 +1385,28 @@ check_functor_ambiguity(RecompAvail, SymName, Arity, ResolvedCtor,
                 file_name
             )
     ;       recompile_for_item_ambiguity(
-                item_id,                % new item.
-                list(item_id)           % ambiguous declarations.
+                recomp_item_id,                 % new item.
+                list(recomp_item_id)            % ambiguous declarations.
             )
     ;       recompile_for_functor_ambiguity(
                 sym_name,
                 arity,
-                resolved_functor,       % new item.
-                list(resolved_functor)  % ambiguous declarations.
+                resolved_functor,               % new item.
+                list(resolved_functor)          % ambiguous declarations.
             )
     ;       recompile_for_changed_item(
-                item_id
+                recomp_item_id
             )
     ;       recompile_for_removed_item(
-                item_id
+                recomp_item_id
             )
     ;       recompile_for_changed_or_added_instance(
                 module_name,
-                item_name               % class name
+                recomp_item_name                % class name
             )
     ;       recompile_for_removed_instance(
                 module_name,
-                item_name               % class name
+                recomp_item_name                % class name
             ).
 
 :- pred add_module_to_recompile(module_name::in, recompilation_check_info::in,
@@ -1293,61 +1422,79 @@ add_module_to_recompile(Module, !Info) :-
     ).
 
 :- pred record_read_file_src(module_name::in, file_name::in,
-    module_timestamp::in, parse_tree_src::in, list(error_spec)::in,
-    read_module_errors::in,
+    module_timestamp::in, parse_tree_src::in, read_module_errors::in,
     recompilation_check_info::in, recompilation_check_info::out) is det.
 
 record_read_file_src(ModuleName, FileName, ModuleTimestamp,
-        ParseTree, Specs, Errors, !Info) :-
+        ParseTree, Errors, !Info) :-
     HaveReadModuleMaps0 = !.Info ^ rci_have_read_module_maps,
     HaveReadModuleMapSrc0 = HaveReadModuleMaps0 ^ hrmm_src,
     ModuleTimestamp = module_timestamp(_, Timestamp, _),
     map.set(ModuleName,
-        have_successfully_read_module(FileName, yes(Timestamp),
-            ParseTree, Specs, Errors),
+        have_read_module(FileName, yes(Timestamp), ParseTree, Errors),
         HaveReadModuleMapSrc0, HaveReadModuleMapSrc),
     HaveReadModuleMaps =
         HaveReadModuleMaps0 ^ hrmm_src := HaveReadModuleMapSrc,
     !Info ^ rci_have_read_module_maps := HaveReadModuleMaps.
 
-:- pred record_read_file_some_int(module_name::in, file_name::in,
-    module_timestamp::in, parse_tree_some_int::in, list(error_spec)::in,
-    read_module_errors::in,
+:- pred record_read_file_int0(module_name::in, file_name::in,
+    module_timestamp::in, parse_tree_int0::in, read_module_errors::in,
     recompilation_check_info::in, recompilation_check_info::out) is det.
 
-record_read_file_some_int(ModuleName, FileName, ModuleTimestamp,
-        ParseTreeSomeInt, Specs, Errors, !Info) :-
+record_read_file_int0(ModuleName, FileName, ModuleTimestamp, ParseTreeInt0,
+        Errors, !Info) :-
     ModuleTimestamp = module_timestamp(_, Timestamp, _),
     HaveReadModuleMaps0 = !.Info ^ rci_have_read_module_maps,
-    (
-        ParseTreeSomeInt = parse_tree_some_int0(ParseTreeInt0),
-        HRMM0 = HaveReadModuleMaps0 ^ hrmm_int0,
-        ReadResult = have_successfully_read_module(FileName, yes(Timestamp),
-            ParseTreeInt0, Specs, Errors),
-        map.set(ModuleName, ReadResult, HRMM0, HRMM),
-        HaveReadModuleMaps = HaveReadModuleMaps0 ^ hrmm_int0 := HRMM
-    ;
-        ParseTreeSomeInt = parse_tree_some_int1(ParseTreeInt1),
-        HRMM0 = HaveReadModuleMaps0 ^ hrmm_int1,
-        ReadResult = have_successfully_read_module(FileName, yes(Timestamp),
-            ParseTreeInt1, Specs, Errors),
-        map.set(ModuleName, ReadResult, HRMM0, HRMM),
-        HaveReadModuleMaps = HaveReadModuleMaps0 ^ hrmm_int1 := HRMM
-    ;
-        ParseTreeSomeInt = parse_tree_some_int2(ParseTreeInt2),
-        HRMM0 = HaveReadModuleMaps0 ^ hrmm_int2,
-        ReadResult = have_successfully_read_module(FileName, yes(Timestamp),
-            ParseTreeInt2, Specs, Errors),
-        map.set(ModuleName, ReadResult, HRMM0, HRMM),
-        HaveReadModuleMaps = HaveReadModuleMaps0 ^ hrmm_int2 := HRMM
-    ;
-        ParseTreeSomeInt = parse_tree_some_int3(ParseTreeInt3),
-        HRMM0 = HaveReadModuleMaps0 ^ hrmm_int3,
-        ReadResult = have_successfully_read_module(FileName, yes(Timestamp),
-            ParseTreeInt3, Specs, Errors),
-        map.set(ModuleName, ReadResult, HRMM0, HRMM),
-        HaveReadModuleMaps = HaveReadModuleMaps0 ^ hrmm_int3 := HRMM
-    ),
+    HRMM0 = HaveReadModuleMaps0 ^ hrmm_int0,
+    ReadResult = have_read_module(FileName, yes(Timestamp),
+        ParseTreeInt0, Errors),
+    map.set(ModuleName, ReadResult, HRMM0, HRMM),
+    HaveReadModuleMaps = HaveReadModuleMaps0 ^ hrmm_int0 := HRMM,
+    !Info ^ rci_have_read_module_maps := HaveReadModuleMaps.
+
+:- pred record_read_file_int1(module_name::in, file_name::in,
+    module_timestamp::in, parse_tree_int1::in, read_module_errors::in,
+    recompilation_check_info::in, recompilation_check_info::out) is det.
+
+record_read_file_int1(ModuleName, FileName, ModuleTimestamp, ParseTreeInt1,
+        Errors, !Info) :-
+    ModuleTimestamp = module_timestamp(_, Timestamp, _),
+    HaveReadModuleMaps1 = !.Info ^ rci_have_read_module_maps,
+    HRMM1 = HaveReadModuleMaps1 ^ hrmm_int1,
+    ReadResult = have_read_module(FileName, yes(Timestamp),
+        ParseTreeInt1, Errors),
+    map.set(ModuleName, ReadResult, HRMM1, HRMM),
+    HaveReadModuleMaps = HaveReadModuleMaps1 ^ hrmm_int1 := HRMM,
+    !Info ^ rci_have_read_module_maps := HaveReadModuleMaps.
+
+:- pred record_read_file_int2(module_name::in, file_name::in,
+    module_timestamp::in, parse_tree_int2::in, read_module_errors::in,
+    recompilation_check_info::in, recompilation_check_info::out) is det.
+
+record_read_file_int2(ModuleName, FileName, ModuleTimestamp, ParseTreeInt2,
+        Errors, !Info) :-
+    ModuleTimestamp = module_timestamp(_, Timestamp, _),
+    HaveReadModuleMaps2 = !.Info ^ rci_have_read_module_maps,
+    HRMM2 = HaveReadModuleMaps2 ^ hrmm_int2,
+    ReadResult = have_read_module(FileName, yes(Timestamp),
+        ParseTreeInt2, Errors),
+    map.set(ModuleName, ReadResult, HRMM2, HRMM),
+    HaveReadModuleMaps = HaveReadModuleMaps2 ^ hrmm_int2 := HRMM,
+    !Info ^ rci_have_read_module_maps := HaveReadModuleMaps.
+
+:- pred record_read_file_int3(module_name::in, file_name::in,
+    module_timestamp::in, parse_tree_int3::in, read_module_errors::in,
+    recompilation_check_info::in, recompilation_check_info::out) is det.
+
+record_read_file_int3(ModuleName, FileName, ModuleTimestamp, ParseTreeInt3,
+        Errors, !Info) :-
+    ModuleTimestamp = module_timestamp(_, Timestamp, _),
+    HaveReadModuleMaps3 = !.Info ^ rci_have_read_module_maps,
+    HRMM3 = HaveReadModuleMaps3 ^ hrmm_int3,
+    ReadResult = have_read_module(FileName, yes(Timestamp),
+        ParseTreeInt3, Errors),
+    map.set(ModuleName, ReadResult, HRMM3, HRMM),
+    HaveReadModuleMaps = HaveReadModuleMaps3 ^ hrmm_int3 := HRMM,
     !Info ^ rci_have_read_module_maps := HaveReadModuleMaps.
 
 %---------------------------------------------------------------------------%
@@ -1408,14 +1555,14 @@ write_recompile_reason(Globals, Stream, ThisModuleName, Reason, !IO) :-
         Pieces = describe_item(Item) ++ [words("was removed."), nl]
     ;
         Reason = recompile_for_changed_or_added_instance(ModuleName,
-            item_name(ClassName, ClassArity)),
+            recomp_item_name(ClassName, ClassArity)),
         Pieces = [words("an instance for class"),
             qual_sym_name_arity(sym_name_arity(ClassName, ClassArity)),
             words("in module"), qual_sym_name(ModuleName),
             words("was added or modified."), nl]
     ;
         Reason = recompile_for_removed_instance(ModuleName,
-            item_name(ClassName, ClassArity)),
+            recomp_item_name(ClassName, ClassArity)),
         Pieces = [words("an instance for class "),
             qual_sym_name_arity(sym_name_arity(ClassName, ClassArity)),
             words("in module"), qual_sym_name(ModuleName),
@@ -1428,25 +1575,28 @@ write_recompile_reason(Globals, Stream, ThisModuleName, Reason, !IO) :-
     % or errors.
     write_error_spec(Stream, Globals, Spec, !IO).
 
-:- func describe_item(item_id) = list(format_component).
+:- func describe_item(recomp_item_id) = list(format_piece).
 
-describe_item(item_id(ItemType0, item_name(SymName, Arity))) = Pieces :-
-    ( if body_item(ItemType0, ItemType1) then
-        string_to_item_type(ItemTypeStr, ItemType1),
+describe_item(ItemId) = Pieces :-
+    ItemId = recomp_item_id(ItemType0, ItemName),
+    ( if is_body_of_item(ItemType0, ItemType1) then
+        string_to_recomp_item_type(ItemTypeStr, ItemType1),
         ItemPieces = [words("body of"), words(ItemTypeStr)]
     else
-        string_to_item_type(ItemTypeStr, ItemType0),
+        string_to_recomp_item_type(ItemTypeStr, ItemType0),
         ItemPieces = [words(ItemTypeStr)]
     ),
+    ItemName = recomp_item_name(SymName, Arity),
     Pieces = ItemPieces ++
         [qual_sym_name_arity(sym_name_arity(SymName, Arity))].
 
-:- pred body_item(item_type::in, item_type::out) is semidet.
+:- pred is_body_of_item(recomp_item_type::in, recomp_item_type::out)
+    is semidet.
 
-body_item(type_defn_item, type_name_item).
+is_body_of_item(recomp_type_defn, recomp_type_name).
 
 :- func describe_resolved_functor(sym_name, arity, resolved_functor) =
-    list(format_component).
+    list(format_piece).
 
 describe_resolved_functor(SymName, Arity, ResolvedFunctor) = Pieces :-
     (
@@ -1497,29 +1647,6 @@ record_recompilation_reason(Reason, MaybeStoppingReason, !Info) :-
 
 %---------------------------------------------------------------------------%
 
-:- pred get_module_item_version_numbers_from_parse_tree_some_int(
-    parse_tree_some_int::in, module_item_version_numbers::out) is semidet.
-
-get_module_item_version_numbers_from_parse_tree_some_int(ParseTreeSomeInt,
-        VersionNumbers) :-
-    (
-        ParseTreeSomeInt = parse_tree_some_int0(ParseTreeInt0),
-        MaybeVersionNumbers = ParseTreeInt0 ^ pti0_maybe_version_numbers
-    ;
-        ParseTreeSomeInt = parse_tree_some_int1(ParseTreeInt1),
-        MaybeVersionNumbers = ParseTreeInt1 ^ pti1_maybe_version_numbers
-    ;
-        ParseTreeSomeInt = parse_tree_some_int2(ParseTreeInt2),
-        MaybeVersionNumbers = ParseTreeInt2 ^ pti2_maybe_version_numbers
-    ;
-        ParseTreeSomeInt = parse_tree_some_int3(_ParseTreeInt3),
-        % .int3 files never contain version numbers.
-        fail
-    ),
-    MaybeVersionNumbers = version_numbers(VersionNumbers).
-
-%---------------------------------------------------------------------------%
-
 :- type ambiguity_checkables
     --->    ambiguity_checkables(
                 % NOTE We should consider making the types of the first
@@ -1554,32 +1681,12 @@ get_module_item_version_numbers_from_parse_tree_some_int(ParseTreeSomeInt,
                 list(item_pred_decl_info)
             ).
 
-:- pred get_ambiguity_checkables_parse_tree_some_int(parse_tree_some_int::in,
+:- pred get_ambiguity_checkables_int0(parse_tree_int0::in,
     ambiguity_checkables::out) is det.
 
-get_ambiguity_checkables_parse_tree_some_int(ParseTreeSomeInt, Checkables) :-
-    (
-        ParseTreeSomeInt = parse_tree_some_int0(ParseTreeInt0),
-        get_ambiguity_checkables_parse_tree_int0(ParseTreeInt0, Checkables)
-    ;
-        ParseTreeSomeInt = parse_tree_some_int1(ParseTreeInt1),
-        get_ambiguity_checkables_parse_tree_int1(ParseTreeInt1, Checkables)
-    ;
-        ParseTreeSomeInt = parse_tree_some_int2(ParseTreeInt2),
-        get_ambiguity_checkables_parse_tree_int2(ParseTreeInt2, Checkables)
-    ;
-        ParseTreeSomeInt = parse_tree_some_int3(ParseTreeInt3),
-        get_ambiguity_checkables_parse_tree_int3(ParseTreeInt3, Checkables)
-    ).
-
-:- pred get_ambiguity_checkables_parse_tree_int0(parse_tree_int0::in,
-    ambiguity_checkables::out) is det.
-
-get_ambiguity_checkables_parse_tree_int0(ParseTreeInt0, Checkables) :-
+get_ambiguity_checkables_int0(ParseTreeInt0, Checkables) :-
     ParseTreeInt0 = parse_tree_int0(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntIncls, _ImpIncls, _InclMap,
-        _IntImports, _IntUses, _ImpImports, _ImpUses, _ImportUseMap,
-        _IntFIMs, _ImpFIMs,
+        _MaybeVersionNumbers, _InclMap, _ImportUseMap, _IntFIMs, _ImpFIMs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, _IntInstances,
         IntPredDecls, _IntModeDecls, _IntDeclPragmas, _IntPromises,
@@ -1600,13 +1707,12 @@ get_ambiguity_checkables_parse_tree_int0(ParseTreeInt0, Checkables) :-
     Checkables = ambiguity_checkables(ItemTypeDefns,
         ItemInstDefns, ItemModeDefns, ItemTypeClasses, ItemPredDecls).
 
-:- pred get_ambiguity_checkables_parse_tree_int1(parse_tree_int1::in,
+:- pred get_ambiguity_checkables_int1(parse_tree_int1::in,
     ambiguity_checkables::out) is det.
 
-get_ambiguity_checkables_parse_tree_int1(ParseTreeInt1, Checkables) :-
+get_ambiguity_checkables_int1(ParseTreeInt1, Checkables) :-
     ParseTreeInt1 = parse_tree_int1(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntIncls, _ImpIncls, _InclMap,
-        _IntUses, _ImpUses, _ImportUseMap, _IntFIMs, _ImpFIMs,
+        _MaybeVersionNumbers, _InclMap, _ImportUseMap, _IntFIMs, _ImpFIMs,
         TypeDefnCheckedMap, InstDefnCheckedMap, ModeDefnCheckedMap,
         IntTypeClasses, _IntItemInstances, IntPredDecls, _IntModeDecls,
         _IntDeclPragmas, _IntPromises, _IntTypeRepnMap, ImpTypeClasses),
@@ -1626,13 +1732,12 @@ get_ambiguity_checkables_parse_tree_int1(ParseTreeInt1, Checkables) :-
     Checkables = ambiguity_checkables(ItemTypeDefns,
         ItemInstDefns, ItemModeDefns, ItemTypeClasses, ItemPredDecls).
 
-:- pred get_ambiguity_checkables_parse_tree_int2(parse_tree_int2::in,
+:- pred get_ambiguity_checkables_int2(parse_tree_int2::in,
     ambiguity_checkables::out) is det.
 
-get_ambiguity_checkables_parse_tree_int2(ParseTreeInt2, Checkables) :-
+get_ambiguity_checkables_int2(ParseTreeInt2, Checkables) :-
     ParseTreeInt2 = parse_tree_int2(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntIncls, _InclMap,
-        _IntUses, _ImportUseMap, _IntFIMs, _ImpFIMs,
+        _MaybeVersionNumbers, _InclMap, _ImportUseMap, _IntFIMs, _ImpFIMs,
         TypeDefnCheckedMap, InstDefnCheckedMap, ModeDefnCheckedMap,
         IntItemTypeClasses, _IntItemInstances, _IntTypeRepnMap),
     type_ctor_checked_map_get_src_defns(TypeDefnCheckedMap,
@@ -1651,12 +1756,12 @@ get_ambiguity_checkables_parse_tree_int2(ParseTreeInt2, Checkables) :-
     Checkables = ambiguity_checkables(ItemTypeDefns,
         ItemInstDefns, ItemModeDefns, ItemTypeClasses, ItemPredDecls).
 
-:- pred get_ambiguity_checkables_parse_tree_int3(parse_tree_int3::in,
+:- pred get_ambiguity_checkables_int3(parse_tree_int3::in,
     ambiguity_checkables::out) is det.
 
-get_ambiguity_checkables_parse_tree_int3(ParseTreeInt3, Checkables) :-
+get_ambiguity_checkables_int3(ParseTreeInt3, Checkables) :-
     ParseTreeInt3 = parse_tree_int3(_ModuleName, _ModuleNameContext,
-        _Incls, _InclMap, _Avails, _AvailMap,
+        _InclMap, _ImportUseMap,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, _IntInstances, _TypeRepnMap),
     type_ctor_checked_map_get_src_defns(TypeCtorCheckedMap,

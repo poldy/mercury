@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %-----------------------------------------------------------------------------%
 % Copyright (C) 2002-2012 The University of Melbourne.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %-----------------------------------------------------------------------------%
@@ -17,14 +18,14 @@
 :- interface.
 
 :- import_module libs.
-:- import_module libs.globals.
 :- import_module libs.file_util.
+:- import_module libs.globals.
 :- import_module libs.maybe_succeeded.
-:- import_module parse_tree.
-:- import_module parse_tree.file_names.
-:- import_module parse_tree.module_imports.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
+:- import_module parse_tree.
+:- import_module parse_tree.file_names.
+:- import_module parse_tree.module_dep_info.
 
 :- import_module bool.
 :- import_module io.
@@ -235,14 +236,18 @@
 :- import_module libs.compute_grade.
 :- import_module libs.optimization_options.
 :- import_module libs.options.
+:- import_module libs.shell_util.
 :- import_module libs.trace_params.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
+:- import_module parse_tree.find_module.
 :- import_module parse_tree.module_cmds.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_foreign.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module dir.
 :- import_module getopt.
+:- import_module io.file.
 :- import_module require.
 :- import_module set.
 :- import_module string.
@@ -278,12 +283,14 @@ do_compile_c_file(Globals, ProgressStream, ErrorStream, PIC, C_File, O_File,
     string.append_list([
         CC, " ",
         AllCFlags,
-        " -c ", quote_arg(C_File), " ",
-        NameObjectFile, quote_arg(O_File)], Command),
+        " -c ", quote_shell_cmd_arg(C_File), " ",
+        NameObjectFile, quote_shell_cmd_arg(O_File)], Command),
     get_maybe_filtercc_command(Globals, MaybeFilterCmd),
     invoke_system_command_maybe_filter_output(Globals, ProgressStream,
         ErrorStream, ErrorStream, cmd_verbose_commands,
-        Command, MaybeFilterCmd, Succeeded, !IO).
+        Command, MaybeFilterCmd, Succeeded, !IO),
+    globals.lookup_bool_option(Globals, statistics, Stats),
+    maybe_report_stats(ProgressStream, Stats, !IO).
 
 :- pred gather_c_compiler_flags(globals::in, pic::in, string::out) is det.
 
@@ -675,21 +682,25 @@ gather_c_grade_defines(Globals, GradeDefines) :-
     ;
         Extend = yes,
         StackSegments = yes,
+        % This should have been caught in handle_options,
+        % but there is no code there to do so.
+        % XXX Should we delete --extend-stacks-when-needed?
+        % options.m has been listing it as "experimental" since 2007.
         ExtendOpt = unexpected($pred,
             "--extend-stacks-when-needed and --stack-segments")
     ),
-    globals.lookup_bool_option(Globals, low_level_debug, LL_Debug),
+    globals.lookup_bool_option(Globals, c_debug_grade, CDebugGrade),
     (
-        LL_Debug = yes,
-        % This is grade option tells the C compiler to turn on the generation
+        CDebugGrade = yes,
+        % This grade option tells the C compiler to turn on the generation
         % of debugging symbols and to disable the optimizations that
         % would make the executable harder to debug in a C debugger
         % such as gdb. However, here we gather only *macro* definitions,
         % not general compiler flags.
-        LL_DebugOpt = "-DMR_LL_DEBUG "
+        CDebugGradeOpt = "-DMR_C_DEBUG_GRADE "
     ;
-        LL_Debug = no,
-        LL_DebugOpt = ""
+        CDebugGrade = no,
+        CDebugGradeOpt = ""
     ),
     globals.lookup_bool_option(Globals, use_trail, UseTrail),
     (
@@ -706,7 +717,7 @@ gather_c_grade_defines(Globals, GradeDefines) :-
     (
         MinimalModelStackCopy = yes,
         MinimalModelOwnStacks = yes,
-        % this should have been caught in handle_options
+        % This should have been caught in handle_options.
         unexpected($pred, "inconsistent minimal model options")
     ;
         MinimalModelStackCopy = yes,
@@ -790,7 +801,7 @@ gather_c_grade_defines(Globals, GradeDefines) :-
         RecordTermSizesOpt,
         NumPtagBitsOpt,
         ExtendOpt,
-        LL_DebugOpt, DeclDebugOpt,
+        CDebugGradeOpt, DeclDebugOpt,
         SourceDebugOpt,
         ExecTraceOpt,
         UseTrailOpt,
@@ -807,7 +818,8 @@ gather_c_include_dir_flags(Globals, InclOpt) :-
     globals.lookup_accumulating_option(Globals, c_include_directory,
         C_Incl_Dirs),
     InclOpt = string.append_list(list.condense(list.map(
-        (func(C_INCL) = ["-I", quote_arg(C_INCL), " "]), C_Incl_Dirs))).
+        (func(C_INCL) = ["-I", quote_shell_cmd_arg(C_INCL), " "]),
+        C_Incl_Dirs))).
 
 %-----------------------------------------------------------------------------%
 
@@ -867,7 +879,8 @@ compile_java_files(Globals, ProgressStream, ErrorStream,
     ),
 
     globals.lookup_string_option(Globals, java_compiler, JavaCompiler),
-    globals.lookup_accumulating_option(Globals, java_flags, JavaFlagsList),
+    globals.lookup_accumulating_option(Globals, java_compiler_flags,
+        JavaFlagsList),
     globals.lookup_bool_option(Globals, restricted_command_line,
         RestrictedCommandLine),
     (
@@ -902,16 +915,15 @@ compile_java_files(Globals, ProgressStream, ErrorStream,
         InclOpt = ""
     else
         InclOpt = string.append_list([
-            "-classpath ", quote_arg(ClassPath), " "])
+            "-classpath ", quote_shell_cmd_arg(ClassPath), " "])
     ),
 
-    globals.lookup_bool_option(Globals, target_debug, Target_Debug),
-    (
-        Target_Debug = yes,
-        Target_DebugOpt = "-g "
-    ;
-        Target_Debug = no,
-        Target_DebugOpt = ""
+    globals.lookup_bool_option(Globals, target_debug, TargetDebug),
+    globals.lookup_bool_option(Globals, c_debug_grade, CDebugGrade),
+    ( if ( TargetDebug = yes ; CDebugGrade = yes ) then
+        TargetDebugOpt = "-g "
+    else
+        TargetDebugOpt = ""
     ),
 
     globals.lookup_bool_option(Globals, use_subdirs, UseSubdirs),
@@ -954,7 +966,7 @@ compile_java_files(Globals, ProgressStream, ErrorStream,
     % Also be careful that each option is separated by spaces.
     JoinedJavaFiles = string.join_list(" ", [HeadJavaFile | TailJavaFiles]),
     string.append_list([InclOpt, DirOpts,
-        Target_DebugOpt, JAVAFLAGS, " ", JoinedJavaFiles], CommandArgs),
+        TargetDebugOpt, JAVAFLAGS, " ", JoinedJavaFiles], CommandArgs),
     invoke_long_system_command_maybe_filter_output(Globals,
         ProgressStream, ErrorStream, ErrorStream, cmd_verbose_commands,
         JavaCompiler, NonAtFileCommandArgs, CommandArgs, MaybeMFilterJavac,
@@ -1157,7 +1169,7 @@ make_library_init_file_2(Globals, ProgressStream, ErrorStream,
                     MainModuleName, UserDirFileName, !IO),
                 % Remove the target of the symlink/copy in case it already
                 % exists.
-                io.remove_file(UserDirFileName, _, !IO),
+                io.file.remove_file(UserDirFileName, _, !IO),
                 make_symlink_or_copy_file(Globals, ProgressStream, ErrorStream,
                     InitFileName, UserDirFileName, Succeeded, !IO)
             ;
@@ -1198,7 +1210,7 @@ invoke_mkinit(Globals, ProgressStream, ErrorStream, InitFileStream, Verbosity,
         invoke_system_command(Globals, ProgressStream, ErrorStream,
             InitFileStream, Verbosity, MkInitCmd, MkInitSucceeded0, !IO),
 
-        io.remove_file(TmpFile, RemoveResult, !IO),
+        io.file.remove_file(TmpFile, RemoveResult, !IO),
         (
             RemoveResult = ok,
             MkInitSucceeded = MkInitSucceeded0
@@ -1380,7 +1392,7 @@ make_init_target_file(Globals, ProgressStream, ErrorStream, MkInit,
         " ", NoMainOpt,
         " ", ExperimentalComplexityOpt,
         " ", RuntimeFlags,
-        " -o ", quote_arg(TmpInitTargetFileName),
+        " -o ", quote_shell_cmd_arg(TmpInitTargetFileName),
         " ", InitFileDirs
     ]),
 
@@ -1481,8 +1493,8 @@ file_as_new_as(FileNameA, Rel, FileNameB, !IO) :-
     maybe(comparison_result)::out, io::di, io::uo) is det.
 
 compare_file_timestamps(FileNameA, FileNameB, MaybeCompare, !IO) :-
-    io.file_modification_time(FileNameA, TimeResultA, !IO),
-    io.file_modification_time(FileNameB, TimeResultB, !IO),
+    io.file.file_modification_time(FileNameA, TimeResultA, !IO),
+    io.file.file_modification_time(FileNameB, TimeResultB, !IO),
     ( if
         TimeResultA = ok(TimeA),
         TimeResultB = ok(TimeB)
@@ -1694,11 +1706,11 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
         TraceFlagsOpt = shlib_linker_trace_flags,
         globals.lookup_bool_option(Globals, allow_undefined, AllowUndef),
         (
-            AllowUndef = yes,
+            AllowUndef = bool.yes,
             globals.lookup_string_option(Globals, linker_allow_undefined_flag,
                 UndefOpt)
         ;
-            AllowUndef = no,
+            AllowUndef = bool.no,
             globals.lookup_string_option(Globals,
                 linker_error_undefined_flag, UndefOpt)
         ),
@@ -1722,7 +1734,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
     globals.lookup_bool_option(Globals, strip, Strip),
     ( if
         LinkTargetType = executable,
-        Strip = yes
+        Strip = bool.yes
     then
         globals.lookup_string_option(Globals, linker_strip_flag,
             LinkerStripOpt),
@@ -1743,10 +1755,10 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
 
     globals.lookup_bool_option(Globals, target_debug, TargetDebug),
     (
-        TargetDebug = yes,
+        TargetDebug = bool.yes,
         globals.lookup_string_option(Globals, DebugFlagsOpt, DebugOpts)
     ;
-        TargetDebug = no,
+        TargetDebug = bool.no,
         DebugOpts = ""
     ),
 
@@ -1767,7 +1779,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
     % Are the thread libraries needed?
     use_thread_libs(Globals, UseThreadLibs),
     (
-        UseThreadLibs = yes,
+        UseThreadLibs = bool.yes,
         globals.lookup_string_option(Globals, ThreadFlagsOpt, ThreadOpts),
 
         % Determine which options are needed to link to libhwloc, if
@@ -1781,7 +1793,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
         ),
         globals.lookup_string_option(Globals, HwlocFlagsOpt, HwlocOpts)
     ;
-        UseThreadLibs = no,
+        UseThreadLibs = bool.no,
         ThreadOpts = "",
         HwlocOpts = ""
     ),
@@ -1818,7 +1830,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
     globals.lookup_bool_option(Globals, shlib_linker_use_install_name,
         UseInstallName),
     ( if
-        UseInstallName = yes,
+        UseInstallName = bool.yes,
         LinkTargetType = shared_library
     then
         % NOTE: `ShLibFileName' must *not* be prefixed with a directory.
@@ -1849,7 +1861,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
     get_link_libraries(Globals, MaybeLinkLibraries, !IO),
     globals.lookup_string_option(Globals, linker_opt_separator, LinkOptSep),
     (
-        MaybeLinkLibraries = yes(LinkLibrariesList),
+        MaybeLinkLibraries = maybe.yes(LinkLibrariesList),
         join_quoted_string_list(LinkLibrariesList, "", "", " ",
             LinkLibraries),
 
@@ -1862,8 +1874,9 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
             % we first create an archive of all of the object files.
             RestrictedCommandLine = yes,
             globals.lookup_string_option(Globals, library_extension, LibExt),
-            io.get_temp_directory(TempDir, !IO),
-            io.make_temp_file(TempDir, "mtmp", LibExt, TmpArchiveResult, !IO),
+            io.file.get_temp_directory(TempDir, !IO),
+            io.file.make_temp_file(TempDir, "mtmp", LibExt,
+                TmpArchiveResult, !IO),
             (
                 TmpArchiveResult = ok(TmpArchive),
                 % Only include actual object files in the temporary archive,
@@ -1872,7 +1885,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
                     ProperObjectFiles, NonObjectFiles),
                 % Delete the currently empty output file first, otherwise ar
                 % will fail to recognise its file format.
-                remove_file(TmpArchive, _, !IO),
+                io.file.remove_file(TmpArchive, _, !IO),
                 create_archive(Globals, ProgressStream, ErrorStream,
                     TmpArchive, yes, ProperObjectFiles, ArchiveSucceeded, !IO),
                 MaybeDeleteTmpArchive = yes(TmpArchive),
@@ -1910,7 +1923,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
                 LTOOpts, " ",
                 TraceOpts, " ",
                 ReserveStackSizeOpt, " ",
-                OutputOpt, quote_arg(OutputFileName), " ",
+                OutputOpt, quote_shell_cmd_arg(OutputFileName), " ",
                 Objects, " ",
                 LinkOptSep, " ",
                 LinkLibraryDirectories, " ",
@@ -1929,13 +1942,13 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
 
             globals.lookup_bool_option(Globals, demangle, Demangle),
             (
-                Demangle = yes,
+                Demangle = bool.yes,
                 globals.lookup_string_option(Globals, demangle_command,
                     DemangleCmd),
-                MaybeDemangleCmd = yes(DemangleCmd)
+                MaybeDemangleCmd = maybe.yes(DemangleCmd)
             ;
-                Demangle = no,
-                MaybeDemangleCmd = no
+                Demangle = bool.no,
+                MaybeDemangleCmd = maybe.no
             ),
 
             invoke_system_command_maybe_filter_output(Globals,
@@ -1949,7 +1962,7 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
             then
                 string.format("%s %s %s",
                     [s(StripExeCommand), s(StripExeFlags),
-                    s(quote_arg(OutputFileName))], StripCmd),
+                    s(quote_shell_cmd_arg(OutputFileName))], StripCmd),
                 invoke_system_command_maybe_filter_output(Globals,
                     ProgressStream, ErrorStream, ErrorStream,
                     cmd_verbose_commands, StripCmd, no, Succeeded, !IO)
@@ -1961,13 +1974,13 @@ link_exe_or_shared_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
             Succeeded = did_not_succeed
         ),
         (
-            MaybeDeleteTmpArchive = yes(FileToDelete),
-            io.remove_file(FileToDelete, _, !IO)
+            MaybeDeleteTmpArchive = maybe.yes(FileToDelete),
+            io.file.remove_file(FileToDelete, _, !IO)
         ;
-            MaybeDeleteTmpArchive = no
+            MaybeDeleteTmpArchive = maybe.no
         )
     ;
-        MaybeLinkLibraries = no,
+        MaybeLinkLibraries = maybe.no,
         Succeeded = did_not_succeed
     ).
 
@@ -2032,12 +2045,12 @@ get_mercury_std_libs(Globals, TargetType, StdLibs) :-
                 GCMethod = gc_boehm_debug,
                 GCGrade0 = "gc_debug"
             ),
-            globals.lookup_bool_option(Globals, low_level_debug, LLDebug),
+            globals.lookup_bool_option(Globals, c_debug_grade, CDebugGrade),
             (
-                LLDebug = yes,
-                GCGrade1 = GCGrade0 ++ "_ll_debug"
+                CDebugGrade = yes,
+                GCGrade1 = GCGrade0 ++ "_c_debug"
             ;
-                LLDebug = no,
+                CDebugGrade = no,
                 GCGrade1 = GCGrade0
             ),
             globals.lookup_bool_option(Globals, profile_time, ProfTime),
@@ -2170,7 +2183,7 @@ link_lib_args(Globals, TargetType, StdLibDir, GradeDir, LibOtherExt, Name,
     ),
     StaticLibName = LibPrefix ++ Name ++
         other_extension_to_string(LibOtherExt),
-    StaticArg = quote_arg(StdLibDir/"lib"/GradeDir/StaticLibName),
+    StaticArg = quote_shell_cmd_arg(StdLibDir/"lib"/GradeDir/StaticLibName),
     make_link_lib(Globals, TargetType, Name, SharedArg).
 
     % Pass either `-llib' or `PREFIX/lib/GRADE/liblib.a', depending on
@@ -2214,14 +2227,14 @@ make_link_lib(Globals, TargetType, LibName, LinkOpt) :-
         ),
         globals.lookup_string_option(Globals, LinkLibFlag, LinkLibOpt),
         globals.lookup_string_option(Globals, LinkLibSuffix, Suffix),
-        LinkOpt = quote_arg(LinkLibOpt ++ LibName ++ Suffix)
+        LinkOpt = quote_shell_cmd_arg(LinkLibOpt ++ LibName ++ Suffix)
     ;
         ( TargetType = csharp_executable
         ; TargetType = csharp_library
         ),
         LinkLibOpt = "-r:",
         Suffix = ".dll",
-        LinkOpt = quote_arg(LinkLibOpt ++ LibName ++ Suffix)
+        LinkOpt = quote_shell_cmd_arg(LinkLibOpt ++ LibName ++ Suffix)
     ;
         ( TargetType = static_library
         ; TargetType = java_executable
@@ -2250,7 +2263,7 @@ get_runtime_library_path_opts(Globals, LinkTargetType,
     then
         globals.lookup_accumulating_option(Globals,
             runtime_link_library_directories, RpathDirs0),
-        RpathDirs = list.map(quote_arg, RpathDirs0),
+        RpathDirs = list.map(quote_shell_cmd_arg, RpathDirs0),
         (
             RpathDirs = [],
             RpathOpts = ""
@@ -2437,7 +2450,7 @@ post_link_make_symlink_or_copy(Globals, ProgressStream, ErrorStream,
         ;
             SameTimestamp = no,
             % Remove the target of the symlink/copy in case it already exists.
-            io.remove_file_recursively(UserDirFileName, _, !IO),
+            io.file.remove_file_recursively(UserDirFileName, _, !IO),
 
             make_symlink_or_copy_file(Globals, ProgressStream, ErrorStream,
                 OutputFileName, UserDirFileName, Succeeded0, !IO),
@@ -2476,7 +2489,7 @@ post_link_make_symlink_or_copy(Globals, ProgressStream, ErrorStream,
                 ScriptSameTimestamp = no,
                 % Remove the target of the symlink/copy in case
                 % it already exists.
-                io.remove_file_recursively(UserDirScriptName, _, !IO),
+                io.file.remove_file_recursively(UserDirScriptName, _, !IO),
                 make_symlink_or_copy_file(Globals, ProgressStream, ErrorStream,
                     OutputScriptName, UserDirScriptName, Succeeded, !IO)
             )
@@ -2932,12 +2945,12 @@ create_java_exe_or_lib(Globals, ProgressStream, ErrorStream, LinkTargetType,
             [Jar, " cf ", JarFileName, " @", TempFileName]),
         invoke_system_command(Globals, ProgressStream, ErrorStream,
             ErrorStream, cmd_verbose_commands, Cmd, Succeeded0, !IO),
-        io.remove_file(TempFileName, _, !IO),
+        io.file.remove_file(TempFileName, _, !IO),
         (
             Succeeded0 = succeeded
         ;
             Succeeded0 = did_not_succeed,
-            io.remove_file(JarFileName, _, !IO)
+            io.file.remove_file(JarFileName, _, !IO)
         )
     ;
         TempFileResult = error(ErrorMessage),
@@ -3025,8 +3038,8 @@ join_string_list([String | Strings], Prefix, Suffix, Separator, Result) :-
     string::in, string::out) is det.
 
 join_quoted_string_list(Strings, Prefix, Suffix, Separator, Result) :-
-    join_string_list(map(quote_arg, Strings), Prefix, Suffix, Separator,
-        Result).
+    join_string_list(map(quote_shell_cmd_arg, Strings), Prefix, Suffix,
+        Separator, Result).
 
     % join_module_list(Globals, ModuleNames, Extension, Result, !IO):
     %
@@ -3055,7 +3068,7 @@ make_all_module_command(Command0, MainModule, AllModules, Command, !IO) :-
         [MainModule | list.delete_all(AllModules, MainModule)],
         ModuleNameStrings, !IO),
     Command = string.join_list(" ",
-        list.map(quote_arg, [Command0 | ModuleNameStrings])).
+        list.map(quote_shell_cmd_arg, [Command0 | ModuleNameStrings])).
 
 %-----------------------------------------------------------------------------%
 
@@ -3225,7 +3238,7 @@ make_standalone_int_body(Globals, ProgressStream, ErrorStream,
         " ", TraceOpt,
         " ", ExperimentalComplexityOpt,
         " ", RuntimeFlags,
-        " -o ", quote_arg(CFileName),
+        " -o ", quote_shell_cmd_arg(CFileName),
         " ", InitFileDirs,
         " -s "
     ]),
@@ -3329,7 +3342,7 @@ invoke_long_system_command_maybe_filter_output(Globals,
                 ProgressStream, ErrorStream, CmdOutputStream, Verbosity,
                 FullCmd, MaybeProcessOutput, Succeeded0, !IO),
 
-            io.remove_file(TmpFile, RemoveResult, !IO),
+            io.file.remove_file(TmpFile, RemoveResult, !IO),
             (
                 RemoveResult = ok,
                 Succeeded = Succeeded0

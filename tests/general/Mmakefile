@@ -35,7 +35,6 @@ ORDINARY_PROGS = \
 	hlc_name_mangling		\
 	ho_spec_branch_bug		\
 	intermod_type			\
-	interpreter			\
 	io_foldl			\
 	io_regression			\
 	liveness			\

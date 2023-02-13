@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1995-2001, 2003-2008, 2011-2012 The University of Melbourne.
-% Copyright (C) 2014-2020 The Mercury team.
+% Copyright (C) 2014-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -18,8 +18,8 @@
 %
 % The parser is a relatively straight-forward top-down recursive descent
 % parser, made somewhat complicated by the need to handle operator precedences.
-% It uses `mercury_term_lexer.get_token_list' to read a list of tokens.
-% It uses the routines from the module `ops' to look up operator precedences.
+% It uses mercury_term_lexer.get_token_list to read a list of tokens.
+% It uses the routines from the ops module to look up operator precedences.
 %
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -30,14 +30,26 @@
 :- import_module io.
 :- import_module mercury_term_lexer.
 :- import_module ops.
-:- import_module term_io.
+:- import_module term.
+:- import_module varset.
 
 %---------------------------------------------------------------------------%
+
+:- type read_term(T)
+    --->    eof
+            % We have reached the end-of-file.
+    ;       error(string, int)
+            % We have found an error described the message string
+            % on the given line number in the input.
+    ;       term(varset(T), term(T)).
+            % We have read in the given term with the given varset.
+
+:- type read_term == read_term(generic).
 
     % read_term(Result, !IO):
     % read_term(Stream, Result, !IO):
     %
-    % Reads a Mercury term from the current input stream or from Stream.
+    % Reads a Mercury term from the current input stream, or from Stream.
     %
 :- pred read_term(read_term(T)::out, io::di, io::uo) is det.
 :- pred read_term(io.text_input_stream::in, read_term(T)::out,
@@ -46,7 +58,7 @@
     % read_term_with_op_table(Ops, Result, !IO):
     % read_term_with_op_table(Stream, Ops, Result, !IO):
     %
-    % Reads a term from the current input stream or from Stream,
+    % Reads a term from the current input stream, or from Stream,
     % using the given op_table to interpret the operators.
     %
 :- pred read_term_with_op_table(Ops::in,
@@ -57,9 +69,9 @@
     % read_term_filename(FileName, Result, !IO):
     % read_term_filename(Stream, FileName, Result, !IO):
     %
-    % Reads a term from the current input stream or from Stream.
+    % Reads a term from the current input stream, or from Stream.
     % The string is the filename to use for the stream; this is used
-    % in constructing the term.contexts in the read term.
+    % in constructing the term_contexts in the read term.
     % This interface is used to support the `:- pragma source_file' directive.
     %
 :- pred read_term_filename(string::in,
@@ -81,9 +93,9 @@
 
     % The read_term_from_string predicates are the same as the read_term
     % predicates, except that the term is read from a string rather than from
-    % the current input stream. The returned value `EndPos' is the position
-    % one character past the end of the term read. The arguments `StringLen'
-    % and `StartPos' in the read_term_from_substring* versions specify
+    % the current input stream. The returned value EndPos is the position
+    % one character past the end of the term read. The arguments StringLen
+    % and StartPos in the read_term_from_substring* versions specify
     % the length of the string and the position within the string
     % at which to start parsing.
 
@@ -140,21 +152,20 @@
 :- import_module bool.
 :- import_module char.
 :- import_module float.
-:- import_module int.
 :- import_module integer.
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
 :- import_module string.
-:- import_module term.
-:- import_module varset.
+:- import_module term_context.
+:- import_module uint.
 
 %---------------------------------------------------------------------------%
 
-:- type parse(T)
-    --->    ok(T)
-    ;       error(string, token_list).
+:- type parse_result(T)
+    --->    pr_ok(T)
+    ;       pr_error(string, token_list).
 
     % Are we parsing an ordinary term, an argument or a list element?
 :- type term_kind
@@ -170,80 +181,72 @@ read_term(Result, !IO) :-
 
 read_term(Stream, Result, !IO) :-
     io.input_stream_name(Stream, FileName, !IO),
-    mercury_term_parser.read_term_filename_with_op_table(Stream,
-        ops.init_mercury_op_table, FileName, Result, !IO).
+    read_term_filename_with_op_table(Stream, ops.init_mercury_op_table,
+        FileName, Result, !IO).
 
 read_term_with_op_table(Ops, Result, !IO) :-
     io.input_stream(Stream, !IO),
-    mercury_term_parser.read_term_with_op_table(Stream, Ops, Result, !IO).
+    read_term_with_op_table(Stream, Ops, Result, !IO).
 
 read_term_with_op_table(Stream, Ops, Result, !IO) :-
     io.input_stream_name(Stream, FileName, !IO),
-    mercury_term_parser.read_term_filename_with_op_table(Stream, Ops,
-        FileName, Result, !IO).
+    read_term_filename_with_op_table(Stream, Ops, FileName, Result, !IO).
 
 read_term_filename(FileName, Result, !IO) :-
     io.input_stream(Stream, !IO),
-    mercury_term_parser.read_term_filename(Stream, FileName, Result, !IO).
+    read_term_filename(Stream, FileName, Result, !IO).
 
 read_term_filename(Stream, FileName, Result, !IO) :-
-    mercury_term_parser.read_term_filename_with_op_table(Stream,
-        ops.init_mercury_op_table, FileName, Result, !IO).
+    read_term_filename_with_op_table(Stream, ops.init_mercury_op_table,
+        FileName, Result, !IO).
 
 read_term_filename_with_op_table(Ops, FileName, Result, !IO) :-
     io.input_stream(Stream, !IO),
-    mercury_term_parser.read_term_filename_with_op_table(Stream, Ops,
-        FileName, Result, !IO).
+    read_term_filename_with_op_table(Stream, Ops, FileName, Result, !IO).
 
 read_term_filename_with_op_table(Stream, Ops, FileName, Result, !IO) :-
-    mercury_term_lexer.get_token_list(Stream, Tokens, !IO),
-    mercury_term_parser.parse_tokens_with_op_table(Ops, FileName,
-        Tokens, Result).
+    get_token_list(Stream, Tokens, !IO),
+    parse_tokens_with_op_table(Ops, FileName, Tokens, Result).
 
 %---------------------%
 
 read_term_from_string(FileName, String, EndPos, Result) :-
-    mercury_term_parser.read_term_from_string_with_op_table(
-        ops.init_mercury_op_table, FileName, String, EndPos, Result).
+    read_term_from_string_with_op_table(ops.init_mercury_op_table,
+        FileName, String, EndPos, Result).
 
 read_term_from_string_with_op_table(Ops, FileName, String, EndPos, Result) :-
     string.length(String, Len),
-    StartPos = posn(1, 0, 0),
-    mercury_term_parser.read_term_from_substring_with_op_table(Ops, FileName,
-        String, Len, StartPos, EndPos, Result).
+    StartPos = init_posn,
+    read_term_from_substring_with_op_table(Ops, FileName, String, Len,
+        StartPos, EndPos, Result).
 
 read_term_from_substring(FileName, String, Len, StartPos, EndPos, Result) :-
-    mercury_term_parser.read_term_from_substring_with_op_table(
-        ops.init_mercury_op_table, FileName, String, Len, StartPos, EndPos,
-        Result).
+    read_term_from_substring_with_op_table(ops.init_mercury_op_table,
+        FileName, String, Len, StartPos, EndPos, Result).
 
-read_term_from_linestr(FileName, String, Len,
-        StartLineContext, EndLineContext, StartLinePosn, EndLinePosn,
-        Result) :-
-    mercury_term_parser.read_term_from_linestr_with_op_table(
-        ops.init_mercury_op_table, FileName, String, Len,
-        StartLineContext, EndLineContext, StartLinePosn, EndLinePosn, Result).
+read_term_from_linestr(FileName, String, Len, StartLineContext, EndLineContext,
+        StartLinePosn, EndLinePosn, Result) :-
+    read_term_from_linestr_with_op_table(ops.init_mercury_op_table,
+        FileName, String, Len, StartLineContext, EndLineContext,
+        StartLinePosn, EndLinePosn, Result).
 
 read_term_from_substring_with_op_table(Ops, FileName, String, Len,
         StartPos, EndPos, Result) :-
-    mercury_term_lexer.string_get_token_list_max(String, Len, Tokens,
-        StartPos, EndPos),
-    mercury_term_parser.parse_tokens_with_op_table(Ops, FileName, Tokens,
-        Result).
+    string_get_token_list_max(String, Len, Tokens, StartPos, EndPos),
+    parse_tokens_with_op_table(Ops, FileName, Tokens, Result).
 
 read_term_from_linestr_with_op_table(Ops, FileName, String, Len,
         StartLineContext, EndLineContext, StartLinePosn, EndLinePosn,
         Result) :-
-    mercury_term_lexer.linestr_get_token_list_max(String, Len, Tokens,
+    linestr_get_token_list_max(String, Len, Tokens,
         StartLineContext, EndLineContext, StartLinePosn, EndLinePosn),
-    mercury_term_parser.parse_tokens_with_op_table(Ops, FileName, Tokens,
-        Result).
+    parse_tokens_with_op_table(Ops, FileName, Tokens, Result).
 
 %---------------------------------------------------------------------------%
 
 parse_tokens(FileName, Tokens, Result) :-
-    mercury_term_parser.parse_tokens_with_op_table(ops.init_mercury_op_table,
-        FileName, Tokens, Result).
+    parse_tokens_with_op_table(ops.init_mercury_op_table, FileName,
+        Tokens, Result).
 
 parse_tokens_with_op_table(Ops, FileName, Tokens, Result) :-
     (
@@ -258,12 +261,12 @@ parse_tokens_with_op_table(Ops, FileName, Tokens, Result) :-
         check_for_errors(Term, VarSet, Tokens, LeftOverTokens, Result)
     ).
 
-:- pred check_for_errors(parse(term(T))::in, varset(T)::in,
+:- pred check_for_errors(parse_result(term(T))::in, varset(T)::in,
     token_list::in, token_list::in, read_term(T)::out) is det.
 
 check_for_errors(Parse, VarSet, Tokens, LeftOverTokens, Result) :-
     (
-        Parse = error(ErrorMessage, ErrorTokens),
+        Parse = pr_error(ErrorMessage, ErrorTokens),
         % Check if the error was caused by a bad token.
         ( if check_for_bad_token(Tokens, BadTokenMessage, BadTokenLineNum) then
             Message = BadTokenMessage,
@@ -272,7 +275,7 @@ check_for_errors(Parse, VarSet, Tokens, LeftOverTokens, Result) :-
             % Find the token that caused the error.
             (
                 ErrorTokens = token_cons(ErrorTok, ErrorTokLineNum, _),
-                mercury_term_lexer.token_to_string(ErrorTok, TokString),
+                token_to_string(ErrorTok, TokString),
                 string.format("Syntax error at %s: %s",
                     [s(TokString), s(ErrorMessage)], Message),
                 LineNum = ErrorTokLineNum
@@ -282,20 +285,20 @@ check_for_errors(Parse, VarSet, Tokens, LeftOverTokens, Result) :-
                     Tokens = token_cons(_, LineNum, _)
                 ;
                     Tokens = token_nil,
-                    error("check_for_errors")
+                    error("token_nil in check_for_errors")
                 ),
                 string.format("Syntax error: %s", [s(ErrorMessage)], Message)
             )
         ),
         Result = error(Message, LineNum)
     ;
-        Parse = ok(Term),
+        Parse = pr_ok(Term),
         ( if check_for_bad_token(Tokens, Message, LineNum) then
             Result = error(Message, LineNum)
         else
             (
                 LeftOverTokens = token_cons(Token, LineNum, _),
-                mercury_term_lexer.token_to_string(Token, TokString),
+                token_to_string(Token, TokString),
                 string.format("Syntax error: unexpected %s",
                     [s(TokString)], Message),
                 Result = error(Message, LineNum)
@@ -352,7 +355,7 @@ check_for_bad_token(token_cons(Token, LineNum0, Tokens), Message, LineNum) :-
 check_for_bad_token(token_nil, _, _) :-
     fail.
 
-:- pred parse_whole_term(parse(term(T))::out,
+:- pred parse_whole_term(parse_result(term(T))::out,
     token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
@@ -360,7 +363,7 @@ check_for_bad_token(token_nil, _, _) :-
 parse_whole_term(Term, !TokensLeft, !PS) :-
     parse_term(Term0, !TokensLeft, !PS),
     (
-        Term0 = ok(_),
+        Term0 = pr_ok(_),
         ( if !.TokensLeft = token_cons(end, _Context, !:TokensLeft) then
             Term = Term0
         else
@@ -368,21 +371,21 @@ parse_whole_term(Term, !TokensLeft, !PS) :-
                 !TokensLeft, !.PS)
         )
     ;
-        Term0 = error(_, _),
+        Term0 = pr_error(_, _),
         % Propagate error upwards.
         Term = Term0
     ).
 
-:- pred parse_term(parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_term(parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
 parse_term(Term, !TokensLeft, !PS) :-
     OpTable = parser_state_get_ops_table(!.PS),
-    do_parse_term(ops.max_priority(OpTable) + 1, ordinary_term, Term,
-        !TokensLeft, !PS).
+    ArgPriority = ops.universal_priority(OpTable),
+    do_parse_term(ArgPriority, ordinary_term, Term, !TokensLeft, !PS).
 
-:- pred parse_arg(parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_arg(parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
@@ -393,10 +396,11 @@ parse_arg(Term, !TokensLeft, !PS) :-
     % but that would mean we can't, for example, parse '::'/2 in arguments
     % the way we want to. Perhaps a better solution would be to change the
     % priority of '::'/2, but we need to analyse the impact of that further.
-    ArgPriority = ops.max_priority(OpTable) + 1,
+    ArgPriority = ops.universal_priority(OpTable),
     do_parse_term(ArgPriority, argument, Term, !TokensLeft, !PS).
 
-:- pred parse_list_elem(parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_list_elem(parse_result(term(T))::out,
+    token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
@@ -406,33 +410,34 @@ parse_list_elem(Term, !TokensLeft, !PS) :-
     %   ArgPriority = ops.arg_priority(OpTable),
     % but that would mean we can't, for example, parse promise_pure/0 in
     % foreign attribute lists.
-    ArgPriority = ops.max_priority(OpTable) + 1,
+    ArgPriority = ops.universal_priority(OpTable),
     do_parse_term(ArgPriority, list_elem, Term, !TokensLeft, !PS).
 
-:- pred do_parse_term(int::in, term_kind::in, parse(term(T))::out,
-    token_list::in, token_list::out,
+:- pred do_parse_term(priority::in, term_kind::in,
+    parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
-do_parse_term(MaxPriority, TermKind, Term, !TokensLeft, !PS) :-
-    parse_left_term(MaxPriority, TermKind, LeftPriority, LeftTerm0,
+do_parse_term(MinPriority, TermKind, Term, !TokensLeft, !PS) :-
+    parse_left_term(MinPriority, TermKind, LeftPriority, LeftTerm0,
         !TokensLeft, !PS),
     (
-        LeftTerm0 = ok(LeftTerm),
-        parse_rest(MaxPriority, TermKind, LeftPriority, LeftTerm, Term,
+        LeftTerm0 = pr_ok(LeftTerm),
+        parse_rest(MinPriority, TermKind, LeftPriority, LeftTerm, Term,
             !TokensLeft, !PS)
     ;
-        LeftTerm0 = error(_, _),
+        LeftTerm0 = pr_error(_, _),
         % propagate error upwards
         Term = LeftTerm0
     ).
 
-:- pred parse_left_term(int::in, term_kind::in, int::out, parse(term(T))::out,
-    token_list::in, token_list::out,
+:- pred parse_left_term(priority::in, term_kind::in, priority::out,
+    parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
-parse_left_term(MaxPriority, TermKind, OpPriority, Term, !TokensLeft, !PS) :-
+parse_left_term(MinPriority, TermKind, OpPriority, Term, !TokensLeft, !PS) :-
+    OpTable = parser_state_get_ops_table(!.PS),
     (
         !.TokensLeft = token_cons(Token, Context, !:TokensLeft),
         ( if
@@ -456,104 +461,96 @@ parse_left_term(MaxPriority, TermKind, OpPriority, Term, !TokensLeft, !PS) :-
             % The fact that in terms constructed by this module,
             % the argument list of an integer or float is guaranteed to be []
             % is documented in term.m, and the compiler relies on it.
-            Term = ok(term.functor(NewFunctor, [], TermContext)),
-            OpPriority = 0
+            Term = pr_ok(term.functor(NewFunctor, [], TermContext)),
+            OpPriority = tightest_op_priority(OpTable)
         else if
             Token = name(TokenName),
-            OpTable = parser_state_get_ops_table(!.PS),
-            ops.lookup_op_infos(OpTable, TokenName, OpInfo, OtherOpInfos)
+            ops.lookup_op_infos(OpTable, TokenName, OpInfos)
         then
             ( if
                 % Check for binary prefix op.
                 %
-                % Since most tokens aren't binary prefix ops, the first test
-                % here will almost always fail.
-                find_first_binary_prefix_op(OpInfo, OtherOpInfos,
-                    BinOpPriority, RightAssoc, RightRightAssoc),
-                BinOpPriority =< MaxPriority,
+                % Since most tokens aren't binary prefix ops, the test
+                % will almost always fail.
+                OpInfos ^ oi_binary_prefix = 
+                    bin_pre(BinOpPriority, GeOrGtA, GeOrGtB),
+                priority_ge(BinOpPriority, MinPriority),
                 !.TokensLeft = token_cons(NextToken, _, _),
                 could_start_term(NextToken, yes),
                 NextToken \= open_ct
             then
                 OpPriority = BinOpPriority,
-                adjust_priority_for_assoc(OpPriority,
-                    RightAssoc, RightPriority),
-                adjust_priority_for_assoc(OpPriority,
-                    RightRightAssoc, RightRightPriority),
-                do_parse_term(RightPriority, TermKind, RightResult,
-                    !TokensLeft, !PS),
+                PrioA = min_priority_for_arg(OpPriority, GeOrGtA),
+                PrioB = min_priority_for_arg(OpPriority, GeOrGtB),
+                do_parse_term(PrioA, TermKind, ResultA, !TokensLeft, !PS),
                 (
-                    RightResult = ok(RightTerm),
-                    do_parse_term(RightRightPriority, TermKind,
-                        RightRightResult, !TokensLeft, !PS),
+                    ResultA = pr_ok(TermA),
+                    do_parse_term(PrioB, TermKind, ResultB, !TokensLeft, !PS),
                     (
-                        RightRightResult = ok(RightRightTerm),
+                        ResultB = pr_ok(TermB),
                         parser_get_term_context(!.PS, Context, TermContext),
-                        Term = ok(term.functor(term.atom(TokenName),
-                            [RightTerm, RightRightTerm], TermContext))
+                        Term = pr_ok(term.functor(term.atom(TokenName),
+                            [TermA, TermB], TermContext))
                     ;
-                        RightRightResult = error(_, _),
+                        ResultB = pr_error(_, _),
                         % Propagate error upwards.
-                        Term = RightRightResult
+                        Term = ResultB
                     )
                 ;
-                    RightResult = error(_, _),
+                    ResultA = pr_error(_, _),
                     % Propagate error upwards.
-                    Term = RightResult
+                    Term = ResultA
                 )
             else if
                 % Check for prefix op.
                 %
-                % Since most tokens aren't prefix ops, the first test
-                % here will almost always fail.
-                find_first_prefix_op(OpInfo, OtherOpInfos,
-                    UnOpPriority, RightAssoc),
-                UnOpPriority =< MaxPriority,
+                % Since most tokens aren't prefix ops, the first test here
+                % will almost always fail.
+                OpInfos ^ oi_prefix = pre(UnOpPriority, GeOrGtA),
+                priority_ge(UnOpPriority, MinPriority),
                 !.TokensLeft = token_cons(NextToken, _, _),
                 could_start_term(NextToken, yes),
                 NextToken \= open_ct
             then
                 OpPriority = UnOpPriority,
-                adjust_priority_for_assoc(OpPriority, RightAssoc,
-                    RightPriority),
-                do_parse_term(RightPriority, TermKind, RightResult,
-                    !TokensLeft, !PS),
+                PrioA = min_priority_for_arg(OpPriority, GeOrGtA),
+                do_parse_term(PrioA, TermKind, ResultA, !TokensLeft, !PS),
                 (
-                    RightResult = ok(RightTerm),
+                    ResultA = pr_ok(TermA),
                     parser_get_term_context(!.PS, Context, TermContext),
-                    Term = ok(term.functor(term.atom(TokenName), [RightTerm],
-                        TermContext))
+                    Term = pr_ok(term.functor(term.atom(TokenName),
+                        [TermA], TermContext))
                 ;
-                    RightResult = error(_, _),
+                    ResultA = pr_error(_, _),
                     % Propagate error upwards.
-                    Term = RightResult
+                    Term = ResultA
                 )
             else
                 % TokenName is an operator, but not of a kind that
                 % we should handle here.
-                parse_simple_term(Token, Context, MaxPriority, Term,
+                parse_simple_term(Token, Context, MinPriority, Term,
                     !TokensLeft, !PS),
-                OpPriority = 0
+                OpPriority = tightest_op_priority(OpTable)
             )
         else
             % TokenName is not an operator.
-            parse_simple_term(Token, Context, MaxPriority, Term,
+            parse_simple_term(Token, Context, MinPriority, Term,
                 !TokensLeft, !PS),
-            OpPriority = 0
+            OpPriority = tightest_op_priority(OpTable)
         )
     ;
         !.TokensLeft = token_nil,
-        Term = error("unexpected end-of-file at start of sub-term",
+        Term = pr_error("unexpected end-of-file at start of sub-term",
             !.TokensLeft),
-        OpPriority = 0
+        OpPriority = tightest_op_priority(OpTable)
     ).
 
-:- pred parse_rest(int::in, term_kind::in, int::in, term(T)::in,
-    parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_rest(priority::in, term_kind::in, priority::in,
+    term(T)::in, parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
-parse_rest(MaxPriority, TermKind, LeftPriority, LeftTerm, Term,
+parse_rest(MinPriority, TermKind, LeftPriority, LeftTerm, Term,
         !TokensLeft, !PS) :-
     ( if
         % Infix op.
@@ -575,11 +572,11 @@ parse_rest(MaxPriority, TermKind, LeftPriority, LeftTerm, Term,
             Op0 = "`",
             OpTable = parser_state_get_ops_table(!.PS),
             ops.lookup_operator_term(OpTable, OpPriority0,
-                LeftAssoc0, RightAssoc0)
+                LeftGtOrGe0, RightGtOrGe0)
         then
             OpPriority = OpPriority0,
-            LeftAssoc = LeftAssoc0,
-            RightAssoc = RightAssoc0,
+            LeftGtOrGe = LeftGtOrGe0,
+            RightGtOrGe = RightGtOrGe0,
             parse_backquoted_operator(MaybeQualifier, Op, VariableTerms,
                 !TokensLeft, !PS),
             !.TokensLeft = token_cons(name("`"), _Context, !:TokensLeft)
@@ -588,15 +585,16 @@ parse_rest(MaxPriority, TermKind, LeftPriority, LeftTerm, Term,
             VariableTerms = [],
             MaybeQualifier = no,
             OpTable = parser_state_get_ops_table(!.PS),
-            ops.lookup_infix_op(OpTable, Op, OpPriority, LeftAssoc, RightAssoc)
+            ops.lookup_infix_op(OpTable, Op, OpPriority,
+                LeftGtOrGe, RightGtOrGe)
         ),
-        OpPriority =< MaxPriority,
-        check_priority(LeftAssoc, OpPriority, LeftPriority)
+        priority_ge(OpPriority, MinPriority),
+        check_priority(LeftGtOrGe, OpPriority, LeftPriority)
     then
-        adjust_priority_for_assoc(OpPriority, RightAssoc, RightPriority),
+        RightPriority = min_priority_for_arg(OpPriority, RightGtOrGe),
         do_parse_term(RightPriority, TermKind, RightTerm0, !TokensLeft, !PS),
         (
-            RightTerm0 = ok(RightTerm),
+            RightTerm0 = pr_ok(RightTerm),
             parser_get_term_context(!.PS, Context, TermContext),
             OpTermArgs0 = VariableTerms ++ [LeftTerm, RightTerm],
             OpTerm0 = term.functor(term.atom(Op), OpTermArgs0, TermContext),
@@ -608,10 +606,10 @@ parse_rest(MaxPriority, TermKind, LeftPriority, LeftTerm, Term,
                 OpTerm = term.functor(term.atom("."), [QTerm, OpTerm0],
                     TermContext)
             ),
-            parse_rest(MaxPriority, TermKind, OpPriority, OpTerm, Term,
+            parse_rest(MinPriority, TermKind, OpPriority, OpTerm, Term,
                 !TokensLeft, !PS)
         ;
-            RightTerm0 = error(_, _),
+            RightTerm0 = pr_error(_, _),
             % Propagate error upwards.
             Term = RightTerm0
         )
@@ -619,16 +617,16 @@ parse_rest(MaxPriority, TermKind, LeftPriority, LeftTerm, Term,
         % Postfix op.
         !.TokensLeft = token_cons(name(Op), Context, !:TokensLeft),
         OpTable = parser_state_get_ops_table(!.PS),
-        ops.lookup_postfix_op(OpTable, Op, OpPriority, LeftAssoc),
-        OpPriority =< MaxPriority,
-        check_priority(LeftAssoc, OpPriority, LeftPriority)
+        ops.lookup_postfix_op(OpTable, Op, OpPriority, LeftGtOrGe),
+        priority_ge(OpPriority, MinPriority),
+        check_priority(LeftGtOrGe, OpPriority, LeftPriority)
     then
         parser_get_term_context(!.PS, Context, TermContext),
         OpTerm = term.functor(term.atom(Op), [LeftTerm], TermContext),
-        parse_rest(MaxPriority, TermKind, OpPriority, OpTerm, Term,
+        parse_rest(MinPriority, TermKind, OpPriority, OpTerm, Term,
             !TokensLeft, !PS)
     else
-        Term = ok(LeftTerm)
+        Term = pr_ok(LeftTerm)
     ).
 
 :- pred parse_backquoted_operator(maybe(term(T))::out, string::out,
@@ -654,7 +652,7 @@ parse_backquoted_operator(MaybeQualifier, OpName, VariableTerms,
     ).
 
 :- pred parse_backquoted_operator_qualifier(
-    maybe(term(T))::in, maybe(term(T))::out, term.context::in, string::in,
+    maybe(term(T))::in, maybe(term(T))::out, term_context::in, string::in,
     string::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
@@ -662,11 +660,7 @@ parse_backquoted_operator(MaybeQualifier, OpName, VariableTerms,
 parse_backquoted_operator_qualifier(MaybeQualifier0, MaybeQualifier, OpCtxt0,
         OpName0, OpName, !TokensLeft, !PS) :-
     ( if
-        !.TokensLeft =
-            token_cons(name(ModuleSeparator), SepContext, !:TokensLeft),
-        ( ModuleSeparator = "."
-        ; ModuleSeparator = ":"
-        ),
+        !.TokensLeft = token_cons(name("."), SepContext, !:TokensLeft),
         !.TokensLeft = token_cons(name(OpName1), NameContext, !:TokensLeft),
         OpName1 \= "`"
     then
@@ -690,13 +684,13 @@ parse_backquoted_operator_qualifier(MaybeQualifier0, MaybeQualifier, OpCtxt0,
 
 %---------------------------------------------------------------------------%
 
-    % term --> integer              % priority 0
-    % term --> float                % priority 0
-    % term --> implementation_defined % priority 0
-    % term --> name("-") integer    % priority 0
-    % term --> name("-") float      % priority 0
-    % term --> atom(NonOp)          % priority 0
-    % term --> atom(Op)             % priority `max_priority' + 1
+    % term --> integer                  % tightest_op_priority
+    % term --> float                    % tightest_op_priority
+    % term --> implementation_defined   % tightest_op_priority
+    % term --> name("-") integer        % tightest_op_priority
+    % term --> name("-") float          % tightest_op_priority
+    % term --> atom(NonOp)              % tightest_op_priority
+    % term --> atom(Op)                 % universal_priority
     %   atom --> name
     %   atom --> open_list, close_list
     %   atom --> open_curly, close_curly
@@ -710,8 +704,8 @@ parse_backquoted_operator_qualifier(MaybeQualifier0, MaybeQualifier, OpCtxt0,
     % term --> op, term             % with various conditions
     % term --> term, op             % with various conditions
 
-:- pred parse_simple_term(token::in, token_context::in, int::in,
-    parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_simple_term(token::in, token_context::in, priority::in,
+    parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
@@ -722,26 +716,26 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
         ( if !.TokensLeft = token_cons(open_ct, _Context, !:TokensLeft) then
             parse_args(ArgsParse, !TokensLeft, !PS),
             (
-                ArgsParse = ok(Args),
+                ArgsParse = pr_ok(Args),
                 BaseTerm = functor(atom(Atom), Args, TermContext),
-                BaseTermParse = ok(BaseTerm)
+                BaseTermParse = pr_ok(BaseTerm)
             ;
-                ArgsParse = error(Message, Tokens),
+                ArgsParse = pr_error(Message, Tokens),
                 % Propagate error upwards, after changing type.
-                BaseTermParse = error(Message, Tokens)
+                BaseTermParse = pr_error(Message, Tokens)
             )
         else
             OpTable = parser_state_get_ops_table(!.PS),
             ( if
-                ops.lookup_op(OpTable, Atom),
-                Prec =< ops.max_priority(OpTable)
+                ops.is_op(OpTable, Atom),
+                priority_ge(Prec, ops.loosest_op_priority(OpTable))
             then
                 parser_unexpected_tok(Token, Context,
                     "unexpected token at start of (sub)term",
                     BaseTermParse, !TokensLeft, !.PS)
             else
                 BaseTerm = functor(atom(Atom), [], TermContext),
-                BaseTermParse = ok(BaseTerm)
+                BaseTermParse = pr_ok(BaseTerm)
             )
         )
     ;
@@ -749,7 +743,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
         add_var(VarName, Var, !PS),
         parser_get_term_context(!.PS, Context, TermContext),
         BaseTerm = term.variable(Var, TermContext),
-        BaseTermParse = ok(BaseTerm)
+        BaseTermParse = pr_ok(BaseTerm)
     ;
         Token = integer(LexerBase, Integer, LexerSignedness, LexerSize),
         Base = lexer_base_to_term_base(LexerBase),
@@ -761,7 +755,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
         % is documented in term.m, and the compiler relies on it.
         BaseTerm = functor(integer(Base, Integer, Signedness, Size), [],
             TermContext),
-        BaseTermParse = ok(BaseTerm)
+        BaseTermParse = pr_ok(BaseTerm)
     ;
         Token = float(Float),
         % The fact that in terms constructed by this module,
@@ -769,7 +763,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
         % is documented in term.m, and the compiler relies on it.
         parser_get_term_context(!.PS, Context, TermContext),
         BaseTerm = functor(float(Float), [], TermContext),
-        BaseTermParse = ok(BaseTerm)
+        BaseTermParse = pr_ok(BaseTerm)
     ;
         Token = string(String),
         % The fact that in terms constructed by this module,
@@ -777,7 +771,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
         % is documented in term.m, and the compiler relies on it.
         parser_get_term_context(!.PS, Context, TermContext),
         BaseTerm = functor(string(String), [], TermContext),
-        BaseTermParse = ok(BaseTerm)
+        BaseTermParse = pr_ok(BaseTerm)
     ;
         Token = implementation_defined(Name),
         % The fact that in terms constructed by this module,
@@ -785,14 +779,14 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
         % is documented in term.m, and the compiler relies on it.
         parser_get_term_context(!.PS, Context, TermContext),
         BaseTerm = functor(implementation_defined(Name), [], TermContext),
-        BaseTermParse = ok(BaseTerm)
+        BaseTermParse = pr_ok(BaseTerm)
     ;
         ( Token = open
         ; Token = open_ct
         ),
         parse_term(SubTermParse, !TokensLeft, !PS),
         (
-            SubTermParse = ok(_),
+            SubTermParse = pr_ok(_),
             ( if !.TokensLeft = token_cons(close, _Context, !:TokensLeft) then
                 BaseTermParse = SubTermParse
             else
@@ -800,7 +794,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
                     !TokensLeft, !.PS)
             )
         ;
-            SubTermParse = error(_, _),
+            SubTermParse = pr_error(_, _),
             % Propagate error upwards.
             BaseTermParse = SubTermParse
         )
@@ -828,20 +822,20 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
             % the same as other functors.
             parse_term(SubTermParse, !TokensLeft, !PS),
             (
-                SubTermParse = ok(SubTerm),
+                SubTermParse = pr_ok(SubTerm),
                 conjunction_to_list(SubTerm, ArgTerms),
                 ( if
                     !.TokensLeft = token_cons(close_curly, _Context,
                         !:TokensLeft)
                 then
                     BaseTerm = functor(atom("{}"), ArgTerms, TermContext),
-                    BaseTermParse = ok(BaseTerm)
+                    BaseTermParse = pr_ok(BaseTerm)
                 else
                     parser_unexpected("expecting `}' or operator",
                         BaseTermParse, !TokensLeft, !.PS)
                 )
             ;
-                SubTermParse = error(_, _),
+                SubTermParse = pr_error(_, _),
                 % Propagate error upwards.
                 BaseTermParse = SubTermParse
             )
@@ -864,7 +858,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
             !TokensLeft, !.PS)
     ),
     ( if
-        BaseTermParse = ok(BaseTermOpen),
+        BaseTermParse = pr_ok(BaseTermOpen),
         !.TokensLeft = token_cons(open_ct, _OpenContext, !:TokensLeft)
     then
         parse_higher_order_term_rest(BaseTermOpen, Context, TermParse,
@@ -883,7 +877,7 @@ parse_simple_term(Token, Context, Prec, TermParse, !TokensLeft, !PS) :-
     % The recursive call allows us to parse "Term(Args1)(Args2)" as well.
     %
 :- pred parse_higher_order_term_rest(term(T)::in, token_context::in,
-    parse(term(T))::out, token_list::in, token_list::out,
+    parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
@@ -891,7 +885,7 @@ parse_higher_order_term_rest(BaseTerm, Context, TermParse, !TokensLeft, !PS) :-
     parser_get_term_context(!.PS, Context, TermContext),
     parse_args(ArgsParse, !TokensLeft, !PS),
     (
-        ArgsParse = ok(Args),
+        ArgsParse = pr_ok(Args),
         ApplyTerm = functor(atom(""), [BaseTerm | Args], TermContext),
         ( if
             !.TokensLeft = token_cons(open_ct, _OpenContext, !:TokensLeft)
@@ -899,12 +893,12 @@ parse_higher_order_term_rest(BaseTerm, Context, TermParse, !TokensLeft, !PS) :-
             parse_higher_order_term_rest(ApplyTerm, Context, TermParse,
                 !TokensLeft, !PS)
         else
-            TermParse = ok(ApplyTerm)
+            TermParse = pr_ok(ApplyTerm)
         )
     ;
-        ArgsParse = error(Message, Tokens),
+        ArgsParse = pr_error(Message, Tokens),
         % Propagate error upwards, after changing type.
-        TermParse = error(Message, Tokens)
+        TermParse = pr_error(Message, Tokens)
     ).
 
 :- pred conjunction_to_list(term(T)::in, list(term(T))::out) is det.
@@ -917,8 +911,8 @@ conjunction_to_list(Term, ArgTerms) :-
         ArgTerms = [Term]
     ).
 
-:- pred parse_special_atom(string::in, term.context::in,
-    parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_special_atom(string::in, term_context::in,
+    parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
@@ -926,33 +920,33 @@ parse_special_atom(Atom, TermContext, Term, !TokensLeft, !PS) :-
     ( if !.TokensLeft = token_cons(open_ct, _Context, !:TokensLeft) then
         parse_args(Args0, !TokensLeft, !PS),
         (
-            Args0 = ok(Args),
-            Term = ok(term.functor(term.atom(Atom), Args, TermContext))
+            Args0 = pr_ok(Args),
+            Term = pr_ok(term.functor(term.atom(Atom), Args, TermContext))
         ;
-            Args0 = error(Message, Tokens),
+            Args0 = pr_error(Message, Tokens),
             % Propagate error upwards.
-            Term = error(Message, Tokens)
+            Term = pr_error(Message, Tokens)
         )
     else
-        Term = ok(term.functor(term.atom(Atom), [], TermContext))
+        Term = pr_ok(term.functor(term.atom(Atom), [], TermContext))
     ).
 
-:- pred parse_list(parse(term(T))::out, token_list::in, token_list::out,
+:- pred parse_list(parse_result(term(T))::out, token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
 
 parse_list(List, !TokensLeft, !PS) :-
     parse_list_elem(Arg0, !TokensLeft, !PS),
     (
-        Arg0 = ok(Arg),
+        Arg0 = pr_ok(Arg),
         parse_list_tail(Arg, List, !TokensLeft, !PS)
     ;
-        Arg0 = error(_, _),
+        Arg0 = pr_error(_, _),
         % Propagate error.
         List = Arg0
     ).
 
-:- pred parse_list_tail(term(T)::in, parse(term(T))::out,
+:- pred parse_list_tail(term(T)::in, parse_result(term(T))::out,
     token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
@@ -964,36 +958,36 @@ parse_list_tail(Arg, List, !TokensLeft, !PS) :-
         ( if Token = comma then
             parse_list(Tail0, !TokensLeft, !PS),
             (
-                Tail0 = ok(Tail),
-                List = ok(term.functor(term.atom("[|]"), [Arg, Tail],
+                Tail0 = pr_ok(Tail),
+                List = pr_ok(term.functor(term.atom("[|]"), [Arg, Tail],
                     TermContext))
             ;
-                Tail0 = error(_, _),
+                Tail0 = pr_error(_, _),
                 % Propagate error.
                 List = Tail0
             )
         else if Token = ht_sep then
             parse_arg(Tail0, !TokensLeft, !PS),
             (
-                Tail0 = ok(Tail),
+                Tail0 = pr_ok(Tail),
                 ( if
                     !.TokensLeft = token_cons(close_list, _Context,
                         !:TokensLeft)
                 then
-                    List = ok(term.functor(term.atom("[|]"), [Arg, Tail],
+                    List = pr_ok(term.functor(term.atom("[|]"), [Arg, Tail],
                         TermContext))
                 else
                     parser_unexpected("expecting ']' or operator", List,
                         !TokensLeft, !.PS)
                 )
             ;
-                Tail0 = error(_, _),
+                Tail0 = pr_error(_, _),
                 % Propagate error.
                 List = Tail0
             )
         else if Token = close_list then
             Tail = term.functor(term.atom("[]"), [], TermContext),
-            List = ok(term.functor(term.atom("[|]"), [Arg, Tail],
+            List = pr_ok(term.functor(term.atom("[|]"), [Arg, Tail],
                 TermContext))
         else
             parser_unexpected_tok(Token, Context,
@@ -1003,10 +997,10 @@ parse_list_tail(Arg, List, !TokensLeft, !PS) :-
     ;
         !.TokensLeft = token_nil,
         % XXX The error message should state the line that the list started on.
-        List = error("unexpected end-of-file in list", !.TokensLeft)
+        List = pr_error("unexpected end-of-file in list", !.TokensLeft)
     ).
 
-:- pred parse_args(parse(list(term(T)))::out,
+:- pred parse_args(parse_result(list(term(T)))::out,
     token_list::in, token_list::out,
     parser_state(Ops, T)::in, parser_state(Ops, T)::out) is det
     <= op_table(Ops).
@@ -1014,7 +1008,7 @@ parse_list_tail(Arg, List, !TokensLeft, !PS) :-
 parse_args(List, !TokensLeft, !PS) :-
     parse_arg(Arg0, !TokensLeft, !PS),
     (
-        Arg0 = ok(Arg),
+        Arg0 = pr_ok(Arg),
         (
             !.TokensLeft = token_cons(Token, Context, !:TokensLeft),
             ( if Token = comma then
@@ -1022,28 +1016,28 @@ parse_args(List, !TokensLeft, !PS) :-
                     parse_args(Tail0, !TokensLeft, !PS)
                 ),
                 (
-                    Tail0 = ok(Tail),
-                    List = ok([Arg|Tail])
+                    Tail0 = pr_ok(Tail),
+                    List = pr_ok([Arg|Tail])
                 ;
-                    Tail0 = error(_, _),
+                    Tail0 = pr_error(_, _),
                     % Propagate error upwards.
                     List = Tail0
                 )
             else if Token = close then
-                List = ok([Arg])
+                List = pr_ok([Arg])
             else
                 parser_unexpected_tok(Token, Context,
                     "expected `,', `)', or operator", List, !TokensLeft, !.PS)
             )
         ;
             !.TokensLeft = token_nil,
-            List = error("unexpected end-of-file in argument list",
+            List = pr_error("unexpected end-of-file in argument list",
                 !.TokensLeft)
         )
     ;
-        Arg0 = error(Message, Tokens),
+        Arg0 = pr_error(Message, Tokens),
         % Propagate error upwards.
-        List = error(Message, Tokens)
+        List = pr_error(Message, Tokens)
     ).
 
 %---------------------------------------------------------------------------%
@@ -1053,7 +1047,7 @@ parse_args(List, !TokensLeft, !PS) :-
     % must have been an operator precedence error. Otherwise, it was some
     % other sort of error, so issue the usual error message.
     %
-:- pred parser_unexpected(string::in, parse(U)::out,
+:- pred parser_unexpected(string::in, parse_result(U)::out,
     token_list::in, token_list::out, parser_state(Ops, T)::in) is det
     <= op_table(Ops).
 
@@ -1064,12 +1058,12 @@ parser_unexpected(UsualMessage, Error, !TokensLeft, PS) :-
             !TokensLeft, PS)
     ;
         !.TokensLeft = token_nil,
-        Error = error(UsualMessage, !.TokensLeft)
+        Error = pr_error(UsualMessage, !.TokensLeft)
     ).
 
 :- pred parser_unexpected_tok(token::in, token_context::in, string::in,
-    parse(U)::out, token_list::in, token_list::out, parser_state(Ops, T)::in)
-    is det <= op_table(Ops).
+    parse_result(U)::out, token_list::in, token_list::out,
+    parser_state(Ops, T)::in) is det <= op_table(Ops).
 
 parser_unexpected_tok(Token, Context, UsualMessage, Error, !TokensLeft, PS) :-
     % Push the token back, so that the error message points at *it*
@@ -1084,58 +1078,29 @@ parser_unexpected_tok(Token, Context, UsualMessage, Error, !TokensLeft, PS) :-
         ; ops.lookup_postfix_op(OpTable, Op, _, _)
         )
     then
-        Error = error("operator precedence error", !.TokensLeft)
+        Error = pr_error("operator precedence error", !.TokensLeft)
     else
-        Error = error(UsualMessage, !.TokensLeft)
+        Error = pr_error(UsualMessage, !.TokensLeft)
     ).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-:- pred find_first_prefix_op(op_info::in, list(op_info)::in,
-    ops.priority::out, ops.assoc::out) is semidet.
+    % XXX OPS Rename.
+:- pred check_priority(arg_prio_gt_or_ge::in, priority::in, priority::in)
+    is semidet.
 
-find_first_prefix_op(OpInfo, OtherOpInfos, OpPriority, RightAssoc) :-
-    OpInfo = op_info(Class, Priority),
-    ( if Class = prefix(RightAssocPrime) then
-        OpPriority = Priority,
-        RightAssoc = RightAssocPrime
-    else
-        OtherOpInfos = [HeadOpInfo | TailOpInfos],
-        find_first_prefix_op(HeadOpInfo, TailOpInfos, OpPriority, RightAssoc)
-    ).
-
-:- pred find_first_binary_prefix_op(op_info::in, list(op_info)::in,
-    ops.priority::out, ops.assoc::out, ops.assoc::out) is semidet.
-
-find_first_binary_prefix_op(OpInfo, OtherOpInfos,
-        OpPriority, RightAssoc, RightRightAssoc) :-
-    OpInfo = op_info(Class, Priority),
-    ( if Class = binary_prefix(RightAssocPrime, RightRightAssocPrime) then
-        OpPriority = Priority,
-        RightAssoc = RightAssocPrime,
-        RightRightAssoc = RightRightAssocPrime
-    else
-        OtherOpInfos = [HeadOpInfo | TailOpInfos],
-        find_first_binary_prefix_op(HeadOpInfo, TailOpInfos,
-            OpPriority, RightAssoc, RightRightAssoc)
-    ).
-
-%---------------------------------------------------------------------------%
-
-:- pred check_priority(ops.assoc::in, int::in, int::in) is semidet.
-
-check_priority(y, MaxPriority, Priority) :-
-    Priority =< MaxPriority.
-check_priority(x, MaxPriority, Priority) :-
-    Priority < MaxPriority.
+check_priority(arg_ge, prio(OpPriority), prio(Priority)) :-
+    Priority >= OpPriority.
+check_priority(arg_gt, prio(OpPriority), prio(Priority)) :-
+    Priority > OpPriority.
 
 :- pred parser_get_term_context(parser_state(Ops, T)::in, token_context::in,
-    term.context::out) is det.
+    term_context::out) is det.
 
 parser_get_term_context(ParserState, TokenContext, TermContext) :-
     FileName = parser_state_get_stream_name(ParserState),
-    term.context_init(FileName, TokenContext, TermContext).
+    TermContext = term_context.context_init(FileName, TokenContext).
 
 %---------------------------------------------------------------------------%
 

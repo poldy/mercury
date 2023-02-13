@@ -26,6 +26,7 @@
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 
+:- import_module io.
 :- import_module list.
 
 %-----------------------------------------------------------------------------%
@@ -34,7 +35,8 @@
 
 :- func init_switch_detect_info(module_info) = switch_detect_info.
 
-:- pred detect_switches_in_module(module_info::in, module_info::out) is det.
+:- pred detect_switches_in_module(io.text_output_stream::in,
+    module_info::in, module_info::out) is det.
 
 :- pred detect_switches_in_proc(switch_detect_info::in,
     proc_info::in, proc_info::out) is det.
@@ -77,13 +79,13 @@
 :- import_module hlds.instmap.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -96,6 +98,8 @@
 :- import_module set.
 :- import_module set_tree234.
 :- import_module term.
+:- import_module term_context.
+:- import_module term_subst.
 :- import_module unit.
 
 %-----------------------------------------------------------------------------%
@@ -129,49 +133,50 @@ init_switch_detect_info(ModuleInfo) = Info :-
 
 %-----------------------------------------------------------------------------%
 
-detect_switches_in_module(!ModuleInfo) :-
+detect_switches_in_module(ProgressStream, !ModuleInfo) :-
     % Traverse the module structure, calling detect_switches_in_goal
     % for each procedure body.
     Info = init_switch_detect_info(!.ModuleInfo),
     module_info_get_valid_pred_ids(!.ModuleInfo, ValidPredIds),
     ValidPredIdSet = set_tree234.list_to_set(ValidPredIds),
 
-    module_info_get_preds(!.ModuleInfo, PredMap0),
-    map.to_assoc_list(PredMap0, PredIdsInfos0),
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    map.to_assoc_list(PredIdTable0, PredIdsInfos0),
 
-    detect_switches_in_preds(Info, ValidPredIdSet,
+    detect_switches_in_preds(ProgressStream, Info, ValidPredIdSet,
         PredIdsInfos0, PredIdsInfos),
-    map.from_sorted_assoc_list(PredIdsInfos, PredMap),
-    module_info_set_preds(PredMap, !ModuleInfo).
+    map.from_sorted_assoc_list(PredIdsInfos, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo).
 
-:- pred detect_switches_in_preds(switch_detect_info::in,
-    set_tree234(pred_id)::in,
+:- pred detect_switches_in_preds(io.text_output_stream::in,
+    switch_detect_info::in, set_tree234(pred_id)::in,
     assoc_list(pred_id, pred_info)::in, assoc_list(pred_id, pred_info)::out)
     is det.
 
-detect_switches_in_preds(_, _, [], []).
-detect_switches_in_preds(Info, ValidPredIdSet,
+detect_switches_in_preds(_, _, _, [], []).
+detect_switches_in_preds(ProgressStream, Info, ValidPredIdSet,
         [PredIdInfo0 | PredIdsInfos0], [PredIdInfo | PredIdsInfos]) :-
     PredIdInfo0 = PredId - PredInfo0,
     ( if set_tree234.contains(ValidPredIdSet, PredId) then
-        detect_switches_in_pred(Info, PredId, PredInfo0, PredInfo),
+        detect_switches_in_pred(ProgressStream, Info, PredId,
+            PredInfo0, PredInfo),
         PredIdInfo = PredId - PredInfo
     else
         PredIdInfo = PredIdInfo0
     ),
-    detect_switches_in_preds(Info, ValidPredIdSet,
+    detect_switches_in_preds(ProgressStream, Info, ValidPredIdSet,
         PredIdsInfos0, PredIdsInfos).
 
-:- pred detect_switches_in_pred(switch_detect_info::in, pred_id::in,
-    pred_info::in, pred_info::out) is det.
+:- pred detect_switches_in_pred(io.text_output_stream::in,
+    switch_detect_info::in, pred_id::in, pred_info::in, pred_info::out) is det.
 
-detect_switches_in_pred(Info, PredId, !PredInfo) :-
+detect_switches_in_pred(ProgressStream, Info, PredId, !PredInfo) :-
     NonImportedProcIds = pred_info_valid_non_imported_procids(!.PredInfo),
     (
         NonImportedProcIds = [_ | _],
         trace [io(!IO)] (
             ModuleInfo = Info ^ sdi_module_info,
-            write_pred_progress_message(ModuleInfo,
+            maybe_write_pred_progress_message(ProgressStream, ModuleInfo,
                 "Detecting switches in", PredId, !IO)
         ),
         pred_info_get_proc_table(!.PredInfo, ProcTable0),
@@ -209,21 +214,21 @@ detect_switches_in_proc(Info, !ProcInfo) :-
     % based on the modes of the head vars, and pass these to
     % `detect_switches_in_goal'.
     Info = switch_detect_info(ModuleInfo, AllowMulti),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes),
+    proc_info_get_var_table(!.ProcInfo, VarTable),
     Requant0 = do_not_need_to_requantify,
     BodyDeletedCallCallees0 = set.init,
     LocalInfo0 = local_switch_detect_info(ModuleInfo, AllowMulti, Requant0,
-        VarTypes, BodyDeletedCallCallees0),
+        VarTable, BodyDeletedCallCallees0),
 
     proc_info_get_goal(!.ProcInfo, Goal0),
     proc_info_get_initial_instmap(ModuleInfo, !.ProcInfo, InstMap0),
     detect_switches_in_goal(InstMap0, no, Goal0, Goal, LocalInfo0, LocalInfo),
     proc_info_set_goal(Goal, !ProcInfo),
     LocalInfo = local_switch_detect_info(_ModuleInfo, _AllowMulti, Requant,
-        _VarTypes, BodyDeletedCallCallees),
+        _VarTable, BodyDeletedCallCallees),
     (
         Requant = need_to_requantify,
-        requantify_proc_general(ordinary_nonlocals_maybe_lambda, !ProcInfo)
+        requantify_proc_general(ord_nl_maybe_lambda, !ProcInfo)
     ;
         Requant = do_not_need_to_requantify
     ),
@@ -239,7 +244,7 @@ detect_switches_in_proc(Info, !ProcInfo) :-
                 lsdi_module_info        :: module_info,
                 lsdi_allow_multi_arm    :: allow_multi_arm,
                 lsdi_requant            :: need_to_requantify,
-                lsdi_vartypes           :: vartypes,
+                lsdi_var_table          :: var_table,
                 lsdi_deleted_callees    :: set(pred_proc_id)
             ).
 
@@ -410,9 +415,9 @@ detect_switches_in_cases(_, _, [], [], !LocalInfo).
 detect_switches_in_cases(Var, InstMap0, [Case0 | Cases0], [Case | Cases],
         !LocalInfo) :-
     Case0 = case(MainConsId, OtherConsIds, Goal0),
-    VarTypes = !.LocalInfo ^ lsdi_vartypes,
+    VarTable = !.LocalInfo ^ lsdi_var_table,
+    lookup_var_type(VarTable, Var, VarType),
     ModuleInfo0 = !.LocalInfo ^ lsdi_module_info,
-    lookup_var_type(VarTypes, Var, VarType),
     bind_var_to_functors(Var, VarType, MainConsId, OtherConsIds,
         InstMap0, InstMap1, ModuleInfo0, ModuleInfo),
     !LocalInfo ^ lsdi_module_info := ModuleInfo,
@@ -930,8 +935,8 @@ detect_switch_candidates_in_disj(GoalInfo, Disjuncts0, InstMap0,
         inst_is_bound(ModuleInfo, VarInst0),
         partition_disj(Disjuncts0, Var, GoalInfo, Left, Cases, !LocalInfo),
 
-        VarTypes = !.LocalInfo ^ lsdi_vartypes,
-        lookup_var_type(VarTypes, Var, VarType),
+        VarTable = !.LocalInfo ^ lsdi_var_table,
+        lookup_var_type(VarTable, Var, VarType),
         is_candidate_switch(ModuleInfo, MaybeRequiredVar,
             Var, VarType, VarInst0, Cases, Left, Candidate)
     then
@@ -1364,12 +1369,12 @@ find_bind_var_2(Var, ProcessUnify, Goal0, Goal, !Subst,
             % Check whether the unification is a deconstruction unification
             % on either Var or on a variable aliased to Var.
             UnifyInfo0 = deconstruct(UnifyVar, _ConsId, _, _, _, _),
-            term.apply_rec_substitution_in_term(!.Subst,
-                term.variable(Var, term.context_init),
-                term.variable(SubstVar, term.context_init)),
-            term.apply_rec_substitution_in_term(!.Subst,
-                term.variable(UnifyVar, term.context_init),
-                term.variable(SubstUnifyVar, term.context_init)),
+            term_subst.apply_rec_substitution_in_term(!.Subst,
+                term.variable(Var, dummy_context),
+                term.variable(SubstVar, dummy_context)),
+            term_subst.apply_rec_substitution_in_term(!.Subst,
+                term.variable(UnifyVar, dummy_context),
+                term.variable(SubstUnifyVar, dummy_context)),
             SubstVar = SubstUnifyVar
         then
             ProcessUnify(Var, Goal0, Goals, !Result, !Info),

@@ -32,6 +32,7 @@
 :- import_module parse_tree.parse_tree_out.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.parse_tree_out_term.
+:- import_module parse_tree.parse_tree_out_type_repn.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_out.
 
@@ -121,7 +122,8 @@ write_type_params(Stream, TVarSet, TypeParams, !IO) :-
     ;
         TypeParams = [HeadParam | TailParams],
         io.write_string(Stream, "(", !IO),
-        mercury_output_var(TVarSet, print_name_only, HeadParam, Stream, !IO),
+        mercury_output_var_vs(TVarSet, print_name_only, HeadParam,
+            Stream, !IO),
         write_comma_type_params_loop(Stream, TVarSet, TailParams, !IO),
         io.write_string(Stream, ")", !IO)
     ).
@@ -132,7 +134,7 @@ write_type_params(Stream, TVarSet, TypeParams, !IO) :-
 write_comma_type_params_loop(_Stream, _TVarSet, [], !IO).
 write_comma_type_params_loop(Stream, TVarSet, [Param | Params], !IO) :-
     io.write_string(Stream, ", ", !IO),
-    mercury_output_var(TVarSet, print_name_only, Param, Stream, !IO),
+    mercury_output_var_vs(TVarSet, print_name_only, Param, Stream, !IO),
     write_comma_type_params_loop(Stream, TVarSet, Params, !IO).
 
 :- pred write_type_body(hlds_out_info::in, io.text_output_stream::in,
@@ -369,21 +371,6 @@ foreign_type_assertions_to_simple_string(ForeignTypeAssertions) = String :-
     Assertions = set.to_sorted_list(AssertionSet),
     AssertionStrs = list.map(foreign_type_assertion_to_string, Assertions),
     String = "[" ++ string.join_list(", ", AssertionStrs) ++ "]".
-
-:- func foreign_type_assertion_to_string(foreign_type_assertion)
-    = string.
-
-foreign_type_assertion_to_string(Assertion) = String :-
-    (
-        Assertion = foreign_type_can_pass_as_mercury_type,
-        String = "pass_as_mercury"
-    ;
-        Assertion = foreign_type_word_aligned_pointer,
-        String = "word_aligned_ptr"
-    ;
-        Assertion = foreign_type_stable,
-        String = "stable"
-    ).
 
 :- pred accumulate_ctor_repns(one_or_more(constructor_repn)::in,
     list(constructor_repn)::in, list(constructor_repn)::out) is det.

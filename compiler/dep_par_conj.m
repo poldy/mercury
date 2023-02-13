@@ -10,15 +10,17 @@
 % File: dep_par_conj.m.
 % Author: wangp.
 %
-% This module implements dependent parallel conjunction using a HLDS->HLDS
-% transformation. The transformation has two main components: a synchronization
-% transformation and a specialization transformation.
+% This module implements dependent parallel conjunction using HLDS->HLDS
+% transformations. The overall process has two main components:
+%
+% - a synchronization transformation, and
+% - a specialization transformation.
 %
 % 1 The synchronization transformation ensures that consumers do not access
 %   shared variables before producers generate them. We do this by adding calls
 %   to the synchronisation primitives defined in library/par_builtin.m.
 %   In general, we make producers signal the availability of shared variables
-%   as soon as possible and we make consumers wait for the shared variables
+%   as soon as possible, and we make consumers wait for the shared variables
 %   as late as possible.
 %
 % 2 The specialization transformation spots the need for and creates new
@@ -96,17 +98,13 @@
 %
 % - The predicates and functions in this module whose names start with the
 %   prefixes "sync_dep_par_conjs", "insert_wait_in" and "insert_signal_in"
-%   implement the synchronization transformation
+%   implement the synchronization transformation.
 %
 % - Those whose names start with "find_specialization_requests" or include
 %   "specialization" implement part (a) of the specialization transformation.
 %
 % - Those whose names start with "add_requested_specialized" implement part (b)
 %   of the specialization transformation.
-%
-% TODO:
-% - Reconsider when this pass is run; in particular par_builtin primitives
-%   ought to be inlined.
 %
 %---------------------------------------------------------------------------%
 
@@ -142,10 +140,10 @@
 :- import_module hlds.hlds_out.hlds_out_util.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
@@ -161,8 +159,10 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_mode.
-:- import_module parse_tree.prog_util.
+:- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -176,7 +176,7 @@
 :- import_module set.
 :- import_module std_util.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -236,11 +236,10 @@ impl_dep_par_conjs_in_module(!ModuleInfo) :-
                 sync_allow_some_paths_only  ::
                                             maybe_allow_some_paths_only_waits,
 
-                % The varset and vartypes for the procedure being analysed.
-                % These fields are updated when we add new variables.
+                % The var_table for the procedure being analysed.
+                % This field is updated when we add new variables.
                 % XXX We may also need the rtti_var_maps.
-                sync_varset                 :: prog_varset,
-                sync_vartypes               :: vartypes,
+                sync_var_table              :: var_table,
 
                 % The current procedure.
                 sync_this_proc              :: pred_proc_id,
@@ -285,12 +284,11 @@ maybe_sync_dep_par_conjs_in_proc(PredId, ProcId, !ModuleInfo, !ProcsToScan,
 
 sync_dep_par_conjs_in_proc(PredId, ProcId, IgnoreVars, !ModuleInfo,
         !ProcsToScan, !TSStringTable) :-
-    some [!PredInfo, !ProcInfo, !Goal, !VarSet, !VarTypes, !SyncInfo] (
+    some [!PredInfo, !ProcInfo, !Goal, !VarTable, !SyncInfo] (
         module_info_pred_proc_info(!.ModuleInfo, PredId, ProcId,
             !:PredInfo, !:ProcInfo),
         proc_info_get_goal(!.ProcInfo, !:Goal),
-        proc_info_get_varset(!.ProcInfo, !:VarSet),
-        proc_info_get_vartypes(!.ProcInfo, !:VarTypes),
+        proc_info_get_var_table(!.ProcInfo, !:VarTable),
         proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InstMap0),
         module_info_get_globals(!.ModuleInfo, Globals),
         globals.get_opt_tuple(Globals, OptTuple),
@@ -303,10 +301,9 @@ sync_dep_par_conjs_in_proc(PredId, ProcId, IgnoreVars, !ModuleInfo,
 
         GoalBeforeDepParConj = !.Goal,
         !:SyncInfo = sync_info(!.ModuleInfo, IgnoreVars, AllowSomePathsOnly,
-            !.VarSet, !.VarTypes, proc(PredId, ProcId), !.TSStringTable),
+            !.VarTable, proc(PredId, ProcId), !.TSStringTable),
         sync_dep_par_conjs_in_goal(!Goal, InstMap0, _, !SyncInfo),
-        !.SyncInfo = sync_info(_, _, _, !:VarSet, !:VarTypes, _,
-            !:TSStringTable),
+        !.SyncInfo = sync_info(_, _, _, !:VarTable, _, !:TSStringTable),
         % XXX RTTI varmaps may need to be updated
 
         trace [compile_time(flag("debug-dep-par-conj")), io(!IO)] (
@@ -324,13 +321,14 @@ sync_dep_par_conjs_in_proc(PredId, ProcId, IgnoreVars, !ModuleInfo,
                 io.output_stream(Stream, !IO),
                 io.format(Stream, "Pred/Proc: %s/%s before dep-par-conj:\n",
                     [s(string(PredId)), s(string(ProcId))], !IO),
-                write_goal(OutInfo, Stream, !.ModuleInfo, !.VarSet,
-                    print_name_and_num, 0, "", GoalBeforeDepParConj, !IO),
+                write_goal_nl(OutInfo, Stream, !.ModuleInfo,
+                    vns_var_table(!.VarTable), print_name_and_num,
+                    0, "", GoalBeforeDepParConj, !IO),
                 io.nl(Stream, !IO),
                 io.write_string(Stream, "After dep-par-conj:\n", !IO),
-                write_goal(OutInfo, Stream, !.ModuleInfo, !.VarSet,
-                    print_name_and_num, 0, "", !.Goal, !IO),
-                io.nl(Stream, !IO)
+                write_goal_nl(OutInfo, Stream, !.ModuleInfo,
+                    vns_var_table(!.VarTable), print_name_and_num,
+                    0, "", !.Goal, !IO)
             else
                 true
             )
@@ -339,8 +337,7 @@ sync_dep_par_conjs_in_proc(PredId, ProcId, IgnoreVars, !ModuleInfo,
         % We really only need to run this part if something changed, but we
         % only run this predicate on procedures which are likely to have
         % parallel conjunctions.
-        proc_info_set_varset(!.VarSet, !ProcInfo),
-        proc_info_set_vartypes(!.VarTypes, !ProcInfo),
+        proc_info_set_var_table(!.VarTable, !ProcInfo),
         proc_info_set_goal(!.Goal, !ProcInfo),
         fixup_and_reinsert_proc(PredId, ProcId, !.PredInfo, !.ProcInfo,
             !ModuleInfo),
@@ -474,7 +471,7 @@ sync_dep_par_conjs_in_cases([Case0 | Cases0], [Case | Cases], InstMap0,
 
 maybe_sync_dep_par_conj(Conjuncts, GoalInfo, NewGoal, InstMap, !SyncInfo) :-
     !.SyncInfo = sync_info(ModuleInfo0, IgnoreVars, AllowSomePathsOnly,
-        VarSet0, VarTypes0, PredProcId, TSStringTable0),
+        VarTable0, PredProcId, TSStringTable0),
     % Find the variables that are shared between conjuncts.
     SharedVars0 = find_shared_variables(ModuleInfo0, InstMap, Conjuncts),
 
@@ -491,10 +488,10 @@ maybe_sync_dep_par_conj(Conjuncts, GoalInfo, NewGoal, InstMap, !SyncInfo) :-
         globals.lookup_bool_option(Globals, par_loop_control, ParLoopControl),
         (
             ParLoopControl = no,
-            reorder_indep_par_conj(PredProcId, VarTypes0, InstMap, Conjuncts,
+            reorder_indep_par_conj(PredProcId, VarTable0, InstMap, Conjuncts,
                 GoalInfo, NewGoal, ModuleInfo0, ModuleInfo),
             !:SyncInfo = sync_info(ModuleInfo, IgnoreVars, AllowSomePathsOnly,
-                VarSet0, VarTypes0, PredProcId, TSStringTable0)
+                VarTable0, PredProcId, TSStringTable0)
         ;
             ParLoopControl = yes,
             % Don't swap the conjuncts, parallel loop control can do a better
@@ -504,10 +501,9 @@ maybe_sync_dep_par_conj(Conjuncts, GoalInfo, NewGoal, InstMap, !SyncInfo) :-
     else
         sync_dep_par_conj(ModuleInfo0, AllowSomePathsOnly, SharedVars,
             Conjuncts, GoalInfo, NewGoal, InstMap,
-            VarSet0, VarSet, VarTypes0, VarTypes, TSStringTable0,
-            TSStringTable),
+            VarTable0, VarTable, TSStringTable0, TSStringTable),
         !:SyncInfo = sync_info(ModuleInfo0, IgnoreVars, AllowSomePathsOnly,
-            VarSet, VarTypes, PredProcId, TSStringTable)
+            VarTable, PredProcId, TSStringTable)
     ).
 
     % Transforming the parallel conjunction.
@@ -537,20 +533,19 @@ maybe_sync_dep_par_conj(Conjuncts, GoalInfo, NewGoal, InstMap, !SyncInfo) :-
 :- pred sync_dep_par_conj(module_info::in,
     maybe_allow_some_paths_only_waits::in, set_of_progvar::in,
     list(hlds_goal)::in, hlds_goal_info::in, hlds_goal::out, instmap::in,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
+    var_table::in, var_table::out,
     ts_string_table::in, ts_string_table::out) is det.
 
 sync_dep_par_conj(ModuleInfo, AllowSomePathsOnly, SharedVars, Goals, GoalInfo,
-        NewGoal, InstMap, !VarSet, !VarTypes, !TSStringTable) :-
+        NewGoal, InstMap, !VarTable, !TSStringTable) :-
     SharedVarsList = set_of_var.to_sorted_list(SharedVars),
-    list.map_foldl4(allocate_future(ModuleInfo), SharedVarsList,
-        AllocateFuturesGoals, !VarSet, !VarTypes, map.init, FutureMap,
-        !TSStringTable),
+    list.map_foldl3(allocate_future(ModuleInfo), SharedVarsList,
+        AllocateFuturesGoals, !VarTable, map.init, FutureMap, !TSStringTable),
     list.condense(AllocateFuturesGoals, AllocateFutures),
-    list.map_foldl3(
+    list.map_foldl2(
         sync_dep_par_conjunct(ModuleInfo, AllowSomePathsOnly, SharedVars,
             FutureMap),
-        Goals, NewGoals, InstMap, _, !VarSet, !VarTypes),
+        Goals, NewGoals, InstMap, _, !VarTable),
 
     LastGoal = hlds_goal(conj(parallel_conj, NewGoals), GoalInfo),
     Conj = AllocateFutures ++ [LastGoal],
@@ -586,10 +581,10 @@ sync_dep_par_conj(ModuleInfo, AllowSomePathsOnly, SharedVars, Goals, GoalInfo,
 :- pred sync_dep_par_proc_body(module_info::in,
     maybe_allow_some_paths_only_waits::in, set_of_progvar::in,
     future_map::in, instmap::in, hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 sync_dep_par_proc_body(ModuleInfo, AllowSomePathsOnly, SharedVars, FutureMap,
-        InstMap, !Goal, !VarSet, !VarTypes) :-
+        InstMap, !Goal, !VarTable) :-
     Nonlocals = goal_get_nonlocals(!.Goal),
     set_of_var.intersect(Nonlocals, SharedVars, NonlocalSharedVars),
     ( if set_of_var.is_empty(NonlocalSharedVars) then
@@ -601,14 +596,14 @@ sync_dep_par_proc_body(ModuleInfo, AllowSomePathsOnly, SharedVars, FutureMap,
             NonlocalSharedVars, ConsumedVarsList, ProducedVarsList),
 
         % Insert waits into the conjunct.
-        list.foldl3(
+        list.foldl2(
             insert_wait_in_goal_for_proc(ModuleInfo,
                 AllowSomePathsOnly, FutureMap),
-            ConsumedVarsList, !Goal, !VarSet, !VarTypes),
+            ConsumedVarsList, !Goal, !VarTable),
 
         % Insert signals into the conjunct, as early as possible.
-        list.foldl3(insert_signal_in_goal(ModuleInfo, FutureMap),
-            ProducedVarsList, !Goal, !VarSet, !VarTypes)
+        list.foldl2(insert_signal_in_goal(ModuleInfo, FutureMap),
+            ProducedVarsList, !Goal, !VarTable)
     ),
 
     set_of_var.difference(SharedVars, Nonlocals, WaitAfterVars),
@@ -618,18 +613,18 @@ sync_dep_par_proc_body(ModuleInfo, AllowSomePathsOnly, SharedVars, FutureMap,
         % WaitAfterVars are pushed into this call but not consumed in the body.
         % Our caller expects them to be consumed by the time this call returns
         % so we must wait for them.
-        list.foldl3(insert_wait_after_goal(ModuleInfo, FutureMap),
+        list.foldl2(insert_wait_after_goal(ModuleInfo, FutureMap),
             set_of_var.to_sorted_list(WaitAfterVars),
-            !Goal, !VarSet, !VarTypes)
+            !Goal, !VarTable)
     ).
 
 :- pred sync_dep_par_conjunct(module_info::in,
     maybe_allow_some_paths_only_waits::in, set_of_progvar::in, future_map::in,
     hlds_goal::in, hlds_goal::out, instmap::in, instmap::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 sync_dep_par_conjunct(ModuleInfo, AllowSomePathsOnly, SharedVars, FutureMap,
-        !Goal, !InstMap, !VarSet, !VarTypes) :-
+        !Goal, !InstMap, !VarTable) :-
     Nonlocals = goal_get_nonlocals(!.Goal),
     set_of_var.intersect(Nonlocals, SharedVars, NonlocalSharedVars),
     ( if set_of_var.is_empty(NonlocalSharedVars) then
@@ -641,19 +636,19 @@ sync_dep_par_conjunct(ModuleInfo, AllowSomePathsOnly, SharedVars, FutureMap,
             NonlocalSharedVars, ConsumedVarsList, ProducedVarsList),
 
         % Insert waits into the conjunct, as late as possible.
-        list.map_foldl3(
+        list.map_foldl2(
             insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap),
             ConsumedVarsList, _WaitedOnAllSuccessPaths,
-            !Goal, !VarSet, !VarTypes),
+            !Goal, !VarTable),
 
         % Insert signals into the conjunct, as early as possible.
-        list.foldl3(insert_signal_in_goal(ModuleInfo, FutureMap),
-            ProducedVarsList, !Goal, !VarSet, !VarTypes),
+        list.foldl2(insert_signal_in_goal(ModuleInfo, FutureMap),
+            ProducedVarsList, !Goal, !VarTable),
 
         % Each consumer will have its own local name for the consumed variable,
         % so they can each wait for it when they need to.
-        clone_variables(ConsumedVarsList, !.VarSet, !.VarTypes,
-            !VarSet, !VarTypes, map.init, Renaming),
+        clone_variables(ConsumedVarsList, !.VarTable, !VarTable,
+            map.init, Renaming),
         rename_some_vars_in_goal(Renaming, !Goal)
     ),
     update_instmap(!.Goal, !InstMap).
@@ -679,12 +674,12 @@ consumed_and_produced_vars(ModuleInfo, InstMap, InstMapDelta, Vars,
 :- pred insert_wait_in_goal_for_proc(module_info::in,
     maybe_allow_some_paths_only_waits::in, future_map::in, prog_var::in,
     hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_wait_in_goal_for_proc(ModuleInfo, AllowSomePathsOnly, FutureMap,
-        ConsumedVar, !Goal, !VarSet, !VarTypes) :-
+        ConsumedVar, !Goal, !VarTable) :-
     insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap,
-        ConsumedVar, WaitedOnAllSuccessPaths, !Goal, !VarSet, !VarTypes),
+        ConsumedVar, WaitedOnAllSuccessPaths, !Goal, !VarTable),
     % If we did not wait on all success paths then we must insert a wait here.
     % This preserves the invariant that a procedure called with a future
     % that it should wait on will wait on it in all cases. This way,
@@ -693,8 +688,8 @@ insert_wait_in_goal_for_proc(ModuleInfo, AllowSomePathsOnly, FutureMap,
         WaitedOnAllSuccessPaths = waited_on_all_success_paths
     ;
         WaitedOnAllSuccessPaths = not_waited_on_all_success_paths,
-        insert_wait_after_goal(ModuleInfo, FutureMap, ConsumedVar, !Goal,
-            !VarSet, !VarTypes)
+        insert_wait_after_goal(ModuleInfo, FutureMap, ConsumedVar,
+            !Goal, !VarTable)
     ).
 
 %---------------------------------------------------------------------------%
@@ -716,7 +711,7 @@ join_branches(not_waited_on_all_success_paths, not_waited_on_all_success_paths,
     not_waited_on_all_success_paths).
 
     % insert_wait_in_goal(ModuleInfo, FutureMap, ConsumedVar, Goal0, Goal,
-    %   !VarSet, !VarTypes):
+    %   !VarTable):
     %
     % Insert a wait on the future version of ConsumedVar *just before*
     % the first reference to it inside Goal0. If there is no reference to
@@ -732,11 +727,10 @@ join_branches(not_waited_on_all_success_paths, not_waited_on_all_success_paths,
 :- pred insert_wait_in_goal(module_info::in,
     maybe_allow_some_paths_only_waits::in, future_map::in,
     prog_var::in, waited_on_all_success_paths::out,
-    hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    hlds_goal::in, hlds_goal::out, var_table::in, var_table::out) is det.
 
 insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
-        WaitedOnAllSuccessPaths, Goal0, Goal, !VarSet, !VarTypes) :-
+        WaitedOnAllSuccessPaths, Goal0, Goal, !VarTable) :-
     Goal0 = hlds_goal(GoalExpr0, GoalInfo0),
     % InvariantEstablished should be true if AllowSomePathsOnly = no
     % implies WaitedOnAllSuccessPaths0 = waited_on_all_success_paths.
@@ -748,13 +742,13 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
                 ConjType = plain_conj,
                 insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar, WaitedOnAllSuccessPaths0,
-                    Goals0, Goals, !VarSet, !VarTypes)
+                    Goals0, Goals, !VarTable)
             ;
                 ConjType = parallel_conj,
                 insert_wait_in_par_conj(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar,
                     have_not_waited_in_conjunct, WaitedInConjunct,
-                    Goals0, Goals, !VarSet, !VarTypes),
+                    Goals0, Goals, !VarTable),
                 (
                     WaitedInConjunct = have_not_waited_in_conjunct,
                     WaitedOnAllSuccessPaths0 = not_waited_on_all_success_paths
@@ -778,11 +772,11 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
                 insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar,
                     FirstWaitedOnAllSuccessPaths,
-                    FirstDisjunct0, FirstDisjunct, !VarSet, !VarTypes),
+                    FirstDisjunct0, FirstDisjunct, !VarTable),
                 insert_wait_in_disj(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar,
                     FirstWaitedOnAllSuccessPaths, WaitedOnAllSuccessPaths0,
-                    LaterDisjuncts0, LaterDisjuncts, !VarSet, !VarTypes),
+                    LaterDisjuncts0, LaterDisjuncts, !VarTable),
                 Disjuncts = [FirstDisjunct | LaterDisjuncts],
                 GoalExpr = disj(Disjuncts),
                 Goal1 = hlds_goal(GoalExpr, GoalInfo0)
@@ -792,7 +786,7 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
             InvariantEstablished = yes,
             ( if ConsumedVar = SwitchVar then
                 insert_wait_before_goal(ModuleInfo, FutureMap, ConsumedVar,
-                    Goal0, Goal1, !VarSet, !VarTypes),
+                    Goal0, Goal1, !VarTable),
                 WaitedOnAllSuccessPaths0 = waited_on_all_success_paths
             else
                 (
@@ -804,12 +798,12 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
                     insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly,
                         FutureMap, ConsumedVar,
                         FirstWaitedOnAllSuccessPaths,
-                        FirstGoal0, FirstGoal, !VarSet, !VarTypes),
+                        FirstGoal0, FirstGoal, !VarTable),
                     FirstCase = case(MainConsId, OtherConsIds, FirstGoal),
                     insert_wait_in_cases(ModuleInfo, AllowSomePathsOnly,
                         FutureMap, ConsumedVar,
                         FirstWaitedOnAllSuccessPaths, WaitedOnAllSuccessPaths0,
-                        LaterCases0, LaterCases, !VarSet, !VarTypes),
+                        LaterCases0, LaterCases, !VarTable),
                     Cases = [FirstCase | LaterCases],
                     GoalExpr = switch(SwitchVar, CanFail, Cases),
                     Goal1 = hlds_goal(GoalExpr, GoalInfo0)
@@ -830,18 +824,18 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
                 % the renamed variable to its original name in the then-part.
                 WaitedOnAllSuccessPaths0 = waited_on_all_success_paths,
                 insert_wait_before_goal(ModuleInfo, FutureMap, ConsumedVar,
-                    Goal0, Goal1, !VarSet, !VarTypes)
+                    Goal0, Goal1, !VarTable)
             else
                 % If ConsumedVar is not in the nonlocals of Cond, then it
                 % must be in the nonlocals of at least one of Then0 and Else0.
                 insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar,
                     ThenWaitedOnAllSuccessPaths,
-                    Then0, Then, !VarSet, !VarTypes),
+                    Then0, Then, !VarTable),
                 insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar,
                     ElseWaitedOnAllSuccessPaths,
-                    Else0, Else, !VarSet, !VarTypes),
+                    Else0, Else, !VarTable),
                 join_branches(ThenWaitedOnAllSuccessPaths,
                     ElseWaitedOnAllSuccessPaths, WaitedOnAllSuccessPaths0),
                 GoalExpr = if_then_else(Quant, Cond, Then, Else),
@@ -860,7 +854,7 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
                 % to avoid processing SubGoal0.
                 insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly,
                     FutureMap, ConsumedVar, WaitedOnAllSuccessPaths0,
-                    SubGoal0, SubGoal, !VarSet, !VarTypes),
+                    SubGoal0, SubGoal, !VarTable),
                 GoalExpr = scope(Reason, SubGoal),
                 Goal1 = hlds_goal(GoalExpr, GoalInfo0)
             )
@@ -871,7 +865,7 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
             % an if-then-else.
             WaitedOnAllSuccessPaths0 = waited_on_all_success_paths,
             insert_wait_before_goal(ModuleInfo, FutureMap, ConsumedVar,
-                Goal0, Goal1, !VarSet, !VarTypes)
+                Goal0, Goal1, !VarTable)
         ;
             ( GoalExpr0 = unify(_, _, _, _, _)
             ; GoalExpr0 = plain_call(_, _, _, _, _, _)
@@ -881,7 +875,7 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
             InvariantEstablished = no,
             WaitedOnAllSuccessPaths0 = waited_on_all_success_paths,
             insert_wait_before_goal(ModuleInfo, FutureMap, ConsumedVar,
-                Goal0, Goal1, !VarSet, !VarTypes)
+                Goal0, Goal1, !VarTable)
         ;
             GoalExpr0 = shorthand(_),
             unexpected($pred, "shorthand")
@@ -897,8 +891,8 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
             % variables. We do so by renaming any occurrences of ConsumedVar
             % in this goal.
             % so we shouldn't update the argument of waited_in_conjunct.
-            clone_variable(ConsumedVar, !.VarSet, !.VarTypes,
-                !VarSet, !VarTypes, map.init, Renaming, _CloneVar),
+            clone_variable(ConsumedVar, !.VarTable, !VarTable,
+                map.init, Renaming, _CloneVar),
             rename_some_vars_in_goal(Renaming, Goal1, Goal2)
         )
     else
@@ -933,7 +927,7 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
                     InvariantEstablished = no,
                     WaitedOnAllSuccessPaths = waited_on_all_success_paths,
                     insert_wait_after_goal(ModuleInfo, FutureMap, ConsumedVar,
-                        Goal2, Goal, !VarSet, !VarTypes)
+                        Goal2, Goal, !VarTable)
                 ;
                     InvariantEstablished = yes,
                     unexpected($pred,
@@ -945,22 +939,22 @@ insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
 
 :- pred insert_wait_before_goal(module_info::in, future_map::in,
     prog_var::in, hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_wait_before_goal(ModuleInfo, FutureMap, ConsumedVar,
-        Goal0, Goal, !VarSet, !VarTypes) :-
+        Goal0, Goal, !VarTable) :-
     map.lookup(FutureMap, ConsumedVar, FutureVar),
-    make_wait_goal(ModuleInfo, !.VarTypes, FutureVar, ConsumedVar, WaitGoal),
+    make_wait_goal(ModuleInfo, !.VarTable, FutureVar, ConsumedVar, WaitGoal),
     conjoin_goals_update_goal_infos(Goal0 ^ hg_info, WaitGoal, Goal0, Goal).
 
 :- pred insert_wait_after_goal(module_info::in, future_map::in,
     prog_var::in, hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_wait_after_goal(ModuleInfo, FutureMap, ConsumedVar,
-        Goal0, Goal, !VarSet, !VarTypes) :-
+        Goal0, Goal, !VarTable) :-
     map.lookup(FutureMap, ConsumedVar, FutureVar),
-    make_wait_goal(ModuleInfo, !.VarTypes, FutureVar, ConsumedVar, WaitGoal),
+    make_wait_goal(ModuleInfo, !.VarTable, FutureVar, ConsumedVar, WaitGoal),
     conjoin_goals_update_goal_infos(Goal0 ^ hg_info, Goal0, WaitGoal, Goal).
 
     % Insert a wait for ConsumedVar in the first goal in the conjunction
@@ -971,17 +965,17 @@ insert_wait_after_goal(ModuleInfo, FutureMap, ConsumedVar,
     maybe_allow_some_paths_only_waits::in, future_map::in,
     prog_var::in, waited_on_all_success_paths::out,
     list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_wait_in_plain_conj(_, _, _, _,
-        not_waited_on_all_success_paths, [], [], !VarSet, !VarTypes).
+        not_waited_on_all_success_paths, [], [], !VarTable).
 insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly, FutureMap,
         ConsumedVar, WaitedOnAllSuccessPaths,
-        [FirstGoal0 | LaterGoals0], Goals, !VarSet, !VarTypes) :-
+        [FirstGoal0 | LaterGoals0], Goals, !VarTable) :-
     ( if var_in_nonlocals(ConsumedVar, FirstGoal0) then
         insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly,
             FutureMap, ConsumedVar, GoalWaitedOnAllSuccessPaths,
-            FirstGoal0, FirstGoal, !VarSet, !VarTypes),
+            FirstGoal0, FirstGoal, !VarTable),
         (
             GoalWaitedOnAllSuccessPaths = waited_on_all_success_paths,
             % We wait for ConsumedVar on all paths FirstGoal1 that can lead
@@ -999,7 +993,7 @@ insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly, FutureMap,
             % occurrences of ConsumedVar in FirstGoal with a fresh variable.
             insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly,
                 FutureMap, ConsumedVar, WaitedOnAllSuccessPaths,
-                LaterGoals0, LaterGoals, !VarSet, !VarTypes)
+                LaterGoals0, LaterGoals, !VarTable)
         ),
         ( if FirstGoal ^ hg_expr = conj(plain_conj, FirstGoalConj) then
             Goals = FirstGoalConj ++ LaterGoals
@@ -1011,7 +1005,7 @@ insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly, FutureMap,
         % in LaterGoals0.
         insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly, FutureMap,
             ConsumedVar, WaitedOnAllSuccessPaths, LaterGoals0, LaterGoals1,
-            !VarSet, !VarTypes),
+            !VarTable),
         Goals = [FirstGoal0 | LaterGoals1]
     ).
 
@@ -1033,20 +1027,17 @@ insert_wait_in_plain_conj(ModuleInfo, AllowSomePathsOnly, FutureMap,
     maybe_allow_some_paths_only_waits::in, future_map::in, prog_var::in,
     waited_in_conjunct::in, waited_in_conjunct::out,
     list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
-insert_wait_in_par_conj(_, _, _, _,
-        !WaitedInConjunct, [], [], !VarSet, !VarTypes).
+insert_wait_in_par_conj(_, _, _, _, !WaitedInConjunct, [], [], !VarTable).
 insert_wait_in_par_conj(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
-        !WaitedInConjunct, [Goal0 | Goals0], [Goal | Goals],
-        !VarSet, !VarTypes) :-
+        !WaitedInConjunct, [Goal0 | Goals0], [Goal | Goals], !VarTable) :-
     ( if var_in_nonlocals(ConsumedVar, Goal0) then
         % ConsumedVar appears in Goal0, so wait for it in Goal0, but the code
         % in Goals0 will *not* be able to access ConsumedVar without waiting,
         % since the conjuncts are executed independently.
         insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap,
-            ConsumedVar, WaitedOnAllSuccessPaths, Goal0, Goal1,
-            !VarSet, !VarTypes),
+            ConsumedVar, WaitedOnAllSuccessPaths, Goal0, Goal1, !VarTable),
         (
             !.WaitedInConjunct = have_not_waited_in_conjunct,
             !:WaitedInConjunct = waited_in_conjunct(WaitedOnAllSuccessPaths),
@@ -1055,53 +1046,49 @@ insert_wait_in_par_conj(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
             !.WaitedInConjunct = waited_in_conjunct(_),
             % This is not the first conjunct that waits for ConsumedVar,
             % so we shouldn't update the argument of waited_in_conjunct.
-            clone_variable(ConsumedVar, !.VarSet, !.VarTypes,
-                !VarSet, !VarTypes, map.init, Renaming, _CloneVar),
+            clone_variable(ConsumedVar, !.VarTable, !VarTable,
+                map.init, Renaming, _CloneVar),
             rename_some_vars_in_goal(Renaming, Goal1, Goal)
         )
     else
         Goal = Goal0
     ),
     insert_wait_in_par_conj(ModuleInfo, AllowSomePathsOnly, FutureMap,
-        ConsumedVar, !WaitedInConjunct, Goals0, Goals, !VarSet, !VarTypes).
+        ConsumedVar, !WaitedInConjunct, Goals0, Goals, !VarTable).
 
 :- pred insert_wait_in_disj(module_info::in,
     maybe_allow_some_paths_only_waits::in, future_map::in, prog_var::in,
     waited_on_all_success_paths::in, waited_on_all_success_paths::out,
     list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
-insert_wait_in_disj(_, _, _, _,
-        !WaitedOnAllSuccessPaths, [], [], !VarSet, !VarTypes).
+insert_wait_in_disj(_, _, _, _, !WaitedOnAllSuccessPaths, [], [], !VarTable).
 insert_wait_in_disj(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
         !WaitedOnAllSuccessPaths, [Goal0 | Goals0], [Goal | Goals],
-        !VarSet, !VarTypes) :-
+        !VarTable) :-
     insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
         FirstWaitedOnAllSuccessPaths,
-        Goal0, Goal, !VarSet, !VarTypes),
+        Goal0, Goal, !VarTable),
     join_branches(FirstWaitedOnAllSuccessPaths, !WaitedOnAllSuccessPaths),
     insert_wait_in_disj(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
-        !WaitedOnAllSuccessPaths, Goals0, Goals, !VarSet, !VarTypes).
+        !WaitedOnAllSuccessPaths, Goals0, Goals, !VarTable).
 
 :- pred insert_wait_in_cases(module_info::in,
     maybe_allow_some_paths_only_waits::in, future_map::in, prog_var::in,
     waited_on_all_success_paths::in, waited_on_all_success_paths::out,
-    list(case)::in, list(case)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    list(case)::in, list(case)::out, var_table::in, var_table::out) is det.
 
-insert_wait_in_cases(_, _, _, _,
-        !WaitedOnAllSuccessPaths, [], [], !VarSet, !VarTypes).
+insert_wait_in_cases(_, _, _, _, !WaitedOnAllSuccessPaths, [], [], !VarTable).
 insert_wait_in_cases(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
         !WaitedOnAllSuccessPaths, [Case0 | Cases0], [Case | Cases],
-        !VarSet, !VarTypes) :-
+        !VarTable) :-
     Case0 = case(MainConsId, OtherConsIds, Goal0),
     insert_wait_in_goal(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
-        FirstWaitedOnAllSuccessPaths, Goal0, Goal, !VarSet, !VarTypes),
+        FirstWaitedOnAllSuccessPaths, Goal0, Goal, !VarTable),
     Case = case(MainConsId, OtherConsIds, Goal),
     join_branches(FirstWaitedOnAllSuccessPaths, !WaitedOnAllSuccessPaths),
     insert_wait_in_cases(ModuleInfo, AllowSomePathsOnly, FutureMap,
-        ConsumedVar, !WaitedOnAllSuccessPaths, Cases0, Cases,
-        !VarSet, !VarTypes).
+        ConsumedVar, !WaitedOnAllSuccessPaths, Cases0, Cases, !VarTable).
 
 %---------------------------------------------------------------------------%
 
@@ -1116,11 +1103,10 @@ insert_wait_in_cases(ModuleInfo, AllowSomePathsOnly, FutureMap, ConsumedVar,
     % only when ProducedVar is ground.
     %
 :- pred insert_signal_in_goal(module_info::in, future_map::in, prog_var::in,
-    hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    hlds_goal::in, hlds_goal::out, var_table::in, var_table::out) is det.
 
 insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-        Goal0, Goal, !VarSet, !VarTypes) :-
+        Goal0, Goal, !VarTable) :-
     Goal0 = hlds_goal(GoalExpr0, GoalInfo0),
     Detism = goal_info_get_determinism(GoalInfo0),
     determinism_components(Detism, _CanFail, NumSolutions),
@@ -1135,18 +1121,18 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
                 (
                     ConjType = plain_conj,
                     insert_signal_in_plain_conj(ModuleInfo, FutureMap,
-                        ProducedVar, Goals0, Goals, !VarSet, !VarTypes)
+                        ProducedVar, Goals0, Goals, !VarTable)
                 ;
                     ConjType = parallel_conj,
                     insert_signal_in_par_conj(ModuleInfo, FutureMap,
-                        ProducedVar, Goals0, Goals, !VarSet, !VarTypes)
+                        ProducedVar, Goals0, Goals, !VarTable)
                 ),
                 GoalExpr = conj(ConjType, Goals),
                 Goal = hlds_goal(GoalExpr, GoalInfo0)
             ;
                 GoalExpr0 = disj(Goals0),
                 insert_signal_in_disj(ModuleInfo, FutureMap, ProducedVar,
-                    Goals0, Goals, !VarSet, !VarTypes),
+                    Goals0, Goals, !VarTable),
                 GoalExpr = disj(Goals),
                 Goal = hlds_goal(GoalExpr, GoalInfo0)
             ;
@@ -1155,7 +1141,7 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
                     unexpected($pred, "switch on unbound shared variable")
                 else
                     insert_signal_in_cases(ModuleInfo, FutureMap, ProducedVar,
-                        Cases0, Cases, !VarSet, !VarTypes),
+                        Cases0, Cases, !VarTable),
                     GoalExpr = switch(SwitchVar, CanFail, Cases),
                     Goal = hlds_goal(GoalExpr, GoalInfo0)
                 )
@@ -1164,9 +1150,9 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
                 expect(var_not_in_nonlocals(ProducedVar, Cond), $pred,
                     "condition binds shared variable"),
                 insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-                    Then0, Then, !VarSet, !VarTypes),
+                    Then0, Then, !VarTable),
                 insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-                    Else0, Else, !VarSet, !VarTypes),
+                    Else0, Else, !VarTable),
                 GoalExpr = if_then_else(QuantVars, Cond, Then, Else),
                 Goal = hlds_goal(GoalExpr, GoalInfo0)
             ;
@@ -1184,7 +1170,7 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
                     % scope into a single assignment statement. We therefore
                     % put he signal *after* the scope.
                     insert_signal_after_goal(ModuleInfo, FutureMap,
-                        ProducedVar, Goal0, Goal, !VarSet, !VarTypes)
+                        ProducedVar, Goal0, Goal, !VarTable)
                 else
                     SubGoal0 = hlds_goal(_, SubGoalInfo0),
                     Detism0 = goal_info_get_determinism(GoalInfo0),
@@ -1203,11 +1189,10 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
                         % stable, which is when the scope has cut away any
                         % possibility of further backtracking inside SubGoal0.
                         insert_signal_after_goal(ModuleInfo, FutureMap,
-                            ProducedVar, Goal0, Goal, !VarSet, !VarTypes)
+                            ProducedVar, Goal0, Goal, !VarTable)
                     else
                         insert_signal_in_goal(ModuleInfo, FutureMap,
-                            ProducedVar, SubGoal0, SubGoal,
-                            !VarSet, !VarTypes),
+                            ProducedVar, SubGoal0, SubGoal, !VarTable),
                         GoalExpr = scope(Reason, SubGoal),
                         Goal = hlds_goal(GoalExpr, GoalInfo0)
                     )
@@ -1219,7 +1204,7 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
                 ; GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _)
                 ),
                 insert_signal_after_goal(ModuleInfo, FutureMap, ProducedVar,
-                    Goal0, Goal, !VarSet, !VarTypes)
+                    Goal0, Goal, !VarTable)
             ;
                 GoalExpr0 = shorthand(_),
                 unexpected($pred, "shorthand")
@@ -1240,22 +1225,22 @@ insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
 
 :- pred insert_signal_after_goal(module_info::in, future_map::in,
     prog_var::in, hlds_goal::in, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_signal_after_goal(ModuleInfo, FutureMap, ProducedVar,
-        Goal0, Goal, !VarSet, !VarTypes) :-
-    make_signal_goal(ModuleInfo, FutureMap, ProducedVar, !.VarTypes,
+        Goal0, Goal, !VarTable) :-
+    make_signal_goal(ModuleInfo, !.VarTable, FutureMap, ProducedVar,
         SignalGoal),
     conjoin_goals_update_goal_infos(Goal0 ^ hg_info, Goal0, SignalGoal, Goal).
 
 :- pred insert_signal_in_plain_conj(module_info::in, future_map::in,
     prog_var::in, list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_signal_in_plain_conj(_ModuleInfo, _FutureMap, _ProducedVar,
-        [], [], !VarSet, !VarTypes).
+        [], [], !VarTable).
 insert_signal_in_plain_conj(ModuleInfo, FutureMap, ProducedVar,
-        [Goal0 | Goals0], Goals, !VarSet, !VarTypes) :-
+        [Goal0 | Goals0], Goals, !VarTable) :-
     ( if var_in_nonlocals(ProducedVar, Goal0) then
         % The first conjunct that mentions ProducedVar should bind ProducedVar.
         % Since we don't recurse in this case, we get here only for the first
@@ -1266,7 +1251,7 @@ insert_signal_in_plain_conj(ModuleInfo, FutureMap, ProducedVar,
         expect(set_of_var.contains(ChangedVars, ProducedVar), $pred,
             "ProducedVar not in ChangedVars"),
         insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-            Goal0, Goal1, !VarSet, !VarTypes),
+            Goal0, Goal1, !VarTable),
         ( if Goal1 ^ hg_expr = conj(plain_conj, GoalConjs1) then
             Goals = GoalConjs1 ++ Goals0
         else
@@ -1274,18 +1259,18 @@ insert_signal_in_plain_conj(ModuleInfo, FutureMap, ProducedVar,
         )
     else
         insert_signal_in_plain_conj(ModuleInfo, FutureMap, ProducedVar,
-            Goals0, Goals1, !VarSet, !VarTypes),
+            Goals0, Goals1, !VarTable),
         Goals = [Goal0 | Goals1]
     ).
 
 :- pred insert_signal_in_par_conj(module_info::in, future_map::in,
     prog_var::in, list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_signal_in_par_conj(_ModuleInfo, _FutureMap, _ProducedVar,
-        [], [], !VarSet, !VarTypes).
+        [], [], !VarTable).
 insert_signal_in_par_conj(ModuleInfo, FutureMap, ProducedVar,
-        [Goal0 | Goals0], [Goal | Goals], !VarSet, !VarTypes) :-
+        [Goal0 | Goals0], [Goal | Goals], !VarTable) :-
     ( if var_in_nonlocals(ProducedVar, Goal0) then
         % The first conjunct that mentions ProducedVar should bind ProducedVar.
         % Since we don't recurse in this case, we get here only for the first
@@ -1296,41 +1281,40 @@ insert_signal_in_par_conj(ModuleInfo, FutureMap, ProducedVar,
         expect(set_of_var.contains(ChangedVars, ProducedVar), $pred,
             "ProducedVar not in ChangedVars"),
         insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-            Goal0, Goal, !VarSet, !VarTypes),
+            Goal0, Goal, !VarTable),
         Goals = Goals0
     else
         Goal = Goal0,
         insert_signal_in_par_conj(ModuleInfo, FutureMap, ProducedVar,
-            Goals0, Goals, !VarSet, !VarTypes)
+            Goals0, Goals, !VarTable)
     ).
 
 :- pred insert_signal_in_disj(module_info::in, future_map::in, prog_var::in,
     list(hlds_goal)::in, list(hlds_goal)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
 insert_signal_in_disj(_ModuleInfo, _FutureMap, _ProducedVar,
-        [], [], !VarSet, !VarTypes).
+        [], [], !VarTable).
 insert_signal_in_disj(ModuleInfo, FutureMap, ProducedVar,
-        [Goal0 | Goals0], [Goal | Goals], !VarSet, !VarTypes) :-
+        [Goal0 | Goals0], [Goal | Goals], !VarTable) :-
     insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-        Goal0, Goal, !VarSet, !VarTypes),
+        Goal0, Goal, !VarTable),
     insert_signal_in_disj(ModuleInfo, FutureMap, ProducedVar,
-        Goals0, Goals, !VarSet, !VarTypes).
+        Goals0, Goals, !VarTable).
 
 :- pred insert_signal_in_cases(module_info::in, future_map::in, prog_var::in,
-    list(case)::in, list(case)::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    list(case)::in, list(case)::out, var_table::in, var_table::out) is det.
 
 insert_signal_in_cases(_ModuleInfo, _FutureMap, _ProducedVar,
-        [], [], !VarSet, !VarTypes).
+        [], [], !VarTable).
 insert_signal_in_cases(ModuleInfo, FutureMap, ProducedVar,
-        [Case0 | Cases0], [Case | Cases], !VarSet, !VarTypes) :-
+        [Case0 | Cases0], [Case | Cases], !VarTable) :-
     Case0 = case(MainConsId, OtherConsIds, Goal0),
     insert_signal_in_goal(ModuleInfo, FutureMap, ProducedVar,
-        Goal0, Goal, !VarSet, !VarTypes),
+        Goal0, Goal, !VarTable),
     Case = case(MainConsId, OtherConsIds, Goal),
     insert_signal_in_cases(ModuleInfo, FutureMap, ProducedVar,
-        Cases0, Cases, !VarSet, !VarTypes).
+        Cases0, Cases, !VarTable).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -1338,11 +1322,11 @@ insert_signal_in_cases(ModuleInfo, FutureMap, ProducedVar,
 % The independent parallel conjunction re-ordering transformation.
 %
 
-:- pred reorder_indep_par_conj(pred_proc_id::in, vartypes::in, instmap::in,
+:- pred reorder_indep_par_conj(pred_proc_id::in, var_table::in, instmap::in,
     hlds_goals::in, hlds_goal_info::in, hlds_goal::out,
     module_info::in, module_info::out) is det.
 
-reorder_indep_par_conj(PredProcId, VarTypes, InstMapBefore, Conjuncts0,
+reorder_indep_par_conj(PredProcId, VarTable, InstMapBefore, Conjuncts0,
         GoalInfo, Goal, !ModuleInfo) :-
     module_info_dependency_info(!.ModuleInfo, DependencyInfo),
     Ordering = dependency_info_get_bottom_up_sccs(DependencyInfo),
@@ -1353,22 +1337,22 @@ reorder_indep_par_conj(PredProcId, VarTypes, InstMapBefore, Conjuncts0,
         % call, so this optimisation does not apply.
         Conjuncts = Conjuncts0
     else
-        reorder_indep_par_conj_2(SCC, VarTypes, InstMapBefore, Conjuncts0,
+        reorder_indep_par_conj_2(SCC, VarTable, InstMapBefore, Conjuncts0,
             Conjuncts, !ModuleInfo)
     ),
     GoalExpr = conj(parallel_conj, Conjuncts),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-:- pred reorder_indep_par_conj_2(scc::in, vartypes::in, instmap::in,
+:- pred reorder_indep_par_conj_2(scc::in, var_table::in, instmap::in,
     list(hlds_goal)::in, list(hlds_goal)::out,
     module_info::in, module_info::out) is det.
 
 reorder_indep_par_conj_2(_, _, _, [], [], !ModuleInfo).
-reorder_indep_par_conj_2(SCC, VarTypes, InstMapBefore, [Goal | Goals0],
+reorder_indep_par_conj_2(SCC, VarTable, InstMapBefore, [Goal | Goals0],
         Goals, !ModuleInfo) :-
     apply_instmap_delta(goal_info_get_instmap_delta(Goal ^ hg_info),
         InstMapBefore, InstMapBeforeGoals0),
-    reorder_indep_par_conj_2(SCC, VarTypes, InstMapBeforeGoals0, Goals0,
+    reorder_indep_par_conj_2(SCC, VarTable, InstMapBeforeGoals0, Goals0,
         Goals1, !ModuleInfo),
     % These instmaps are equal since they both still apply Goal's instmap
     % delta.
@@ -1383,7 +1367,7 @@ reorder_indep_par_conj_2(SCC, VarTypes, InstMapBefore, [Goal | Goals0],
         Goals = [Goal | Goals1]
     else
         % Goal is non-recursive.
-        push_goal_into_conj(VarTypes, InstMapBefore, Goal, InstMapBeforeGoals1,
+        push_goal_into_conj(VarTable, InstMapBefore, Goal, InstMapBeforeGoals1,
             Goals1, MaybeGoals, !ModuleInfo),
         (
             MaybeGoals = yes(Goals)
@@ -1393,19 +1377,20 @@ reorder_indep_par_conj_2(SCC, VarTypes, InstMapBefore, [Goal | Goals0],
         )
     ).
 
-:- pred push_goal_into_conj(vartypes::in, instmap::in, hlds_goal::in,
+:- pred push_goal_into_conj(var_table::in, instmap::in, hlds_goal::in,
     instmap::in, hlds_goals::in, maybe(hlds_goals)::out,
     module_info::in, module_info::out) is det.
 
 push_goal_into_conj(_, _, Goal, _, [], yes([Goal]), !ModuleInfo).
-push_goal_into_conj(VarTypes, InstMapBeforeGoal, Goal, InstMapBeforePivotGoal,
+push_goal_into_conj(VarTable, InstMapBeforeGoal, Goal, InstMapBeforePivotGoal,
         [PivotGoal | Goals0], MaybeGoals, !ModuleInfo) :-
     module_info_get_globals(!.ModuleInfo, Globals),
     lookup_bool_option(Globals, fully_strict, FullyStrict),
-    can_reorder_goals(VarTypes, FullyStrict, InstMapBeforeGoal, Goal,
-        InstMapBeforePivotGoal, PivotGoal, CanReorderGoals, !ModuleInfo),
+    can_reorder_goals(VarTable, FullyStrict,
+        InstMapBeforeGoal, Goal, InstMapBeforePivotGoal, PivotGoal,
+        CanReorderGoals, !ModuleInfo),
     (
-        CanReorderGoals = yes,
+        CanReorderGoals = can_reorder_goals,
         % InstMapBeforeGoalAfterPivot represents the inst map before Goal given
         % that it has already been swapped with PivotGoal, that is PivotGoal
         % occurs before Goal.
@@ -1417,7 +1402,7 @@ push_goal_into_conj(VarTypes, InstMapBeforeGoal, Goal, InstMapBeforePivotGoal,
         apply_instmap_delta(GoalInstMapDelta,
             InstMapBeforeGoalAfterPivot, InstMapAfterPivotAndGoal),
 
-        push_goal_into_conj(VarTypes, InstMapBeforeGoalAfterPivot, Goal,
+        push_goal_into_conj(VarTable, InstMapBeforeGoalAfterPivot, Goal,
             InstMapAfterPivotAndGoal, Goals0, MaybeGoals1, !ModuleInfo),
         (
             MaybeGoals1 = yes(Goals1),
@@ -1428,7 +1413,7 @@ push_goal_into_conj(VarTypes, InstMapBeforeGoal, Goal, InstMapBeforePivotGoal,
         ),
         MaybeGoals = yes(Goals)
     ;
-        CanReorderGoals = no,
+        CanReorderGoals = cannot_reorder_goals,
         MaybeGoals = no
     ).
 
@@ -1471,7 +1456,7 @@ find_procs_scc([SCC | SCCs], PredProcId, PredProcsSCC) :-
 
                 % The variable types of the procedure we are scanning.
                 % This field is constant; it should never be updated.
-                spec_vartypes               :: vartypes,
+                spec_var_table              :: var_table,
 
                 % The current module. Updated when requesting a new
                 % specialization, since to get the pred_id for the specialized
@@ -1560,10 +1545,10 @@ find_specialization_requests_in_proc(DoneProcs, InitialModuleInfo, PredProcId,
     some [!PredInfo, !ProcInfo, !Goal, !SpecInfo] (
         module_info_pred_proc_info(!.ModuleInfo, PredId, ProcId,
             !:PredInfo, !:ProcInfo),
-        proc_info_get_vartypes(!.ProcInfo, VarTypes),
+        proc_info_get_var_table(!.ProcInfo, VarTable),
         proc_info_get_goal(!.ProcInfo, !:Goal),
         !:SpecInfo = spec_info(DoneProcs, !.RevProcMap, InitialModuleInfo,
-            PredProcId, VarTypes, !.ModuleInfo, !.PendingParProcs,
+            PredProcId, VarTable, !.ModuleInfo, !.PendingParProcs,
             !.Pushability),
 
         trace [compile_time(flag("debug-dep-par-conj")), io(!IO)] (
@@ -1580,13 +1565,12 @@ find_specialization_requests_in_proc(DoneProcs, InitialModuleInfo, PredProcId,
             then
                 io.output_stream(Stream, !IO),
                 OutInfo = init_hlds_out_info(Globals, output_debug),
-                proc_info_get_varset(!.ProcInfo, VarSet),
                 io.format(Stream,
                     "About to search %d/%d for dependant par conjs:\n",
                     [i(PredIdInt), i(proc_id_to_int(ProcId))], !IO),
-                write_goal(OutInfo, Stream, !.ModuleInfo, VarSet,
-                    print_name_and_num, 0, "", !.Goal, !IO),
-                io.nl(Stream, !IO)
+                write_goal_nl(OutInfo, Stream, !.ModuleInfo,
+                    vns_var_table(VarTable), print_name_and_num,
+                    0, "", !.Goal, !IO)
             else
                 true
             )
@@ -1642,15 +1626,14 @@ add_requested_specialized_par_proc(CallPattern, NewProc, !PendingParProcs,
     OldPredProcId = proc(OldPredId, OldProcId),
     NewPredProcId = proc(NewPredId, NewProcId),
 
-    some [!VarSet, !VarTypes, !NewProcInfo] (
+    some [!VarTable, !NewProcInfo] (
         % Get the proc_info from _before_ the dependent parallel conjunction
         % pass was ever run, so we get untransformed procedure bodies.
         % Our transformation does not attempt to handle already transformed
         % parallel conjunctions.
         module_info_proc_info(InitialModuleInfo, OldPredId, OldProcId,
             !:NewProcInfo),
-        proc_info_get_varset(!.NewProcInfo, !:VarSet),
-        proc_info_get_vartypes(!.NewProcInfo, !:VarTypes),
+        proc_info_get_var_table(!.NewProcInfo, !:VarTable),
         proc_info_get_headvars(!.NewProcInfo, HeadVars0),
         proc_info_get_argmodes(!.NewProcInfo, ArgModes0),
         proc_info_get_goal(!.NewProcInfo, Goal0),
@@ -1658,8 +1641,8 @@ add_requested_specialized_par_proc(CallPattern, NewProc, !PendingParProcs,
             InstMap0),
 
         % Set up the mapping from head variables to futures.
-        list.foldl3(map_arg_to_new_future(HeadVars0), FutureArgs,
-            map.init, FutureMap, !VarSet, !VarTypes),
+        list.foldl2(map_arg_to_new_future(HeadVars0), FutureArgs,
+            map.init, FutureMap, !VarTable),
 
         % Replace head variables by their futures.
         replace_head_vars(!.ModuleInfo, FutureMap,
@@ -1672,10 +1655,9 @@ add_requested_specialized_par_proc(CallPattern, NewProc, !PendingParProcs,
         AllowSomePathsOnly = OptTuple ^ ot_allow_some_paths_only_waits,
         SharedVars = set_of_var.sorted_list_to_set(map.keys(FutureMap)),
         sync_dep_par_proc_body(!.ModuleInfo, AllowSomePathsOnly, SharedVars,
-            FutureMap, InstMap0, Goal0, Goal, !VarSet, !VarTypes),
+            FutureMap, InstMap0, Goal0, Goal, !VarTable),
 
-        proc_info_set_varset(!.VarSet, !NewProcInfo),
-        proc_info_set_vartypes(!.VarTypes, !NewProcInfo),
+        proc_info_set_var_table(!.VarTable, !NewProcInfo),
         proc_info_set_headvars(HeadVars, !NewProcInfo),
         proc_info_set_argmodes(ArgModes, !NewProcInfo),
         proc_info_set_goal(Goal, !NewProcInfo),
@@ -1708,15 +1690,15 @@ add_requested_specialized_par_proc(CallPattern, NewProc, !PendingParProcs,
     ).
 
 :- pred map_arg_to_new_future(list(prog_var)::in, arg_pos::in,
-    future_map::in, future_map::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+    future_map::in, future_map::out, var_table::in, var_table::out) is det.
 
-map_arg_to_new_future(HeadVars, FutureArg, !FutureMap, !VarSet, !VarTypes) :-
+map_arg_to_new_future(HeadVars, FutureArg, !FutureMap, !VarTable) :-
     HeadVar = list.det_index1(HeadVars, FutureArg),
-    lookup_var_type(!.VarTypes, HeadVar, VarType),
-    varset.lookup_name(!.VarSet, HeadVar, HeadVarName),
-    make_future_var(HeadVarName, VarType, FutureVar, _FutureVarType, !VarSet,
-        !VarTypes),
+    lookup_var_entry(!.VarTable, HeadVar, HeadVarEntry),
+    HeadVarType = HeadVarEntry ^ vte_type,
+    HeadVarName = var_entry_name(HeadVar, HeadVarEntry),
+    make_future_var(HeadVarName, HeadVarType, FutureVar, _FutureVarType, 
+        !VarTable),
     map.det_insert(HeadVar, FutureVar, !FutureMap).
 
 :- pred replace_head_vars(module_info::in, future_map::in,
@@ -1965,9 +1947,9 @@ maybe_specialize_call_and_goals(RevGoals0, Goal0, FwdGoals0,
                 PushedPairs = PushedSignalPairs ++ PushedWaitPairs,
                 list.filter(should_add_get_goal(NonLocals, FwdGoals1),
                     PushedPairs, PushedPairsNeedGets),
-                VarTypes = !.SpecInfo ^ spec_vartypes,
+                VarTable = !.SpecInfo ^ spec_var_table,
                 list.map(
-                    make_get_goal(!.SpecInfo ^ spec_module_info, VarTypes),
+                    make_get_goal(!.SpecInfo ^ spec_module_info, VarTable),
                     PushedPairsNeedGets, GetGoals),
 
                 RevGoals = GetGoals ++ [Goal] ++ UnPushedWaitGoals
@@ -2299,17 +2281,17 @@ make_new_spec_parallel_pred_info(FutureArgs, PredStatus, PPId, !PredInfo) :-
     PredOrFunc = pred_info_is_pred_or_func(!.PredInfo),
     pred_info_get_arg_types(!.PredInfo, Tvars, ExistQVars, ArgTypes0),
     pred_info_get_origin(!.PredInfo, OrigOrigin),
-    make_pred_name(PredModule, "Parallel", yes(PredOrFunc),
-        Name0, newpred_parallel_args(FutureArgs), Name1),
     % The mode number is included because we want to avoid the creation of
     % more than one predicate with the same name if more than one mode of
     % a predicate is parallelised. Since the names of e.g. deep profiling
     % proc_static structures are derived from the names of predicates,
     % duplicate predicate names lead to duplicate global variable names
     % and hence to link errors.
-    proc_id_to_int(ProcId, ProcInt),
-    add_sym_name_suffix(Name1, "_" ++ int_to_string(ProcInt), Name),
-    Arity = pred_info_orig_arity(!.PredInfo),
+    Transform =
+        tn_dep_par_conj(PredOrFunc, proc_id_to_int(ProcId), FutureArgs),
+    make_transformed_pred_name(Name0, Transform, TransformedName),
+
+    PredFormArity = pred_info_pred_form_arity(!.PredInfo),
     pred_info_get_typevarset(!.PredInfo, TypeVars),
 
     futurise_argtypes(1, FutureArgs, ArgTypes0, ArgTypes),
@@ -2326,11 +2308,11 @@ make_new_spec_parallel_pred_info(FutureArgs, PredStatus, PPId, !PredInfo) :-
     % constraints.
     map.init(EmptyProofs),
     map.init(EmptyConstraintMap),
-    Origin = origin_transformed(transform_dependent_parallel_conjunction,
-        OrigOrigin, PredId),
+    ProcTransform = proc_transform_dep_par_conj(FutureArgs),
+    Origin = origin_proc_transform(ProcTransform, OrigOrigin, PredId, ProcId),
     CurUserDecl = maybe.no,
-    pred_info_init(PredModule, Name, Arity, PredOrFunc, Context, Origin,
-        PredStatus, CurUserDecl, GoalType, Markers, ArgTypes,
+    pred_info_init(PredOrFunc, PredModule, TransformedName, PredFormArity,
+        Context, Origin, PredStatus, CurUserDecl, GoalType, Markers, ArgTypes,
         Tvars, ExistQVars, ClassContext, EmptyProofs, EmptyConstraintMap,
         ClausesInfo, VarNameRemap, !:PredInfo),
     pred_info_set_typevarset(TypeVars, !PredInfo).
@@ -3115,32 +3097,32 @@ seen_more_signal_2(seen_signal_non_negligible_cost_after,
     % `par_builtin.new_future/1' to allocate FutureVar.
     %
 :- pred allocate_future(module_info::in, prog_var::in, hlds_goals::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    future_map::in, future_map::out, ts_string_table::in, ts_string_table::out)
-    is det.
+    var_table::in, var_table::out, future_map::in, future_map::out,
+    ts_string_table::in, ts_string_table::out) is det.
 
-allocate_future(ModuleInfo, SharedVar, Goals, !VarSet, !VarTypes,
+allocate_future(ModuleInfo, SharedVar, Goals, !VarTable,
         !FutureMap, !TSStringTable) :-
-    lookup_var_type(!.VarTypes, SharedVar, SharedVarType),
-    varset.lookup_name(!.VarSet, SharedVar, SharedVarName),
+    lookup_var_entry(!.VarTable, SharedVar, SharedVarEntry),
+    SharedVarType = SharedVarEntry ^ vte_type,
+    SharedVarName = var_entry_name(SharedVar, SharedVarEntry),
     make_future_var(SharedVarName, SharedVarType, FutureVar, FutureVarType,
-        !VarSet, !VarTypes),
+        !VarTable),
     make_future_name_var_and_goal(SharedVarName, FutureNameVar, SetNameGoal,
-        !VarSet, !VarTypes, !TSStringTable),
+        !VarTable, !TSStringTable),
     map.det_insert(SharedVar, FutureVar, !FutureMap),
 
     ModuleName = mercury_par_builtin_module,
     PredName = new_future_pred_name,
     Features = [],
     InstMapDelta = instmap_delta_bind_var(FutureVar),
-    Context = term.context_init,
+    Context = dummy_context,
     ShouldInline = should_inline_par_builtin_calls(ModuleInfo),
     (
         ShouldInline = do_not_inline_par_builtins,
         ArgVars = [FutureNameVar, FutureVar],
-        generate_simple_call(ModuleInfo, ModuleName, PredName, pf_predicate,
-            only_mode, detism_det, purity_pure, ArgVars, Features,
-            InstMapDelta, Context, AllocGoal)
+        generate_plain_call(ModuleInfo, pf_predicate, ModuleName, PredName,
+            [], ArgVars, InstMapDelta, only_mode, detism_det, purity_pure,
+            Features, Context, AllocGoal)
     ;
         ShouldInline = inline_par_builtins,
         ForeignAttrs = par_builtin_foreign_proc_attributes(purity_pure, no),
@@ -3154,9 +3136,10 @@ allocate_future(ModuleInfo, SharedVar, Goals, !VarSet, !VarTypes,
         Args = [ArgName, ArgFuture],
         ExtraArgs = [],
         Code = new_future_code,
-        generate_foreign_proc(ModuleInfo, ModuleName, PredName, pf_predicate,
-            only_mode, detism_det, purity_pure, ForeignAttrs, Args, ExtraArgs,
-            no, Code, Features, InstMapDelta, Context, AllocGoal)
+        generate_call_foreign_proc(ModuleInfo, pf_predicate,
+            ModuleName, PredName, [], Args, ExtraArgs, InstMapDelta,
+            only_mode, detism_det, purity_pure, Features, ForeignAttrs,
+            no, Code, Context, AllocGoal)
     ),
     Goals = [SetNameGoal, AllocGoal].
 
@@ -3164,30 +3147,30 @@ allocate_future(ModuleInfo, SharedVar, Goals, !VarSet, !VarTypes,
     % FutureVar of type future(SharedVarType).
     %
 :- pred make_future_var(string::in, mer_type::in,
-    prog_var::out, mer_type::out, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out) is det.
+    prog_var::out, mer_type::out, var_table::in, var_table::out) is det.
 
 make_future_var(SharedVarName, SharedVarType, FutureVar, FutureVarType,
-        !VarSet, !VarTypes) :-
+        !VarTable) :-
     FutureVarType = future_type(SharedVarType),
-    varset.new_named_var("Future" ++ SharedVarName, FutureVar, !VarSet),
-    add_var_type(FutureVar, FutureVarType, !VarTypes).
+    FutureVarName = "Future" ++ SharedVarName,
+    FutureVarEntry = vte(FutureVarName, FutureVarType, is_not_dummy_type),
+    add_var_entry(FutureVarEntry, FutureVar, !VarTable).
 
 :- pred make_future_name_var_and_goal(string::in,
-    prog_var::out, hlds_goal::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
+    prog_var::out, hlds_goal::out, var_table::in, var_table::out,
     ts_string_table::in, ts_string_table::out) is det.
 
-make_future_name_var_and_goal(Name, FutureNameVar, Goal, !VarSet, !VarTypes,
-        !TSStringTable) :-
-    varset.new_named_var("FutureName" ++ Name, FutureNameVar, !VarSet),
-    IntType = builtin_type(builtin_type_int(int_type_int)),
-    add_var_type(FutureNameVar, IntType, !VarTypes),
+make_future_name_var_and_goal(Name, FutureNameVar, Goal,
+        !VarTable, !TSStringTable) :-
+    FutureNameVarName = "FutureName" ++ Name,
+    FutureNameVarEntry = vte(FutureNameVarName, int_type, is_not_dummy_type),
+    add_var_entry(FutureNameVarEntry, FutureNameVar, !VarTable),
     allocate_ts_string(Name, NameId, !TSStringTable),
     NameIdConsId = some_int_const(int_const(NameId)),
     RHS = rhs_functor(NameIdConsId, is_not_exist_constr, []),
     Ground = ground(unique, none_or_default_func),
-    UnifyMode = unify_modes_li_lf_ri_rf(free(IntType), Ground, Ground, Ground),
+    UnifyMode =
+        unify_modes_li_lf_ri_rf(free(int_type), Ground, Ground, Ground),
     Unification = construct(FutureNameVar, NameIdConsId, [], [],
         construct_statically(born_static), cell_is_unique,
         no_construct_sub_info),
@@ -3199,29 +3182,29 @@ make_future_name_var_and_goal(Name, FutureNameVar, Goal, !VarSet, !VarTypes,
         detism_det, purity_pure, GoalInfo),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-:- pred make_wait_goal(module_info::in, vartypes::in,
+:- pred make_wait_goal(module_info::in, var_table::in,
     prog_var::in, prog_var::in, hlds_goal::out) is det.
 
-make_wait_goal(ModuleInfo, VarTypes, FutureVar, WaitVar, WaitGoal) :-
-    make_wait_or_get(ModuleInfo, VarTypes, FutureVar, WaitVar, wait_pred,
+make_wait_goal(ModuleInfo, VarTable, FutureVar, WaitVar, WaitGoal) :-
+    make_wait_or_get(ModuleInfo, VarTable, FutureVar, WaitVar, wait_pred,
         WaitGoal).
 
-:- pred make_get_goal(module_info::in, vartypes::in, future_var_pair::in,
+:- pred make_get_goal(module_info::in, var_table::in, future_var_pair::in,
     hlds_goal::out) is det.
 
-make_get_goal(ModuleInfo, VarTypes, future_var_pair(FutureVar, WaitVar),
+make_get_goal(ModuleInfo, VarTable, future_var_pair(FutureVar, WaitVar),
         WaitGoal) :-
-    make_wait_or_get(ModuleInfo, VarTypes, FutureVar, WaitVar, get_pred,
+    make_wait_or_get(ModuleInfo, VarTable, FutureVar, WaitVar, get_pred,
         WaitGoal).
 
 :- type wait_or_get_pred
     --->    wait_pred
     ;       get_pred.
 
-:- pred make_wait_or_get(module_info::in, vartypes::in,
+:- pred make_wait_or_get(module_info::in, var_table::in,
     prog_var::in, prog_var::in, wait_or_get_pred::in, hlds_goal::out) is det.
 
-make_wait_or_get(ModuleInfo, VarTypes, FutureVar, ConsumedVar, WaitOrGetPred,
+make_wait_or_get(ModuleInfo, VarTable, FutureVar, ConsumedVar, WaitOrGetPred,
         WaitGoal) :-
     ModuleName = mercury_par_builtin_module,
     (
@@ -3237,19 +3220,19 @@ make_wait_or_get(ModuleInfo, VarTypes, FutureVar, ConsumedVar, WaitOrGetPred,
     ),
     Features = [],
     InstMapDelta = instmap_delta_bind_var(ConsumedVar),
-    Context = term.context_init,
+    Context = dummy_context,
     ShouldInline = should_inline_par_builtin_calls(ModuleInfo),
     (
         ShouldInline = do_not_inline_par_builtins,
         ArgVars = [FutureVar, ConsumedVar],
-        generate_simple_call(ModuleInfo, ModuleName, PredName, pf_predicate,
-            only_mode, detism_det, Purity, ArgVars, Features,
-            InstMapDelta, Context, WaitGoal)
+        generate_plain_call(ModuleInfo, pf_predicate, ModuleName, PredName,
+            [], ArgVars, InstMapDelta, only_mode, detism_det, Purity,
+            Features, Context, WaitGoal)
     ;
         ShouldInline = inline_par_builtins,
         ForeignAttrs = par_builtin_foreign_proc_attributes(Purity, no),
-        lookup_var_type(VarTypes, FutureVar, FutureVarType),
-        lookup_var_type(VarTypes, ConsumedVar, ConsumedVarType),
+        lookup_var_type(VarTable, FutureVar, FutureVarType),
+        lookup_var_type(VarTable, ConsumedVar, ConsumedVarType),
         Arg1 = foreign_arg(FutureVar,
             yes(foreign_arg_name_mode("Future", in_mode)),
             FutureVarType, bp_native_if_possible),
@@ -3258,34 +3241,35 @@ make_wait_or_get(ModuleInfo, VarTypes, FutureVar, ConsumedVar, WaitOrGetPred,
             ConsumedVarType, bp_native_if_possible),
         Args = [Arg1, Arg2],
         ExtraArgs = [],
-        generate_foreign_proc(ModuleInfo, ModuleName, PredName, pf_predicate,
-            only_mode, detism_det, Purity, ForeignAttrs, Args, ExtraArgs,
-            no, Code, Features, InstMapDelta, Context, WaitGoal)
+        generate_call_foreign_proc(ModuleInfo, pf_predicate,
+            ModuleName, PredName, [], Args, ExtraArgs, InstMapDelta, only_mode,
+            detism_det, Purity, Features, ForeignAttrs,
+            no, Code, Context, WaitGoal)
     ).
 
-:- pred make_signal_goal(module_info::in, future_map::in, prog_var::in,
-    vartypes::in, hlds_goal::out) is det.
+:- pred make_signal_goal(module_info::in, var_table::in, future_map::in,
+    prog_var::in, hlds_goal::out) is det.
 
-make_signal_goal(ModuleInfo, FutureMap, ProducedVar, VarTypes, SignalGoal) :-
+make_signal_goal(ModuleInfo, VarTable, FutureMap, ProducedVar, SignalGoal) :-
     FutureVar = map.lookup(FutureMap, ProducedVar),
     ModuleName = mercury_par_builtin_module,
     PredName = signal_future_pred_name,
     Features = [],
     InstMapDelta = instmap_delta_bind_no_var,
-    Context = term.context_init,
+    Context = dummy_context,
     ShouldInline = should_inline_par_builtin_calls(ModuleInfo),
     (
         ShouldInline = do_not_inline_par_builtins,
         ArgVars = [FutureVar, ProducedVar],
-        generate_simple_call(ModuleInfo, ModuleName, PredName, pf_predicate,
-            only_mode, detism_det, purity_impure, ArgVars, Features,
-            InstMapDelta, Context, SignalGoal)
+        generate_plain_call(ModuleInfo, pf_predicate, ModuleName, PredName,
+            [], ArgVars, InstMapDelta, only_mode, detism_det, purity_impure,
+            Features, Context, SignalGoal)
     ;
         ShouldInline = inline_par_builtins,
         ForeignAttrs = par_builtin_foreign_proc_attributes(purity_impure,
             yes(needs_call_standard_output_registers)),
-        lookup_var_type(VarTypes, FutureVar, FutureVarType),
-        lookup_var_type(VarTypes, ProducedVar, ProducedVarType),
+        lookup_var_type(VarTable, FutureVar, FutureVarType),
+        lookup_var_type(VarTable, ProducedVar, ProducedVarType),
         Arg1 = foreign_arg(FutureVar,
             yes(foreign_arg_name_mode("Future", in_mode)),
             FutureVarType, bp_native_if_possible),
@@ -3295,10 +3279,10 @@ make_signal_goal(ModuleInfo, FutureMap, ProducedVar, VarTypes, SignalGoal) :-
         Args = [Arg1, Arg2],
         ExtraArgs = [],
         Code = "MR_par_builtin_signal_future(Future, Value);",
-        generate_foreign_proc(ModuleInfo, ModuleName, PredName, pf_predicate,
-            only_mode, detism_det, purity_impure, ForeignAttrs,
-            Args, ExtraArgs, no, Code, Features, InstMapDelta,
-            Context, SignalGoal)
+        generate_call_foreign_proc(ModuleInfo, pf_predicate,
+            ModuleName, PredName, [], Args, ExtraArgs, InstMapDelta,
+            only_mode, detism_det, purity_impure, Features, ForeignAttrs,
+            no, Code, Context, SignalGoal)
     ).
 
 :- pred is_wait_goal(hlds_goal::in) is semidet.
@@ -3476,9 +3460,8 @@ changed_var(ModuleInfo, InstMapDeltas, UnboundVar) :-
     pred_info::in, proc_info::in, module_info::in, module_info::out) is det.
 
 fixup_and_reinsert_proc(PredId, ProcId, !.PredInfo, !.ProcInfo, !ModuleInfo) :-
-    requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
-    recompute_instmap_delta_proc(do_not_recompute_atomic_instmap_deltas,
-        !ProcInfo, !ModuleInfo),
+    requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+    recompute_instmap_delta_proc(no_recomp_atomics, !ProcInfo, !ModuleInfo),
     pred_info_set_proc_info(ProcId, !.ProcInfo, !PredInfo),
     repuritycheck_proc(!.ModuleInfo, proc(PredId, ProcId), !PredInfo),
     module_info_set_pred_info(PredId, !.PredInfo, !ModuleInfo).

@@ -25,8 +25,6 @@
 :- module ll_backend.code_info.
 :- interface.
 
-:- import_module check_hlds.
-:- import_module check_hlds.type_util.
 :- import_module hlds.
 :- import_module hlds.code_model.
 :- import_module hlds.hlds_data.
@@ -34,10 +32,10 @@
 :- import_module hlds.hlds_llds.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.optimization_options.
+:- import_module libs.trace_params.
 :- import_module ll_backend.continuation_info.
 :- import_module ll_backend.global_data.
 :- import_module ll_backend.layout.
@@ -49,6 +47,7 @@
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module counter.
@@ -66,8 +65,9 @@
 
 :- import_module backend_libs.
 :- import_module backend_libs.proc_label.
+:- import_module check_hlds.
+:- import_module check_hlds.type_util.
 :- import_module libs.options.
-:- import_module libs.trace_params.
 :- import_module ll_backend.code_util.
 :- import_module parse_tree.prog_type.
 
@@ -77,7 +77,6 @@
 :- import_module require.
 :- import_module string.
 :- import_module uint8.
-:- import_module varset.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -103,20 +102,20 @@
     % stack slots used for tracing purposes.
     %
 :- pred code_info_init(module_info::in, pred_id::in, proc_id::in,
-    pred_info::in, proc_info::in, bool::in, static_cell_info::in,
-    const_struct_map::in, maybe(containing_goal_map)::in,
+    pred_info::in, proc_info::in, var_table::in, bool::in,
+    static_cell_info::in, const_struct_map::in, maybe(containing_goal_map)::in,
     list(string)::in, int::in, trace_slot_info::out, code_info::out) is det.
 
 :- pred get_module_info(code_info::in, module_info::out) is det.
 :- pred get_globals(code_info::in, globals::out) is det.
 :- pred get_exprn_opts(code_info::in, exprn_opts::out) is det.
+:- pred get_eff_trace_level(code_info::in, eff_trace_level::out) is det.
 :- pred get_pred_id(code_info::in, pred_id::out) is det.
 :- pred get_proc_id(code_info::in, proc_id::out) is det.
 :- pred get_pred_info(code_info::in, pred_info::out) is det.
 :- pred get_proc_info(code_info::in, proc_info::out) is det.
 :- pred get_proc_label(code_info::in, proc_label::out) is det.
-:- pred get_varset(code_info::in, prog_varset::out) is det.
-:- pred get_vartypes(code_info::in, vartypes::out) is det.
+:- pred get_var_table(code_info::in, var_table::out) is det.
 :- pred get_var_slot_count(code_info::in, int::out) is det.
 :- pred get_maybe_trace_info(code_info::in, maybe(trace_info)::out) is det.
 :- pred get_opt_no_return_calls(code_info::in, bool::out) is det.
@@ -186,9 +185,8 @@
 
 :- func init_exprn_opts(globals) = exprn_opts.
 
-:- pred init_maybe_trace_info(trace_level::in, globals::in,
-    module_info::in, pred_info::in, proc_info::in, trace_slot_info::out,
-    code_info::in, code_info::out) is det.
+:- pred init_maybe_trace_info(globals::in, proc_info::in, eff_trace_level::in,
+    trace_slot_info::out, code_info::in, code_info::out) is det.
 
 :- pred get_closure_seq_counter(code_info::in, counter::out) is det.
 
@@ -233,6 +231,8 @@
                 cis_globals             :: globals,
                 cis_exprn_opts          :: exprn_opts,
 
+                cis_eff_trace_level     :: eff_trace_level,
+
                 % The id of the current predicate.
                 cis_pred_id             :: pred_id,
 
@@ -249,8 +249,7 @@
                 cis_proc_label          :: proc_label,
 
                 % The variables in this procedure.
-                cis_varset              :: prog_varset,
-                cis_vartypes            :: vartypes,
+                cis_var_table           :: var_table,
 
                 % The number of stack slots allocated. for storing variables.
                 % (Some extra stack slots are used for saving and restoring
@@ -371,7 +370,7 @@
 
 %---------------------------------------------------------------------------%
 
-code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo,
+code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo, VarTable,
         SaveSuccip, StaticCellInfo, ConstStructMap, MaybeContainingGoalMap,
         TSRevStringTable, TSStringTableSize, TraceSlotInfo, CodeInfo) :-
     % argument ModuleInfo
@@ -382,16 +381,15 @@ code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo,
     % argument PredInfo
     % argument ProcInfo
     ProcLabel = make_proc_label(ModuleInfo, PredId, ProcId),
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
     proc_info_get_stack_slots(ProcInfo, StackSlots),
     max_var_slot(StackSlots, VarSlotMax),
-    trace_reserved_slots(ModuleInfo, PredInfo, ProcInfo, Globals,
-        FixedSlots, _),
+    globals.get_trace_level(Globals, TraceLevel),
+    EffTraceLevel =
+        eff_trace_level_for_proc(ModuleInfo, PredInfo, ProcInfo, TraceLevel),
+    trace_reserved_slots(Globals, ProcInfo, EffTraceLevel, FixedSlots, _),
     int.max(VarSlotMax, FixedSlots, SlotMax),
     MaybeTraceInfo = no,
-    globals.lookup_bool_option(Globals, opt_no_return_calls,
-        OptNoReturnCalls),
+    globals.lookup_bool_option(Globals, opt_no_return_calls, OptNoReturnCalls),
     globals.lookup_bool_option(Globals, use_trail, UseTrail),
     globals.lookup_bool_option(Globals, disable_trail_ops, DisableTrailOps),
     ( if
@@ -434,13 +432,13 @@ code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo,
         ModuleInfo,
         Globals,
         ExprnOpts,
+        EffTraceLevel,
         PredId,
         ProcId,
         PredInfo,
         ProcInfo,
         ProcLabel,
-        VarSet,
-        VarTypes,
+        VarTable,
         SlotMax,
         MaybeTraceInfo,
         OptNoReturnCalls,
@@ -460,7 +458,6 @@ code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo,
 
     LabelNumCounter0 = counter.init(1),
     % argument SaveSuccip
-    globals.get_trace_level(Globals, TraceLevel),
     map.init(LayoutMap),
     ProcTraceEvents = no,
     MaxRegRUsed = -1,
@@ -497,8 +494,8 @@ code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo,
         OutOfLineCode
     ),
     CodeInfo0 = code_info(CodeInfoStatic0, CodeInfoPersistent0),
-    init_maybe_trace_info(TraceLevel, Globals, ModuleInfo,
-        PredInfo, ProcInfo, TraceSlotInfo, CodeInfo0, CodeInfo).
+    init_maybe_trace_info(Globals, ProcInfo, EffTraceLevel, TraceSlotInfo,
+        CodeInfo0, CodeInfo).
 
 init_exprn_opts(Globals) = ExprnOpts :-
     globals.lookup_bool_option(Globals, gcc_non_local_gotos, OptNLG),
@@ -585,10 +582,8 @@ init_exprn_opts(Globals) = ExprnOpts :-
     ExprnOpts = exprn_opts(NLG, ASM, UBF, UseFloatRegs, DetStackFloatWidth,
         UBI64s, SGCell, SGFloat, SGInt64s, StaticCodeAddrs).
 
-init_maybe_trace_info(TraceLevel, Globals, ModuleInfo, PredInfo,
-        ProcInfo, TraceSlotInfo, !CI) :-
-    TraceEnabled = is_exec_trace_enabled_at_eff_trace_level(ModuleInfo,
-        PredInfo, ProcInfo, TraceLevel),
+init_maybe_trace_info(Globals, ProcInfo, EffTraceLevel, TraceSlotInfo, !CI) :-
+    TraceEnabled = is_exec_trace_enabled_at_eff_trace_level(EffTraceLevel),
     (
         TraceEnabled = exec_trace_is_enabled,
         proc_info_get_has_tail_rec_call(ProcInfo, HasTailRecCall),
@@ -602,7 +597,7 @@ init_maybe_trace_info(TraceLevel, Globals, ModuleInfo, PredInfo,
             HasSelfTailRecCall = has_no_self_tail_rec_call,
             MaybeTailRecLabel = no
         ),
-        trace_setup(ModuleInfo, PredInfo, ProcInfo, Globals, MaybeTailRecLabel,
+        trace_setup(Globals, ProcInfo, EffTraceLevel, MaybeTailRecLabel,
             TraceSlotInfo, TraceInfo, !CI),
         set_maybe_trace_info(yes(TraceInfo), !CI)
     ;
@@ -618,6 +613,8 @@ get_globals(CI, X) :-
     X = CI ^ code_info_static ^ cis_globals.
 get_exprn_opts(CI, X) :-
     X = CI ^ code_info_static ^ cis_exprn_opts.
+get_eff_trace_level(CI, X) :-
+    X = CI ^ code_info_static ^ cis_eff_trace_level.
 get_pred_id(CI, X) :-
     X = CI ^ code_info_static ^ cis_pred_id.
 get_proc_id(CI, X) :-
@@ -628,10 +625,8 @@ get_proc_info(CI, X) :-
     X = CI ^ code_info_static ^ cis_proc_info.
 get_proc_label(CI, X) :-
     X = CI ^ code_info_static ^ cis_proc_label.
-get_varset(CI, X) :-
-    X = CI ^ code_info_static ^ cis_varset.
-get_vartypes(CI, X) :-
-    X = CI ^ code_info_static ^ cis_vartypes.
+get_var_table(CI, X) :-
+    X = CI ^ code_info_static ^ cis_var_table.
 get_var_slot_count(CI, X) :-
     X = CI ^ code_info_static ^ cis_var_slot_count.
 get_maybe_trace_info(CI, X) :-
@@ -775,8 +770,6 @@ max_var_slot_loop([Slot | Slots], !Max) :-
     %
 :- func variable_type(code_info, prog_var) = mer_type.
 
-:- func variable_is_of_dummy_type(code_info, prog_var) = is_dummy_type.
-
     % Compute the principal type constructor of the given type, and return
     % the definition of this type constructor, if it has one (some type
     % constructors are built in, and some are hidden behind abstraction
@@ -810,8 +803,6 @@ max_var_slot_loop([Slot | Slots], !Max) :-
     % Get the call argument info for a given mode of a given predicate
     %
 :- func get_pred_proc_arginfo(code_info, pred_id, proc_id) = list(arg_info).
-
-:- func variable_name(code_info, prog_var) = string.
 
 :- type for_call_or_closure
     --->    for_immediate_call
@@ -902,13 +893,9 @@ body_typeinfo_liveness(CI) = TypeInfoLiveness :-
     body_should_use_typeinfo_liveness(PredInfo, Globals, TypeInfoLiveness).
 
 variable_type(CI, Var) = Type :-
-    get_vartypes(CI, VarTypes),
-    lookup_var_type(VarTypes, Var, Type).
-
-variable_is_of_dummy_type(CI, Var) = IsDummy :-
-    VarType = variable_type(CI, Var),
-    get_module_info(CI, ModuleInfo),
-    IsDummy = is_type_a_dummy(ModuleInfo, VarType).
+    get_var_table(CI, VarTable),
+    lookup_var_entry(VarTable, Var, Entry),
+    Type = Entry ^ vte_type.
 
 search_type_defn(CI, Type, TypeDefn) :-
     get_module_info(CI, ModuleInfo),
@@ -936,8 +923,8 @@ lookup_cheaper_tag_test(CI, Type) = CheaperTagTest :-
     ).
 
 filter_region_vars(CI, ForwardLiveVarsBeforeGoal) = RegionVars :-
-    get_vartypes(CI, VarTypes),
-    RegionVars = set_of_var.filter(is_region_var(VarTypes),
+    get_var_table(CI, VarTable),
+    RegionVars = set_of_var.filter(is_region_var(VarTable),
         ForwardLiveVarsBeforeGoal).
 
 %---------------------------------------------------------------------------%
@@ -962,10 +949,6 @@ get_pred_proc_arginfo(CI, PredId, ProcId) = ArgInfo :-
     get_module_info(CI, ModuleInfo),
     module_info_pred_proc_info(ModuleInfo, PredId, ProcId, _, ProcInfo),
     proc_info_arg_info(ProcInfo, ArgInfo).
-
-variable_name(CI, Var) = Name :-
-    get_varset(CI, Varset),
-    varset.lookup_name(Varset, Var, Name).
 
 %---------------------------------------------------------------------------%
 
@@ -1166,11 +1149,13 @@ get_variable_slot(CI, Var, Slot) :-
     ( if map.search(StackSlots, Var, SlotLocn) then
         Slot = stack_slot_to_lval(SlotLocn)
     else
-        Name = variable_name(CI, Var),
-        term.var_to_int(Var, Num),
-        string.int_to_string(Num, NumStr),
-        Str = "variable `" ++ Name ++ "' " ++ "(" ++ NumStr ++ ") not found",
-        unexpected($pred, Str)
+        get_var_table(CI, VarTable),
+        lookup_var_entry(VarTable, Var, Entry),
+        Name = var_entry_name(Var, Entry),
+        term.var_to_int(Var, VarNum),
+        string.format("variable `%s' (%d) not found",
+            [s(Name), i(VarNum)], Msg),
+        unexpected($pred, Msg)
     ).
 
 get_total_stackslot_count(CI, NumSlots) :-

@@ -25,7 +25,7 @@
 :- import_module libs.globals.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.file_kind.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_item.
@@ -35,8 +35,9 @@
 %---------------------------------------------------------------------------%
 
     % The generic representation of all the different kinds of interface files.
-    % The parser reads in .intN files in this format, and then immediately
-    % converts them to their int-file-kind representations.
+    % The parser reads in each .intN file in this format, and then immediately
+    % converts it to its int-file-kind representation. The rest of the compiler
+    % uses the parse_tree_intN representation.
     %
 :- type parse_tree_int
     --->    parse_tree_int(
@@ -118,6 +119,30 @@
 
 %---------------------------------------------------------------------------%
 
+:- type raw_compilation_unit
+    --->    raw_compilation_unit(
+                % The name of the module.
+                rcu_module_name                 :: module_name,
+
+                % The context of the `:- module' declaration.
+                rcu_module_name_context         :: prog_context,
+
+                % The items in the module.
+                rcu_raw_item_blocks             :: list(raw_item_block)
+            ).
+
+    % We used to have several kinds of item blocks, but raw item blocks
+    % are the only ones we still use.
+:- type raw_item_block
+    --->    item_block(
+                module_name,
+                module_section,
+                list(item_include),
+                list(item_avail),
+                list(item_fim),
+                list(item)
+            ).
+
 :- pred check_convert_raw_comp_unit_to_module_src(globals::in,
     raw_compilation_unit::in, parse_tree_module_src::out,
     list(error_spec)::in, list(error_spec)::out) is det.
@@ -165,15 +190,15 @@
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_foreign.
-:- import_module parse_tree.prog_out.
+:- import_module parse_tree.prog_util.
 :- import_module recompilation.
 
 :- import_module bool.
 :- import_module cord.
 :- import_module map.
 :- import_module maybe.
-:- import_module one_or_more_map.
 :- import_module one_or_more.
+:- import_module one_or_more_map.
 :- import_module pair.
 :- import_module require.
 :- import_module set.
@@ -192,16 +217,16 @@ check_convert_parse_tree_int_to_int0(ParseTreeInt, ParseTreeInt0, !Specs) :-
         "trying to convert non-ifk_int0 parse_tree_int to parse_tree_int0"),
 
     classify_include_modules(IntIncls, ImpIncls,
-        IntInclMap, ImpInclMap, InclMap, !Specs),
+        _IntInclsMap, _ImpInclsMap, _IntInclMap, _ImpInclMap, InclMap, !Specs),
 
     accumulate_imports_uses_maps(IntAvails,
-        one_or_more_map.init, IntImportMap, one_or_more_map.init, IntUseMap),
+        one_or_more_map.init, IntImportsMap, one_or_more_map.init, IntUsesMap),
     accumulate_imports_uses_maps(ImpAvails,
-        one_or_more_map.init, ImpImportMap, one_or_more_map.init, ImpUseMap),
-    classify_int_imp_import_use_modules(ModuleName, IntImportMap, IntUseMap,
-        ImpImportMap, ImpUseMap, SectionImportUseMap, !Specs),
-    import_and_or_use_map_section_to_maybe_implicit(SectionImportUseMap,
-        ImportUseMap),
+        one_or_more_map.init, ImpImportsMap, one_or_more_map.init, ImpUsesMap),
+    classify_int_imp_import_use_modules(ModuleName,
+        IntImportsMap, IntUsesMap, ImpImportsMap, ImpUsesMap,
+        _IntImportMap, _IntUseMap, _ImpImportMap, _ImpUseMap,
+        SectionImportUseMap, !Specs),
 
     set.list_to_set(list.map(fim_item_to_spec, IntFIMs), IntFIMSpecs),
     set.list_to_set(list.map(fim_item_to_spec, ImpFIMs), ImpFIMSpecs),
@@ -249,9 +274,8 @@ check_convert_parse_tree_int_to_int0(ParseTreeInt, ParseTreeInt0, !Specs) :-
         IntModeDefnMap, ImpModeDefnMap, ModeCtorCheckedMap, !Specs),
 
     ParseTreeInt0 = parse_tree_int0(ModuleName, ModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, ImportUseMap,
-        IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap,
+        SectionImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
         IntDeclPragmas, IntPromises,
@@ -339,7 +363,7 @@ check_convert_parse_tree_int_to_int1(ParseTreeInt, ParseTreeInt1, !Specs) :-
         "trying to convert non-ifk_int1 parse_tree_int to parse_tree_int1"),
 
     classify_include_modules(IntIncls, ImpIncls,
-        IntInclMap, ImpInclMap, InclMap, !Specs),
+        _IntInclsMap, _ImpInclsMap, _IntInclMap, _ImpInclMap, InclMap, !Specs),
 
     accumulate_imports_uses_maps(IntAvails,
         one_or_more_map.init, IntImportMap, one_or_more_map.init, IntUseMap),
@@ -357,10 +381,8 @@ check_convert_parse_tree_int_to_int1(ParseTreeInt, ParseTreeInt1, !Specs) :-
     else
         true
     ),
-    classify_int_imp_import_use_modules(ModuleName,
-        map.init, IntUseMap, map.init, ImpUseMap, SectionImportUseMap, !Specs),
-    import_and_or_use_map_section_to_maybe_implicit(SectionImportUseMap,
-        ImportUseMap),
+    classify_int_imp_use_modules(ModuleName, IntUseMap, ImpUseMap,
+        SectionUseMap, !Specs),
 
     set.list_to_set(list.map(fim_item_to_spec, IntFIMs), IntFIMSpecs),
     set.list_to_set(list.map(fim_item_to_spec, ImpFIMs), ImpFIMSpecs),
@@ -402,8 +424,7 @@ check_convert_parse_tree_int_to_int1(ParseTreeInt, ParseTreeInt1, !Specs) :-
         IntModeDefnMap, ImpModeDefnMap, IntModeCheckedMap, !Specs),
 
     ParseTreeInt1 = parse_tree_int1(ModuleName, ModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntUseMap, ImpUseMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, SectionUseMap, IntFIMSpecs, ImpFIMSpecs,
         IntTypeCheckedMap, IntInstCheckedMap, IntModeCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
         IntDeclPragmas, IntPromises, IntTypeRepnMap,
@@ -565,7 +586,13 @@ check_convert_parse_tree_int_to_int2(ParseTreeInt, ParseTreeInt2, !Specs) :-
         !:Specs = [ImpInclSpec | !.Specs]
     ),
     classify_include_modules(IntIncls, [],
-        IntInclMap, _ImpInclMap, InclMap, !Specs),
+        _IntInclsMap, _ImpInclsMap, IntInclMap, _ImpInclMap, _InclMap, !Specs),
+    ContextToInfo =
+        ( pred(Context::in, Info::out) is det :-
+            Info = include_module_info(ms_interface, Context)
+        ),
+    IntInclMap = int_incl_context_map(IntInclMap0),
+    map.map_values_only(ContextToInfo, IntInclMap0, IntInclInfoMap),
 
     accumulate_imports_uses_maps(IntAvails,
         one_or_more_map.init, IntImportMap, one_or_more_map.init, IntUseMap),
@@ -593,10 +620,8 @@ check_convert_parse_tree_int_to_int2(ParseTreeInt, ParseTreeInt2, !Specs) :-
             get_avail_context(FirstImpAvail), ImpAvailPieces),
         !:Specs = [ImpAvailSpec | !.Specs]
     ),
-    classify_int_imp_import_use_modules(ModuleName,
-        map.init, IntUseMap, map.init, map.init, SectionImportUseMap, !Specs),
-    import_and_or_use_map_section_to_maybe_implicit(SectionImportUseMap,
-        ImportUseMap),
+    classify_int_imp_use_modules(ModuleName, IntUseMap, map.init,
+        SectionImportUseMap, !Specs),
 
     set.list_to_set(list.map(fim_item_to_spec, IntFIMs), IntFIMSpecs),
     set.list_to_set(list.map(fim_item_to_spec, ImpFIMs), ImpFIMSpecs),
@@ -626,8 +651,8 @@ check_convert_parse_tree_int_to_int2(ParseTreeInt, ParseTreeInt2, !Specs) :-
         IntModeDefnMap, ImpModeDefnMap, IntModeCheckedMap, !Specs),
 
     ParseTreeInt2 = parse_tree_int2(ModuleName, ModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, InclMap, IntUseMap, ImportUseMap,
-        IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, IntInclInfoMap,
+        SectionImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         IntTypeCheckedMap, IntInstCheckedMap, IntModeCheckedMap,
         IntTypeClasses, IntInstances, IntTypeRepnMap).
 
@@ -745,14 +770,15 @@ check_convert_parse_tree_int_to_int3(ParseTreeInt, ParseTreeInt3, !Specs) :-
         !:Specs = [VNSpec | !.Specs]
     ),
 
-    classify_include_modules(IntIncls, [],
-        IntInclMap, _ImpInclMap, InclMap, !Specs),
+    classify_include_modules(IntIncls, [], _IntInclsMap, _ImpInclsMap,
+        IntInclMap, _ImpInclMap, _InclMap, !Specs),
+
     accumulate_imports_uses_maps(IntAvails,
-        one_or_more_map.init, IntImportMap, one_or_more_map.init, IntUseMap),
-    ( if map.is_empty(IntUseMap) then
+        one_or_more_map.init, IntImportsMap, one_or_more_map.init, IntUsesMap),
+    ( if map.is_empty(IntUsesMap) then
         true
     else
-        IntUseContextLists = map.values(IntUseMap),
+        IntUseContextLists = map.values(IntUsesMap),
         one_or_more.condense(IntUseContextLists, IntUseContexts),
         IntUsePieces = [words("A .int3 file may not contain any"),
             decl("use_module"), words("declarations."), nl],
@@ -762,11 +788,9 @@ check_convert_parse_tree_int_to_int3(ParseTreeInt, ParseTreeInt3, !Specs) :-
         !:Specs = [IntUseSpec | !.Specs]
     ),
     classify_int_imp_import_use_modules(ModuleName,
-        IntImportMap, map.init, map.init, map.init,
-        SectionImportUseMap, !Specs),
-    import_and_or_use_map_section_to_maybe_implicit(SectionImportUseMap,
-        ImportUseMap),
-
+        IntImportsMap, map.init, map.init, map.init,
+        IntImportMap, _IntUseMap, _ImpImportMap, _ImpUseMap,
+        _SectionImportUseMap, !Specs),
     (
         IntFIMs = []
     ;
@@ -840,7 +864,7 @@ check_convert_parse_tree_int_to_int3(ParseTreeInt, ParseTreeInt3, !Specs) :-
         )
     ),
     ParseTreeInt3 = parse_tree_int3(ModuleName, ModuleNameContext,
-        IntInclMap, InclMap, IntImportMap, ImportUseMap,
+        IntInclMap, IntImportMap,
         IntTypeCheckedMap, IntInstCheckedMap, IntModeCheckedMap,
         IntTypeClasses, IntInstances, IntTypeRepnMap).
 
@@ -1064,6 +1088,7 @@ classify_plain_opt_items([Item | Items], !TypeDefns, !ForeignEnums,
         ;
             ( DeclPragma = decl_pragma_obsolete_pred(_)
             ; DeclPragma = decl_pragma_obsolete_proc(_)
+            ; DeclPragma = decl_pragma_format_call(_)
             ; DeclPragma = decl_pragma_oisu(_)
             ; DeclPragma = decl_pragma_check_termination(_)
             ),
@@ -1294,6 +1319,7 @@ classify_trans_opt_items([Item | Items], !TermInfos, !Term2Infos,
         ;
             ( DeclPragma = decl_pragma_obsolete_pred(_)
             ; DeclPragma = decl_pragma_obsolete_proc(_)
+            ; DeclPragma = decl_pragma_format_call(_)
             ; DeclPragma = decl_pragma_type_spec(_)
             ; DeclPragma = decl_pragma_oisu(_)
             ; DeclPragma = decl_pragma_terminates(_)
@@ -1369,11 +1395,11 @@ check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
     RawCompUnit = raw_compilation_unit(ModuleName, ModuleNameContext,
         ItemBlocks),
 
-    one_or_more_map.init(IntImportMap0),
-    one_or_more_map.init(IntUseMap0),
+    one_or_more_map.init(IntImportsMap0),
+    one_or_more_map.init(IntUsesMap0),
     map.init(IntFIMSpecMap0),
-    one_or_more_map.init(ImpImportMap0),
-    one_or_more_map.init(ImpUseMap0),
+    one_or_more_map.init(ImpImportsMap0),
+    one_or_more_map.init(ImpUsesMap0),
     map.init(ImpFIMSpecMap0),
 
     IntImplicitAvailNeeds0 = init_implicit_avail_needs,
@@ -1381,7 +1407,7 @@ check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
 
     classify_src_items_in_blocks(ItemBlocks,
         [], IntIncls,
-        IntImportMap0, IntImportMap, IntUseMap0, IntUseMap,
+        IntImportsMap0, IntImportsMap, IntUsesMap0, IntUsesMap,
         IntFIMSpecMap0, IntFIMSpecMap,
 
         [], RevIntTypeDefns, [], RevIntInstDefns, [], RevIntModeDefns,
@@ -1394,7 +1420,7 @@ check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
         set.init, IntSelfFIMLangs,
 
         [], ImpIncls,
-        ImpImportMap0, ImpImportMap, ImpUseMap0, ImpUseMap,
+        ImpImportsMap0, ImpImportsMap, ImpUsesMap0, ImpUsesMap,
         ImpFIMSpecMap0, ImpFIMSpecMap1,
         [], RevImpTypeDefns, [], RevImpInstDefns, [], RevImpModeDefns,
         [], RevImpTypeClasses, [], RevImpInstances0,
@@ -1407,8 +1433,8 @@ check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
 
         !Specs),
 
-    classify_include_modules(IntIncls, ImpIncls, IntInclMap, ImpInclMap,
-        InclMap, !Specs),
+    classify_include_modules(IntIncls, ImpIncls, IntInclsMap, ImpInclsMap,
+        _IntInclMap, _ImpInclMap, InclMap, !Specs),
 
     list.reverse(RevIntTypeDefns, IntTypeDefns),
     list.reverse(RevIntInstDefns, IntInstDefns),
@@ -1485,8 +1511,10 @@ check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
     ImpFinalises = IntFinalises ++ ImpFinalises0,
     ImpMutables = IntMutables ++ ImpMutables0,
 
+    % XXX Consider using _IntImportMap etc instead of IntImportsMap etc.
     classify_int_imp_import_use_modules(ModuleName,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap,
+        IntImportsMap, IntUsesMap, ImpImportsMap, ImpUsesMap,
+        _IntImportMap, _IntUseMap, _ImpImportMap, _ImpUseMap,
         SectionImportUseMap, !Specs),
     import_and_or_use_map_section_to_maybe_implicit(SectionImportUseMap,
         ImportUseMap0),
@@ -1502,8 +1530,8 @@ check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
         ImpFIMSpecMap1, ImpFIMSpecMap, !Specs),
 
     ParseTreeModuleSrc = parse_tree_module_src(ModuleName, ModuleNameContext,
-        IntInclMap, ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, ImportUseMap,
+        IntInclsMap, ImpInclsMap, InclMap,
+        IntImportsMap, IntUsesMap, ImpImportsMap, ImpUsesMap, ImportUseMap,
         IntFIMSpecMap, ImpFIMSpecMap, IntSelfFIMLangs, ImpSelfFIMLangs,
 
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
@@ -1901,7 +1929,7 @@ report_int_imp_fim(IntFIMSpecMap, FIMSpec, !ImpFIMSpecMap, !Specs) :-
     list(item_mode_decl_info)::in, list(item_mode_decl_info)::out,
     list(item_decl_pragma_info)::in, list(item_decl_pragma_info)::out,
     list(item_impl_pragma_info)::in, list(item_impl_pragma_info)::out,
-    set(pf_sym_name_arity)::in, set(pf_sym_name_arity)::out,
+    set(pred_pf_name_arity)::in, set(pred_pf_name_arity)::out,
     list(item_promise_info)::in, list(item_promise_info)::out,
     list(item_initialise_info)::in, list(item_initialise_info)::out,
     list(item_finalise_info)::in, list(item_finalise_info)::out,
@@ -1934,7 +1962,7 @@ report_int_imp_fim(IntFIMSpecMap, FIMSpec, !ImpFIMSpecMap, !Specs) :-
     list(error_spec)::in, list(error_spec)::out) is det.
 
 classify_src_items_in_blocks([],
-        !IntIncls, !IntImportMap, !IntUseMap, !IntFIMSpecMap,
+        !IntIncls, !IntImportsMap, !IntUsesMap, !IntFIMSpecMap,
         !RevIntTypeDefns, !RevIntInstDefns, !RevIntModeDefns,
         !RevIntTypeClasses, !RevIntInstances,
         !RevIntPredDecls, !RevIntModeDecls,
@@ -1942,7 +1970,7 @@ classify_src_items_in_blocks([],
         !IntBadClausePreds, !RevIntPromises,
         !RevIntInitialises, !RevIntFinalises, !RevIntMutables,
         !IntImplicitAvailNeeds, !IntSelfFIMLangs,
-        !ImpIncls, !ImpImportMap, !ImpUseMap, !ImpFIMSpecMap,
+        !ImpIncls, !ImpImportsMap, !ImpUsesMap, !ImpFIMSpecMap,
         !RevImpTypeDefns, !RevImpInstDefns, !RevImpModeDefns,
         !RevImpTypeClasses, !RevImpInstances,
         !RevImpPredDecls, !RevImpModeDecls, !RevImpClauses,
@@ -1951,7 +1979,7 @@ classify_src_items_in_blocks([],
         !RevImpInitialises, !RevImpFinalises, !RevImpMutables,
         !ImpImplicitAvailNeeds, !ImpSelfFIMLangs, !Specs).
 classify_src_items_in_blocks([ItemBlock | ItemBlocks],
-        !IntIncls, !IntImportMap, !IntUseMap, !IntFIMSpecMap,
+        !IntIncls, !IntImportsMap, !IntUsesMap, !IntFIMSpecMap,
         !RevIntTypeDefns, !RevIntInstDefns, !RevIntModeDefns,
         !RevIntTypeClasses, !RevIntInstances,
         !RevIntPredDecls, !RevIntModeDecls,
@@ -1959,7 +1987,7 @@ classify_src_items_in_blocks([ItemBlock | ItemBlocks],
         !IntBadClausePreds, !RevIntPromises,
         !RevIntInitialises, !RevIntFinalises, !RevIntMutables,
         !IntImplicitAvailNeeds, !IntSelfFIMLangs,
-        !ImpIncls, !ImpImportMap, !ImpUseMap, !ImpFIMSpecMap,
+        !ImpIncls, !ImpImportsMap, !ImpUsesMap, !ImpFIMSpecMap,
         !RevImpTypeDefns, !RevImpInstDefns, !RevImpModeDefns,
         !RevImpTypeClasses, !RevImpInstances,
         !RevImpPredDecls, !RevImpModeDecls, !RevImpClauses,
@@ -1971,7 +1999,7 @@ classify_src_items_in_blocks([ItemBlock | ItemBlocks],
     (
         Section = ms_interface,
         !:IntIncls = !.IntIncls ++ Incls,
-        accumulate_imports_uses_maps(Avails, !IntImportMap, !IntUseMap),
+        accumulate_imports_uses_maps(Avails, !IntImportsMap, !IntUsesMap),
         list.foldl2(classify_foreign_import_module, FIMs, !IntFIMSpecMap,
             !Specs),
         classify_src_items_int(Items,
@@ -1985,7 +2013,7 @@ classify_src_items_in_blocks([ItemBlock | ItemBlocks],
     ;
         Section = ms_implementation,
         !:ImpIncls = !.ImpIncls ++ Incls,
-        accumulate_imports_uses_maps(Avails, !ImpImportMap, !ImpUseMap),
+        accumulate_imports_uses_maps(Avails, !ImpImportsMap, !ImpUsesMap),
         list.foldl2(classify_foreign_import_module, FIMs, !ImpFIMSpecMap,
             !Specs),
         classify_src_items_imp(Items,
@@ -1998,7 +2026,7 @@ classify_src_items_in_blocks([ItemBlock | ItemBlocks],
             !ImpImplicitAvailNeeds, !ImpSelfFIMLangs, !Specs)
     ),
     classify_src_items_in_blocks(ItemBlocks,
-        !IntIncls, !IntImportMap, !IntUseMap, !IntFIMSpecMap,
+        !IntIncls, !IntImportsMap, !IntUsesMap, !IntFIMSpecMap,
         !RevIntTypeDefns, !RevIntInstDefns, !RevIntModeDefns,
         !RevIntTypeClasses, !RevIntInstances,
         !RevIntPredDecls, !RevIntModeDecls,
@@ -2006,7 +2034,7 @@ classify_src_items_in_blocks([ItemBlock | ItemBlocks],
         !IntBadClausePreds, !RevIntPromises,
         !RevIntInitialises, !RevIntFinalises, !RevIntMutables,
         !IntImplicitAvailNeeds, !IntSelfFIMLangs,
-        !ImpIncls, !ImpImportMap, !ImpUseMap, !ImpFIMSpecMap,
+        !ImpIncls, !ImpImportsMap, !ImpUsesMap, !ImpFIMSpecMap,
         !RevImpTypeDefns, !RevImpInstDefns, !RevImpModeDefns,
         !RevImpTypeClasses, !RevImpInstances,
         !RevImpPredDecls, !RevImpModeDecls, !RevImpClauses,
@@ -2051,7 +2079,7 @@ classify_foreign_import_module(ItemFIM, !FIMSpecMap, !Specs) :-
     list(item_mode_decl_info)::in, list(item_mode_decl_info)::out,
     list(item_decl_pragma_info)::in, list(item_decl_pragma_info)::out,
     list(item_impl_pragma_info)::in, list(item_impl_pragma_info)::out,
-    set(pf_sym_name_arity)::in, set(pf_sym_name_arity)::out,
+    set(pred_pf_name_arity)::in, set(pred_pf_name_arity)::out,
     list(item_promise_info)::in, list(item_promise_info)::out,
     list(item_initialise_info)::in, list(item_initialise_info)::out,
     list(item_finalise_info)::in, list(item_finalise_info)::out,
@@ -2084,6 +2112,8 @@ classify_src_items_int([Item | Items],
             )
         ;
             TypeDefn = parse_tree_solver_type(DetailsSolver),
+            % XXX IMPLICIT None of the implicit avail needs this call looks for
+            % has any business occurring in a solver type.
             acc_implicit_avail_needs_solver_type(DetailsSolver,
                 !ImplicitAvailNeeds)
         ;
@@ -2102,8 +2132,28 @@ classify_src_items_int([Item | Items],
         !:RevTypeClasses = [ItemTypeclassInfo | !.RevTypeClasses]
     ;
         Item = item_instance(ItemInstanceInfo),
-        acc_implicit_avail_needs_in_instance(ItemInstanceInfo,
-            !ImplicitAvailNeeds),
+        InstanceBody = ItemInstanceInfo ^ ci_method_instances,
+        (
+            InstanceBody = instance_body_abstract
+        ;
+            InstanceBody = instance_body_concrete(InstanceMethods),
+            list.foldl(acc_implicit_avail_needs_in_instance_method,
+                InstanceMethods, !ImplicitAvailNeeds),
+
+            AlwaysPieces = [words("Error: non-abstract instance declaration"),
+                words("in module interface."), nl],
+            VerbosePieces = [words("If you intend to export this instance,"),
+                words("move this declaration to the implementation section,"),
+                words("replacing it in the interface section"),
+                words("with its abstract version, which omits"),
+                words("the"), quote("where [...]"), words("part."), nl],
+            Msg = simple_msg(ItemInstanceInfo ^ ci_context,
+                [always(AlwaysPieces),
+                verbose_only(verbose_once, VerbosePieces)]),
+            Spec = error_spec($pred, severity_error,
+                phase_parse_tree_to_hlds, [Msg]),
+            !:Specs = [Spec | !.Specs]
+        ),
         !:RevInstances = [ItemInstanceInfo | !.RevInstances]
     ;
         Item = item_pred_decl(ItemPredDeclInfo),
@@ -2115,23 +2165,21 @@ classify_src_items_int([Item | Items],
         Item = item_clause(ItemClauseInfo),
         ItemClauseInfo = item_clause_info(PredOrFunc, PredSymName, ArgTerms,
             _VarSet, _Body, Context, _SeqNum),
-        list.length(ArgTerms, Arity),
-        % There is no point printing out the qualified name
+        PredFormArity = arg_list_arity(ArgTerms),
+        user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+        PredPfNameArity =
+            pred_pf_name_arity(PredOrFunc, PredSymName, UserArity),
+        % There is no point printing out the qualified name,
         % since the module name is implicit in the context.
-        UnqualPredSymName = unqualified(unqualify_name(PredSymName)),
-        PredName = pf_sym_name_orig_arity_to_string(PredOrFunc,
-            sym_name_arity(UnqualPredSymName, Arity)),
-        error_is_exported(Context, [words("clause for"), fixed(PredName)],
-            !Specs),
-        set.insert(pf_sym_name_arity(PredOrFunc, PredSymName, Arity),
-            !BadClausePreds)
+        error_is_exported(Context, [words("clause for"),
+            unqual_pf_sym_name_user_arity(PredPfNameArity)], !Specs),
+        set.insert(PredPfNameArity, !BadClausePreds)
     ;
         Item = item_decl_pragma(ItemDeclPragma),
         !:RevDeclPragmas = [ItemDeclPragma | !.RevDeclPragmas]
     ;
         Item = item_impl_pragma(ItemImplPragma),
-        error_is_exported(get_item_context(Item), item_desc_pieces(Item),
-            !Specs),
+        error_item_is_exported(Item, !Specs),
         !:RevImplPragmas = [ItemImplPragma | !.RevImplPragmas],
         ItemImplPragma = item_pragma_info(ImplPragma, _Context, _SeqNum),
         (
@@ -2139,30 +2187,51 @@ classify_src_items_int([Item | Items],
                 ImplPragma = impl_pragma_foreign_proc(ForeignProcInfo),
                 ForeignProcInfo = pragma_info_foreign_proc(_,
                     SymName, PredOrFunc, Vars, _, _, _),
-                list.length(Vars, Arity)
+                list.length(Vars, Arity),
+                user_arity_pred_form_arity(PredOrFunc, UserArity,
+                    pred_form_arity(Arity)),
+                PredPfNameArity =
+                    pred_pf_name_arity(PredOrFunc, SymName, UserArity)
             ;
                 ImplPragma = impl_pragma_external_proc(ExternalProcInfo),
-                ExternalProcInfo = pragma_info_external_proc(PFNameArity, _),
-                PFNameArity = pred_pf_name_arity(PredOrFunc, SymName,
-                    user_arity(Arity))
+                ExternalProcInfo =
+                    pragma_info_external_proc(PredPfNameArity, _)
             ),
-            set.insert(pf_sym_name_arity(PredOrFunc, SymName, Arity),
-                !BadClausePreds)
+            set.insert(PredPfNameArity, !BadClausePreds)
         ;
-            ImplPragma = impl_pragma_fact_table(_)
-            % If a predicate named e.g. foo/N has a fact table pragma for it,
-            % but due to a bug the pragma is in the interface section, then
-            % generating an error message about the absence of clauses
-            % for predicate foo/N will be misleading. However, we cannot add
-            % foo/N to !BadClausePreds without knowing whether the pragma
-            % is for the predicate foo/N or the function foo/N, which
-            % is a piece of information that the pragma unfortunately
-            % does *not* contain. So if a module declares both a predicate
-            % foo/N and a function foo/N, has no clauses for either of them
-            % in the implementation, but has an (invalid) fact_table pragma
-            % for just one of them in the interface, we have no way of
-            % generating an error message about the missing clauses for
-            % just the other.
+            ImplPragma = impl_pragma_fact_table(FactTableInfo),
+            FactTableInfo = pragma_info_fact_table(PredSpec, _FileName),
+            PredSpec = pred_pfu_name_arity(PFU, SymName, UserArity),
+            (
+                PFU = pfu_predicate,
+                PredPfNameArity =
+                    pred_pf_name_arity(pf_predicate, SymName, UserArity),
+                set.insert(PredPfNameArity, !BadClausePreds)
+            ;
+                PFU = pfu_function,
+                PredPfNameArity =
+                    pred_pf_name_arity(pf_function, SymName, UserArity),
+                set.insert(PredPfNameArity, !BadClausePreds)
+            ;
+                PFU = pfu_unknown
+                % If a predicate named e.g. foo/N has a fact table pragma
+                % for it, but due to a bug the pragma is in the interface
+                % section, then generating an error message about the
+                % absence of clauses for predicate foo/N will be misleading.
+                % However, we cannot add foo/N to !BadClausePreds without
+                % knowing whether the pragma is for the predicate foo/N
+                % or the function foo/N, and if we got here, then we do not
+                % know. If the module we are compiling declares both
+                % a predicate foo/N and a function foo/N, has no clauses
+                % for either of them in the implementation, but has an
+                % (invalid) fact_table pragma for just one of them in the
+                % interface, we have no way of generating an error message
+                % about the missing clauses for *just* the other; we have
+                % generate that error message either for both, or for neither.
+                % By doing nothing here, we choose generating a message
+                % for both. We know one will be misleading, we just don't know
+                % which one ;-(
+            )
         ;
             ( ImplPragma = impl_pragma_foreign_decl(_)
             ; ImplPragma = impl_pragma_foreign_code(_)
@@ -2189,6 +2258,8 @@ classify_src_items_int([Item | Items],
         !:Specs = [Spec | !.Specs]
     ;
         Item = item_promise(ItemPromiseInfo),
+        % XXX IMPLICIT None of the implicit avail needs this call looks for
+        % has any business occurring in a promise.
         acc_implicit_avail_needs_in_promise(ItemPromiseInfo,
             !ImplicitAvailNeeds),
         !:RevPromises = [ItemPromiseInfo | !.RevPromises]
@@ -2196,22 +2267,18 @@ classify_src_items_int([Item | Items],
         ( Item = item_foreign_enum(_)
         ; Item = item_foreign_export_enum(_)
         ),
-        error_is_exported(get_item_context(Item), item_desc_pieces(Item),
-            !Specs)
+        error_item_is_exported(Item, !Specs)
     ;
         Item = item_initialise(ItemInitialiseInfo),
-        error_is_exported(get_item_context(Item), item_desc_pieces(Item),
-            !Specs),
+        error_item_is_exported(Item, !Specs),
         !:RevInitialises = [ItemInitialiseInfo | !.RevInitialises]
     ;
         Item = item_finalise(ItemFinaliseInfo),
-        error_is_exported(get_item_context(Item), item_desc_pieces(Item),
-            !Specs),
+        error_item_is_exported(Item, !Specs),
         !:RevFinalises = [ItemFinaliseInfo | !.RevFinalises]
     ;
         Item = item_mutable(ItemMutableInfo),
-        error_is_exported(get_item_context(Item), item_desc_pieces(Item),
-            !Specs),
+        error_item_is_exported(Item, !Specs),
         !:RevMutables = [ItemMutableInfo | !.RevMutables]
     ;
         Item = item_type_repn(ItemTypeRepnInfo),
@@ -2278,6 +2345,8 @@ classify_src_items_imp([Item | Items],
             )
         ;
             TypeDefn = parse_tree_solver_type(DetailsSolver),
+            % XXX IMPLICIT None of the implicit avail needs this call looks for
+            % has any business occurring in a solver type.
             acc_implicit_avail_needs_solver_type(DetailsSolver,
                 !ImplicitAvailNeeds)
         ;
@@ -2336,7 +2405,7 @@ classify_src_items_imp([Item | Items],
             set.insert(Lang, !SelfFIMLangs)
         ;
             ImplPragma = impl_pragma_foreign_proc_export(FPEInfo),
-            FPEInfo = pragma_info_foreign_proc_export(_, Lang, _, _),
+            FPEInfo = pragma_info_foreign_proc_export(_, Lang, _, _, _),
             set.insert(Lang, !SelfFIMLangs)
         ;
             ImplPragma = impl_pragma_foreign_proc(FPInfo),
@@ -2383,6 +2452,8 @@ classify_src_items_imp([Item | Items],
         !:Specs = [Spec | !.Specs]
     ;
         Item = item_promise(ItemPromiseInfo),
+        % XXX IMPLICIT None of the implicit avail needs this call looks for
+        % has any business occurring in a promise.
         acc_implicit_avail_needs_in_promise(ItemPromiseInfo,
             !ImplicitAvailNeeds),
         !:RevPromises = [ItemPromiseInfo | !.RevPromises]
@@ -2426,21 +2497,6 @@ acc_implicit_avail_needs_solver_type(DetailsSolver, !ImplicitAvailNeeds) :-
     list.foldl(acc_implicit_avail_needs_in_mutable, MutableItems,
         !ImplicitAvailNeeds).
 
-:- pred acc_implicit_avail_needs_in_instance(item_instance_info::in,
-    implicit_avail_needs::in, implicit_avail_needs::out) is det.
-
-acc_implicit_avail_needs_in_instance(ItemInstanceInfo, !ImplicitAvailNeeds) :-
-    ItemInstanceInfo = item_instance_info(_DerivingClass, _ClassName,
-        _Types, _OriginalTypes, InstanceBody, _VarSet,
-        _ModuleContainingInstance, _Context, _SeqNum),
-    (
-        InstanceBody = instance_body_abstract
-    ;
-        InstanceBody = instance_body_concrete(InstanceMethods),
-        list.foldl(acc_implicit_avail_needs_in_instance_method,
-            InstanceMethods, !ImplicitAvailNeeds)
-    ).
-
 :- pred acc_implicit_avail_needs_in_promise(item_promise_info::in,
     implicit_avail_needs::in, implicit_avail_needs::out) is det.
 
@@ -2451,10 +2507,16 @@ acc_implicit_avail_needs_in_promise(ItemPromiseInfo, !ImplicitAvailNeeds) :-
 
 %---------------------------------------------------------------------------%
 
+:- pred error_item_is_exported(item::in,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+error_item_is_exported(Item, !Specs) :-
+    error_is_exported(get_item_context(Item), item_desc_pieces(Item), !Specs).
+
     % Emit an error reporting that something should not have occurred in
     % a module interface.
     %
-:- pred error_is_exported(prog_context::in, list(format_component)::in,
+:- pred error_is_exported(prog_context::in, list(format_piece)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 error_is_exported(Context, DescPieces, !Specs) :-

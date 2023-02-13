@@ -62,7 +62,7 @@
 :- module parse_tree.equiv_type.
 :- interface.
 
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_event.
 :- import_module parse_tree.prog_data_used_modules.
@@ -733,9 +733,7 @@ replace_in_parse_tree_int0(ModuleName, TypeEqvMap, InstEqvMap,
     MaybeRecordInt = dont_record_sym_name_use,
     MaybeRecordImp = dont_record_sym_name_use,
     OrigParseTreeInt0 = parse_tree_int0(IntModuleName, IntModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, ImportUseMap,
-        IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap0, InstCtorCheckedMap0, ModeCtorCheckedMap0,
         IntTypeClasses0, IntInstances0, IntPredDecls0, IntModeDecls0,
         IntDeclPragmas0, IntPromises,
@@ -784,9 +782,7 @@ replace_in_parse_tree_int0(ModuleName, TypeEqvMap, InstEqvMap,
         !RecompInfo, !UsedModules, !Specs),
 
     ParseTreeInt0 = parse_tree_int0(IntModuleName, IntModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, ImportUseMap,
-        IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
         IntDeclPragmas, IntPromises,
@@ -805,8 +801,7 @@ replace_in_parse_tree_int1(ModuleName, TypeEqvMap, InstEqvMap,
     MaybeRecordInt = dont_record_sym_name_use,
     MaybeRecordImp = dont_record_sym_name_use,
     OrigParseTreeInt1 = parse_tree_int1(IntModuleName, IntModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntUseMap, ImpUseMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap0, InstCtorCheckedMap0, ModeCtorCheckedMap0,
         IntTypeClasses0, IntInstances0, IntPredDecls0, IntModeDecls0,
         IntDeclPragmas0, IntPromises, IntTypeRepnMap0,
@@ -846,8 +841,7 @@ replace_in_parse_tree_int1(ModuleName, TypeEqvMap, InstEqvMap,
         !RecompInfo, !UsedModules, !Specs),
 
     ParseTreeInt1 = parse_tree_int1(IntModuleName, IntModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, InclMap,
-        IntUseMap, ImpUseMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
         IntDeclPragmas, IntPromises, IntTypeRepnMap,
@@ -865,8 +859,7 @@ replace_in_parse_tree_int2(ModuleName, TypeEqvMap, InstEqvMap,
     MaybeRecordInt = dont_record_sym_name_use,
     MaybeRecordImp = dont_record_sym_name_use,
     OrigParseTreeInt2 = parse_tree_int2(IntModuleName, IntModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, InclMap,
-        IntUsedMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap0, InstCtorCheckedMap0, ModeCtorCheckedMap0,
         IntTypeClasses0, IntInstances0, IntTypeRepnMap0),
 
@@ -891,8 +884,7 @@ replace_in_parse_tree_int2(ModuleName, TypeEqvMap, InstEqvMap,
         !RecompInfo, !UsedModules, !Specs),
 
     ParseTreeInt2 = parse_tree_int2(IntModuleName, IntModuleNameContext,
-        MaybeVersionNumbers, IntInclMap, InclMap,
-        IntUsedMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntTypeRepnMap).
 
@@ -955,6 +947,12 @@ replace_in_parse_tree_trans_opt(_ModuleName, _TypeEqvMap, _InstEqvMap,
         !ParseTreeTransOpt, !RecompInfo, !UsedModules, !Specs).
     % No component that may appear in a parse_tree_trans_opt
     % needs any expansions.
+
+%---------------------------------------------------------------------------%
+
+:- type maybe_record_sym_name_use
+    --->    dont_record_sym_name_use
+    ;       record_sym_name_use(item_visibility).
 
 %---------------------------------------------------------------------------%
 
@@ -1040,10 +1038,6 @@ replace_in_list_loop(ModuleName, MaybeRecord, TypeEqvMap, InstEqvMap,
 
 %---------------------------------------------------------------------------%
 
-:- type maybe_record_sym_name_use
-    --->    dont_record_sym_name_use
-    ;       record_sym_name_use(item_visibility).
-
 :- pred replace_in_type_ctor_checked_defn(module_name::in,
     maybe_record_sym_name_use::in, maybe_record_sym_name_use::in,
     type_eqv_map::in, inst_eqv_map::in,
@@ -1061,7 +1055,8 @@ replace_in_type_ctor_checked_defn(ModuleName, MaybeRecordInt, MaybeRecordImp,
             SolverDefn0 = solver_type_abstract(_, _),
             SolverDefn = SolverDefn0
         ;
-            SolverDefn0 = solver_type_full(MaybeAbstractDefn0, ItemSolverDefn0),
+            SolverDefn0 =
+                solver_type_full(MaybeAbstractDefn0, ItemSolverDefn0),
             replace_in_type_defn_info_general(replace_in_type_defn_solver,
                 ModuleName, MaybeRecordImp, TypeEqvMap, InstEqvMap,
                 ItemSolverDefn0, ItemSolverDefn,
@@ -1162,7 +1157,8 @@ replace_in_type_defn_info_general(ReplaceInTypeDefn, ModuleName, MaybeRecord,
     ReplaceInTypeDefn(MaybeRecord, TypeEqvMap, InstEqvMap, TypeCtor, Context,
         TypeDefn0, TypeDefn, TVarSet0, TVarSet,
         UsedTypeCtors0, UsedTypeCtors, !UsedModules, Specs),
-    ItemId = item_id(type_defn_item, item_name(SymName, Arity)),
+    ItemName = recomp_item_name(SymName, Arity),
+    ItemId = recomp_item_id(recomp_type_defn, ItemName),
     finish_recording_expanded_items(ItemId, UsedTypeCtors, !RecompInfo),
     Info = item_type_defn_info(SymName, ArgTypeVars, TypeDefn, TVarSet,
         Context, SeqNum).
@@ -1226,7 +1222,8 @@ replace_in_type_repn_info(ModuleName, MaybeRecord, TypeEqvMap,
         TVarSet = TVarSet0,
         UsedTypeCtors = UsedTypeCtors0
     ),
-    ItemId = item_id(type_defn_item, item_name(SymName, Arity)),
+    ItemName = recomp_item_name(SymName, Arity),
+    ItemId = recomp_item_id(recomp_type_defn, ItemName),
     finish_recording_expanded_items(ItemId, UsedTypeCtors, !RecompInfo),
     Info = item_type_repn_info(SymName, ArgTypeVars, TypeRepn, TVarSet,
         Context, SeqNum).
@@ -1269,15 +1266,18 @@ replace_in_pred_decl_info(ModuleName, MaybeRecord, TypeEqvMap, InstEqvMap,
         MaybeWithType0, MaybeWithType, MaybeWithInst0, MaybeWithInst,
         MaybeDetism0, MaybeDetism, ExpandedItems0, ExpandedItems,
         !UsedModules, Specs),
-    ItemType = pred_or_func_to_item_type(PredOrFunc),
+    ItemType = pred_or_func_to_recomp_item_type(PredOrFunc),
     list.length(TypesAndModes, Arity),
     adjust_func_arity(PredOrFunc, OrigArity, Arity),
-    ItemId = item_id(ItemType, item_name(PredName, OrigArity)),
+    ItemName = recomp_item_name(PredName, OrigArity),
+    ItemId = recomp_item_id(ItemType, ItemName),
     finish_recording_expanded_items(ItemId, ExpandedItems, !RecompInfo),
     Info = item_pred_decl_info(PredName, PredOrFunc, TypesAndModes,
         MaybeWithType, MaybeWithInst, MaybeDetism, Origin,
         TVarSet, InstVarSet, ExistQVars, Purity, ClassContext,
         Context, SeqNum).
+
+%---------------------%
 
 :- pred replace_in_mode_decl_info(module_name::in,
     maybe_record_sym_name_use::in, type_eqv_map::in, inst_eqv_map::in,
@@ -1305,16 +1305,19 @@ replace_in_mode_decl_info(ModuleName, MaybeRecord, _TypeEqvMap, InstEqvMap,
     ),
     (
         MaybePredOrFunc = yes(PredOrFunc),
-        ItemType = pred_or_func_to_item_type(PredOrFunc),
+        ItemType = pred_or_func_to_recomp_item_type(PredOrFunc),
         list.length(Modes, Arity),
         adjust_func_arity(PredOrFunc, OrigArity, Arity),
-        ItemId = item_id(ItemType, item_name(PredName, OrigArity)),
+        ItemName = recomp_item_name(PredName, OrigArity),
+        ItemId = recomp_item_id(ItemType, ItemName),
         finish_recording_expanded_items(ItemId, ExpandedItems, !RecompInfo)
     ;
         MaybePredOrFunc = no
     ),
     Info = item_mode_decl_info(PredName, MaybePredOrFunc, Modes,
         WithInst, MaybeDetism, InstVarSet, Context, SeqNum).
+
+%---------------------%
 
 :- pred replace_in_typeclass_info(module_name::in,
     maybe_record_sym_name_use::in, type_eqv_map::in, inst_eqv_map::in,
@@ -1344,10 +1347,13 @@ replace_in_typeclass_info(ModuleName, MaybeRecord, TypeEqvMap, InstEqvMap,
             !UsedModules, [], Specs),
         ClassInterface = class_interface_concrete(Methods)
     ),
-    ItemId = item_id(typeclass_item, item_name(ClassName, Arity)),
+    ItemName = recomp_item_name(ClassName, Arity),
+    ItemId = recomp_item_id(recomp_typeclass, ItemName),
     finish_recording_expanded_items(ItemId, ExpandedItems, !RecompInfo),
     Info = item_typeclass_info(ClassName, Vars, Constraints, FunDeps,
         ClassInterface, TVarSet, Context, SeqNum).
+
+%---------------------%
 
 :- pred replace_in_instance_info(module_name::in,
     maybe_record_sym_name_use::in, type_eqv_map::in, inst_eqv_map::in,
@@ -1376,12 +1382,14 @@ replace_in_instance_info(ModuleName, MaybeRecord, TypeEqvMap, _InstEqvMap,
         _, _, TVarSet1, TVarSet, UsedTypeCtors1, UsedTypeCtors, !UsedModules),
     % We specifically do NOT expand equivalence types in OriginalTypes.
     % If we did, that would defeat the purpose of the field.
-    list.length(Types0, Arity),
-    ItemId = item_id(typeclass_item, item_name(ClassName, Arity)),
+    ItemName = recomp_item_name(ClassName, list.length(Types0)),
+    ItemId = recomp_item_id(recomp_typeclass, ItemName),
     finish_recording_expanded_items(ItemId, UsedTypeCtors, !RecompInfo),
     InstanceInfo = item_instance_info(ClassName, Types, OriginalTypes,
         Constraints, InstanceBody, TVarSet, ContainingModuleName,
         Context, SeqNum).
+
+%---------------------%
 
 :- pred replace_in_decl_pragma_info(module_name::in,
     maybe_record_sym_name_use::in, type_eqv_map::in, inst_eqv_map::in,
@@ -1402,6 +1410,7 @@ replace_in_decl_pragma_info(ModuleName, MaybeRecord, TypeEqvMap, InstEqvMap,
     ;
         ( Pragma0 = decl_pragma_obsolete_pred(_)
         ; Pragma0 = decl_pragma_obsolete_proc(_)
+        ; Pragma0 = decl_pragma_format_call(_)
         ; Pragma0 = decl_pragma_oisu(_)
         ; Pragma0 = decl_pragma_terminates(_)
         ; Pragma0 = decl_pragma_does_not_terminate(_)
@@ -1449,8 +1458,11 @@ replace_in_pragma_info_type_spec(ModuleName, MaybeRecord,
     else
         ExpandedItems0 = eqv_expand_info(ModuleName, ItemIds0)
     ),
-    replace_in_subst(MaybeRecord, TypeEqvMap, Subst0, Subst,
+    Subst0 = one_or_more(HeadSubst0, TailSubsts0),
+    replace_in_subst(MaybeRecord, TypeEqvMap,
+        HeadSubst0, HeadSubst, TailSubsts0, TailSubsts,
         TVarSet0, TVarSet, ExpandedItems0, ExpandedItems, !UsedModules),
+    Subst = one_or_more(HeadSubst, TailSubsts),
     (
         ExpandedItems = no_eqv_expand_info,
         ItemIds = ItemIds0
@@ -1459,6 +1471,8 @@ replace_in_pragma_info_type_spec(ModuleName, MaybeRecord,
     ),
     TypeSpecInfo = pragma_info_type_spec(PFUMM, PredName, NewName,
         Subst, TVarSet, ItemIds).
+
+%---------------------%
 
 :- pred replace_in_impl_pragma_info(module_name::in,
     maybe_record_sym_name_use::in, type_eqv_map::in, inst_eqv_map::in,
@@ -1528,13 +1542,14 @@ replace_in_pragma_info_foreign_proc(ModuleName, MaybeRecord,
         else
             Attrs = Attrs0
         ),
-        list.length(ProcVars, Arity),
-        ItemId = item_id(foreign_proc_item, item_name(PName, Arity)),
-        finish_recording_expanded_items(ItemId, !.EquivTypeInfo,
-            !RecompInfo)
+        ItemName = recomp_item_name(PName, list.length(ProcVars)),
+        ItemId = recomp_item_id(recomp_foreign_proc, ItemName),
+        finish_recording_expanded_items(ItemId, !.EquivTypeInfo, !RecompInfo)
     ),
     FPInfo = pragma_info_foreign_proc(Attrs, PName, PredOrFunc,
         ProcVars, ProcVarset, ProcInstVarset, ProcImpl).
+
+%---------------------%
 
 :- pred replace_in_mutable_info(module_name::in, maybe_record_sym_name_use::in,
     type_eqv_map::in, inst_eqv_map::in,
@@ -1550,7 +1565,7 @@ replace_in_mutable_info(ModuleName, MaybeRecord, TypeEqvMap, InstEqvMap,
         ExpandedItems0),
     replace_in_mutable_defn(MaybeRecord, TypeEqvMap, InstEqvMap, Info0, Info,
         ExpandedItems0, ExpandedItems, !UsedModules),
-    ItemId = item_id(mutable_item, item_name(QualName, 0)),
+    ItemId = recomp_item_id(recomp_mutable, recomp_item_name(QualName, 0)),
     finish_recording_expanded_items(ItemId, ExpandedItems, !RecompInfo).
 
 :- pred replace_in_mutable_defn(maybe_record_sym_name_use::in,
@@ -1570,6 +1585,8 @@ replace_in_mutable_defn(MaybeRecord, TypeEqvMap, InstEqvMap, Info0, Info,
         !UsedModules),
     Info = item_mutable_info(MutName, OrigType, Type, OrigInst, Inst,
         InitValue, Attrs, Varset, Context, SeqNum).
+
+%---------------------%
 
 :- pred replace_in_event_specs(type_eqv_map::in,
     assoc_list(string, event_spec)::in, assoc_list(string, event_spec)::out,
@@ -1961,8 +1978,8 @@ replace_type_ctor(MaybeRecord, TypeEqvMap, TypeCtorsAlreadyExpanded, Type0,
         !:Changed = changed,
         map.apply_to_list(Args0, Renaming, Args),
         apply_variable_renaming_to_type(Renaming, Body0, Body1),
-        TypeCtorItem = type_ctor_to_item_name(TypeCtor),
-        record_expanded_item(item_id(type_name_item, TypeCtorItem),
+        TypeCtorItem = type_ctor_to_recomp_item_name(TypeCtor),
+        record_expanded_item(recomp_item_id(recomp_type_name, TypeCtorItem),
             !EquivTypeInfo),
         map.from_corresponding_lists(Args, TArgs, Subst),
         apply_subst_to_type(Subst, Body1, Body),
@@ -2103,8 +2120,8 @@ replace_in_prog_constraints(TypeEqvMap, Cs0, Cs, !TVarSet, !EquivTypeInfo) :-
     tvarset::in, tvarset::out, eqv_expand_info::in, eqv_expand_info::out,
     used_modules::in, used_modules::out) is det.
 
-replace_in_prog_constraints_location(MaybeRecord, TypeEqvMap, Cs0, Cs, !TVarSet,
-        !EquivTypeInfo, !UsedModules) :-
+replace_in_prog_constraints_location(MaybeRecord, TypeEqvMap, Cs0, Cs,
+        !TVarSet, !EquivTypeInfo, !UsedModules) :-
     Cs0 = constraints(UnivCs0, ExistCs0),
     replace_in_prog_constraint_list_location(MaybeRecord, TypeEqvMap,
         UnivCs0, UnivCs, !TVarSet, !EquivTypeInfo, !UsedModules),
@@ -2206,18 +2223,28 @@ replace_in_class_decl(MaybeRecord, TypeEqvMap, InstEqvMap, Decl0, Decl,
 %---------------------------------------------------------------------------%
 
 :- pred replace_in_subst(maybe_record_sym_name_use::in, type_eqv_map::in,
+    pair(tvar, mer_type)::in, pair(tvar, mer_type)::out,
     assoc_list(tvar, mer_type)::in, assoc_list(tvar, mer_type)::out,
     tvarset::in, tvarset::out, eqv_expand_info::in, eqv_expand_info::out,
     used_modules::in, used_modules::out) is det.
 
-replace_in_subst(_MaybeRecord, _TypeEqvMap, [], [], !TVarSet, !EquivTypeInfo,
-        !UsedModules).
-replace_in_subst(MaybeRecord, TypeEqvMap, [Var - Type0 | Subst0],
-        [Var - Type | Subst], !TVarSet, !EquivTypeInfo, !UsedModules) :-
+replace_in_subst(MaybeRecord, TypeEqvMap,
+        HeadVar - HeadType0, HeadVar - HeadType,
+        TailVarsTypes0, TailVarsTypes,
+        !TVarSet, !EquivTypeInfo, !UsedModules) :-
     replace_in_type_maybe_record_use(MaybeRecord, TypeEqvMap,
-        Type0, Type, _, !TVarSet, !EquivTypeInfo, !UsedModules),
-    replace_in_subst(MaybeRecord, TypeEqvMap, Subst0, Subst, !TVarSet,
-        !EquivTypeInfo, !UsedModules).
+        HeadType0, HeadType, _, !TVarSet, !EquivTypeInfo, !UsedModules),
+    (
+        TailVarsTypes0 = [],
+        TailVarsTypes = []
+    ;
+        TailVarsTypes0 = [HeadTailVarType0 | TailTailVarsTypes0],
+        replace_in_subst(MaybeRecord, TypeEqvMap,
+            HeadTailVarType0, HeadTailVarType,
+            TailTailVarsTypes0, TailTailVarsTypes,
+            !TVarSet, !EquivTypeInfo, !UsedModules),
+        TailVarsTypes = [HeadTailVarType | TailTailVarsTypes]
+    ).
 
 %---------------------------------------------------------------------------%
 
@@ -2298,8 +2325,8 @@ replace_in_inst_location(MaybeRecord, InstEqvMap, ExpandedInstCtors,
             EqvInstBody = eqv_inst_body(EqvInstParams, EqvInst)
         then
             inst_substitute_arg_list(EqvInstParams, ArgInsts, EqvInst, Inst1),
-            InstCtorItem = inst_ctor_to_item_name(InstCtor),
-            record_expanded_item(item_id(inst_item, InstCtorItem),
+            InstCtorItem = inst_ctor_to_recomp_item_name(InstCtor),
+            record_expanded_item(recomp_item_id(recomp_inst, InstCtorItem),
                 !EquivTypeInfo),
             replace_in_inst_location(MaybeRecord, InstEqvMap,
                 set.insert(ExpandedInstCtors, InstCtor), Inst1, Inst,
@@ -2441,8 +2468,9 @@ replace_in_pred_type(MaybeRecord, PredName, PredOrFunc, Context,
         TypesAndModes = TypesAndModes1
     ;
         ExtraTypesAndModes = [_ | _],
-        OrigItemId = item_id(pred_or_func_to_item_type(PredOrFunc),
-            item_name(PredName, list.length(TypesAndModes0))),
+        OrigItemType = pred_or_func_to_recomp_item_type(PredOrFunc),
+        OrigItemName = recomp_item_name(PredName, list.length(TypesAndModes0)),
+        OrigItemId = recomp_item_id(OrigItemType, OrigItemName),
         record_expanded_item(OrigItemId, !EquivTypeInfo),
         TypesAndModes = TypesAndModes1 ++ ExtraTypesAndModes
     ).
@@ -2498,8 +2526,9 @@ replace_in_pred_mode(MaybeRecord, InstEqvMap, PredName, OrigArity, Context,
             ;
                 MaybePredOrFunc0 = yes(RecordedPredOrFunc)
             ),
-            OrigItemId = item_id(pred_or_func_to_item_type(RecordedPredOrFunc),
-                item_name(PredName, OrigArity)),
+            ItemType = pred_or_func_to_recomp_item_type(RecordedPredOrFunc),
+            ItemName = recomp_item_name(PredName, OrigArity),
+            OrigItemId = recomp_item_id(ItemType, ItemName),
             record_expanded_item(OrigItemId, !EquivTypeInfo),
             Specs = []
         else

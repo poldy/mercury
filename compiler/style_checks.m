@@ -24,20 +24,21 @@
 :- import_module hlds.hlds_clauses.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
-:- type style_warnings_task
-    --->    non_contiguous_decls_only
-    ;       inconsistent_pred_order_only(
-                clause_item_number_types
-            )
-    ;       non_contiguous_decls_and_inconsistent_pred_order(
-                clause_item_number_types
-            ).
+:- type maybe_warn_non_contiguous_pred_decls
+    --->    do_not_warn_non_contiguous_pred_decls
+    ;       warn_non_contiguous_pred_decls.
 
-:- pred generate_style_warnings(module_info::in, style_warnings_task::in,
+:- type maybe_warn_pred_decl_vs_defn_order
+    --->    do_not_warn_pred_decl_vs_defn_order
+    ;       warn_pred_decl_vs_defn_order(clause_item_number_types).
+
+:- pred generate_style_warnings(module_info::in,
+    maybe_warn_non_contiguous_pred_decls::in,
+    maybe_warn_pred_decl_vs_defn_order::in,
     list(error_spec)::out) is det.
 
 %---------------------------------------------------------------------------%
@@ -48,6 +49,7 @@
 :- import_module hlds.hlds_pred.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_out.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module edit_seq.
 :- import_module int.
@@ -56,36 +58,30 @@
 
 %---------------------------------------------------------------------------%
 
-generate_style_warnings(ModuleInfo, Task, !:Specs) :-
+generate_style_warnings(ModuleInfo, WarnNonContigPreds, WarnPredDeclDefnOrder,
+        !:Specs) :-
     module_info_get_valid_pred_ids(ModuleInfo, ValidPredIds),
     StyleInfo0 = pred_style_info([], [], []),
-    (
-        Task = non_contiguous_decls_only,
-        MaybeDefnKind = no
-    ;
-        ( Task = inconsistent_pred_order_only(DefnKind)
-        ; Task = non_contiguous_decls_and_inconsistent_pred_order(DefnKind)
-        ),
-        MaybeDefnKind = yes(DefnKind)
-    ),
-    list.foldl(detect_non_contiguous_pred_decls(ModuleInfo, MaybeDefnKind),
+    list.foldl(
+        detect_non_contiguous_pred_decls(ModuleInfo, WarnPredDeclDefnOrder),
         ValidPredIds, StyleInfo0, StyleInfo),
     StyleInfo = pred_style_info(ExportedPreds, NonExportedPreds,
         ModeDeclItemNumberSpecs),
     (
-        Task = non_contiguous_decls_only,
+        WarnNonContigPreds = do_not_warn_non_contiguous_pred_decls,
+        % Even though we are throwing away ModeDeclItemNumberSpecs,
+        % We still execute the code that computes it, because it also
+        % computes ExportedPreds and NonExportedPreds, which we need.
+        !:Specs = []
+    ;
+        WarnNonContigPreds = warn_non_contiguous_pred_decls,
+        !:Specs = ModeDeclItemNumberSpecs
+    ),
+    (
+        WarnPredDeclDefnOrder = do_not_warn_pred_decl_vs_defn_order,
         !:Specs = ModeDeclItemNumberSpecs
     ;
-        (
-            Task = inconsistent_pred_order_only(_),
-            % Even though we are throwing away ModeDeclItemNumberSpecs,
-            % We still execute the code that computes it, because it also
-            % computes ExportedPreds and NonExportedPreds, which we need.
-            !:Specs = []
-        ;
-            Task = non_contiguous_decls_and_inconsistent_pred_order(_),
-            !:Specs = ModeDeclItemNumberSpecs
-        ),
+        WarnPredDeclDefnOrder = warn_pred_decl_vs_defn_order(_),
         module_info_get_name_context(ModuleInfo, ModuleContext),
         generate_inconsistent_pred_order_warnings(ModuleContext,
             "exported", ExportedPreds, !Specs),
@@ -117,10 +113,10 @@ generate_style_warnings(ModuleInfo, Task, !:Specs) :-
             ).
 
 :- pred detect_non_contiguous_pred_decls(module_info::in,
-    maybe(clause_item_number_types)::in, pred_id::in,
+    maybe_warn_pred_decl_vs_defn_order::in, pred_id::in,
     pred_style_info::in, pred_style_info::out) is det.
 
-detect_non_contiguous_pred_decls(ModuleInfo, MaybeDefnKind, PredId,
+detect_non_contiguous_pred_decls(ModuleInfo, WarnPredDeclDefnOrder, PredId,
         !StyleInfo) :-
     module_info_pred_info(ModuleInfo, PredId, PredInfo),
     pred_info_get_cur_user_decl_info(PredInfo, MaybeDeclInfo),
@@ -138,21 +134,18 @@ detect_non_contiguous_pred_decls(ModuleInfo, MaybeDefnKind, PredId,
             MakesSense = proc_contiguity_makes_sense,
             ProcINCs = [HeadProcINC | TailProcINCs]
         then
-            % invis_order; "ends here" first
             pred_info_get_context(PredInfo, PredDeclContext),
             PredINC = inc(PredDeclItemNumber, PredDeclContext),
-            Specs0 = !.StyleInfo ^ style_specs,
             report_any_inc_gaps(PredInfo, PredINC, HeadProcINC, TailProcINCs,
-                0, Specs0, Specs),
-            !StyleInfo ^ style_specs := Specs
+                0, !StyleInfo)
         else
             true
         ),
 
         (
-            MaybeDefnKind = no
+            WarnPredDeclDefnOrder = do_not_warn_pred_decl_vs_defn_order
         ;
-            MaybeDefnKind = yes(DefnKind),
+            WarnPredDeclDefnOrder = warn_pred_decl_vs_defn_order(DefnKind),
             % Gather information for our caller to use in generating warnings
             % for --warn-inconsistent-pred-order if warranted.
             pred_info_get_clauses_info(PredInfo, ClausesInfo),
@@ -232,10 +225,14 @@ gather_proc_item_numbers(ProcInfo, !ProcINCs, !MakesSense) :-
     ).
 
 :- pred report_any_inc_gaps(pred_info::in, inc::in, inc::in, list(inc)::in,
-    int::in, list(error_spec)::in, list(error_spec)::out) is det.
+    int::in, pred_style_info::in, pred_style_info::out) is det.
 
 report_any_inc_gaps(PredInfo, FirstINC, SecondINC, LaterINCs,
-        FirstProcNum, !Specs) :-
+        FirstProcNum, !StyleInfo) :-
+    % If FirstProcNum = 0, then FirstINC is for the predicate or function
+    % declaration.
+    % If FirstProcNum > 0, then FirstINC is for FirstProcNum'th 
+    % mode declaration.
     FirstINC = inc(FirstItemNumber, FirstContext),
     SecondINC = inc(SecondItemNumber, SecondContext),
     ( if
@@ -277,14 +274,16 @@ report_any_inc_gaps(PredInfo, FirstINC, SecondINC, LaterINCs,
         SecondMsg = simplest_msg(SecondContext, SecondPieces),
         Spec = error_spec($pred, severity_warning, phase_style,
             [FirstMsg, SecondMsg]),
-        !:Specs = [Spec | !.Specs]
+        Specs0 = !.StyleInfo ^ style_specs,
+        Specs = [Spec | Specs0],
+        !StyleInfo ^ style_specs := Specs
     ),
     (
         LaterINCs = []
     ;
         LaterINCs = [ThirdINC | LaterLaterINCs],
         report_any_inc_gaps(PredInfo, SecondINC, ThirdINC, LaterLaterINCs,
-            FirstProcNum + 1, !Specs)
+            FirstProcNum + 1, !StyleInfo)
     ).
 
 %---------------------------------------------------------------------------%

@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2004-2006, 2010-2012 The University of Melbourne.
-% Copyright (C) 2013-2015, 2017-2020 The Mercury team.
+% Copyright (C) 2013-2015, 2017-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -25,7 +25,6 @@
 :- interface.
 
 :- import_module assoc_list.
-:- import_module char.
 
 %---------------------------------------------------------------------------%
 
@@ -60,13 +59,13 @@
     % safe one.
     %
 :- func unsafe_init(hash_pred(K)::in(hash_pred), int::in, float::in) =
-   (version_hash_table(K, V)::out) is det.
+    (version_hash_table(K, V)::out) is det.
 
     % init_default(HashFn) constructs a hash table with default size and
     % occupancy arguments.
     %
 :- func init_default(hash_pred(K)::in(hash_pred)) =
-   (version_hash_table(K, V)::out) is det.
+    (version_hash_table(K, V)::out) is det.
 
     % unsafe_init_default(HashFn)
     %
@@ -75,7 +74,7 @@
     % above.
     %
 :- func unsafe_init_default(hash_pred(K)::in(hash_pred)) =
-   (version_hash_table(K, V)::out) is det.
+    (version_hash_table(K, V)::out) is det.
 
     % Retrieve the hash_pred associated with a hash table.
     %
@@ -88,23 +87,6 @@
     % Return the number of occupants in a hash table.
     %
 :- func num_occupants(version_hash_table(K, V)) = int.
-
-    % Default hash_preds for ints and strings and everything.
-    % They are very simple and almost certainly not very good
-    % for your purpose, whatever your purpose is.
-    %
-:- pred int_hash(int::in, int::out) is det.
-:- pragma obsolete(pred(int_hash/2), [int.hash/2]).
-:- pred uint_hash(uint::in, int::out) is det.
-:- pragma obsolete(pred(uint_hash/2), [uint.hash/2]).
-:- pred char_hash(char::in, int::out) is det.
-:- pragma obsolete(pred(char_hash/2), [char.hash/2]).
-:- pred string_hash(string::in, int::out) is det.
-:- pragma obsolete(pred(string_hash/2), [string.hash/2]).
-:- pred float_hash(float::in, int::out) is det.
-:- pragma obsolete(pred(float_hash/2), [float.hash/2]).
-:- pred generic_hash(T::in, int::out) is det.
-:- pragma obsolete(pred(generic_hash/2)).
 
     % Copy the hash table explicitly.
     %
@@ -126,6 +108,7 @@
     % if there is no entry for the key.
     %
 :- func lookup(version_hash_table(K, V), K) = V.
+:- pred lookup(version_hash_table(K, V)::in, K::in, V::out) is det.
 
     % Field access for hash tables.
     % `HT ^ elem(K)' is equivalent to `lookup(HT, K)'.
@@ -175,8 +158,7 @@
     % are the same as for init/3 above.
     %
 :- func from_assoc_list(hash_pred(K)::in(hash_pred), int::in, float::in,
-        assoc_list(K, V)::in) =
-    (version_hash_table(K, V)::out) is det.
+    assoc_list(K, V)::in) = (version_hash_table(K, V)::out) is det.
 
     % A simpler version of from_assoc_list/4, the values for N and
     % MaxOccupancy are configured with defaults such as in init_default/1
@@ -214,19 +196,14 @@
 
 :- implementation.
 
-:- import_module array.
 :- import_module bool.
-:- import_module deconstruct.
 :- import_module exception.
 :- import_module float.
 :- import_module int.
 :- import_module list.
 :- import_module pair.
 :- import_module require.
-:- import_module string.
-:- import_module uint.
 :- import_module unit.
-:- import_module univ.
 :- import_module version_array.
 
 %---------------------------------------------------------------------------%
@@ -235,7 +212,7 @@
     --->    ht(
                 ht_num_occupants        :: int,
                 ht_max_occupants        :: int,
-                ht_hash_pred            :: hash_pred(K),
+                ht_hash_pred            :: pred(K::in, int::out) is det,
                 ht_buckets              :: buckets(K, V)
             )
     where equality is version_hash_table.equal.
@@ -253,14 +230,16 @@
 
 %---------------------------------------------------------------------------%
 
-init(HashPred, N, MaxOccupancy) = init_2(HashPred, N, MaxOccupancy, yes).
+init(HashPred, N, MaxOccupancy) = HT :-
+    do_init(HashPred, N, MaxOccupancy, yes, HT).
 
-unsafe_init(HashPred, N, MaxOccupancy) = init_2(HashPred, N, MaxOccupancy, no).
+unsafe_init(HashPred, N, MaxOccupancy) = HT :-
+    do_init(HashPred, N, MaxOccupancy, no, HT).
 
-:- func init_2(hash_pred(K)::in(hash_pred), int::in, float::in, bool::in) =
-    (version_hash_table(K, V)::out) is det.
+:- pred do_init(hash_pred(K)::in(hash_pred), int::in, float::in, bool::in,
+    version_hash_table(K, V)::out) is det.
 
-init_2(HashPred, N, MaxOccupancy, NeedSafety) = HT :-
+do_init(HashPred, N, MaxOccupancy, NeedSafety, HT) :-
     ( if N =< 0 then
         error("version_hash_table.init: N =< 0")
     else if N >= int.bits_per_int then
@@ -312,10 +291,9 @@ num_occupants(HT) = NumOccupants :-
 :- pragma inline(func(find_slot/2)).
 
 find_slot(HT, K) = H :-
-    promise_equivalent_solutions [HashPred0] (
-        HashPred0 = HT ^ ht_hash_pred
+    promise_equivalent_solutions [HashPred] (
+        HashPred = HT ^ ht_hash_pred
     ),
-    unsafe_hash_pred_cast(HashPred0, HashPred),
     find_slot_2(HashPred, K, HT ^ num_buckets, H).
 
 :- pred find_slot_2(hash_pred(K)::in(hash_pred), K::in, int::in, int::out)
@@ -326,78 +304,6 @@ find_slot_2(HashPred, K, NumBuckets, H) :-
     HashPred(K, Hash),
     % Since NumBuckets is a power of two we can avoid mod.
     H = Hash /\ (NumBuckets - 1).
-
-:- pred unsafe_hash_pred_cast(hash_pred(K)::in, hash_pred(K)::out(hash_pred))
-    is det.
-
-:- pragma foreign_proc("C",
-    unsafe_hash_pred_cast(HashPred0::in, HashPred::out(hash_pred)),
-    [will_not_call_mercury, promise_pure, thread_safe],
-"
-    HashPred = HashPred0;
-").
-
-:- pragma foreign_proc("C#",
-    unsafe_hash_pred_cast(HashPred0::in, HashPred::out(hash_pred)),
-    [will_not_call_mercury, promise_pure, thread_safe],
-"
-    HashPred = HashPred0;
-").
-
-:- pragma foreign_proc("Java",
-    unsafe_hash_pred_cast(HashPred0::in, HashPred::out(hash_pred)),
-    [will_not_call_mercury, promise_pure, thread_safe],
-"
-    HashPred = HashPred0;
-").
-
-%---------------------------------------------------------------------------%
-
-int_hash(Key, Hash) :-
-    int.hash(Key, Hash).
-
-uint_hash(Key, Hash) :-
-    uint.hash(Key, Hash).
-
-char_hash(C, H) :-
-    char.hash(C, H).
-
-string_hash(S, H) :-
-    string.hash(S, H).
-
-float_hash(F, H) :-
-    float.hash(F, H).
-
-generic_hash(T, H) :-
-    % This, again, is straight off the top of my head.
-    ( if dynamic_cast(T, Int) then
-        int_hash(Int, H)
-    else if dynamic_cast(T, String) then
-        string_hash(String, H)
-    else if dynamic_cast(T, Float) then
-        float_hash(Float, H)
-    else if dynamic_cast(T, Char) then
-        char_hash(Char, H)
-    else if dynamic_cast(T, Univ) then
-        generic_hash(univ_value(Univ), H)
-    else if dynamic_cast_to_array(T, Array) then
-        SubHash =
-            ( func(X, HA0) = HA :-
-                generic_hash(X, HX),
-                munge(HX, HA0) = HA
-            ),
-        H = array.foldl(SubHash, Array, 0)
-    else
-        deconstruct(T, canonicalize, FunctorName, Arity, Args),
-        string_hash(FunctorName, H0),
-        munge(Arity, H0) = H1,
-        SubHash =
-            ( pred(U::in, HA0::in, HA::out) is det :-
-                generic_hash(U, HUA),
-                munge(HUA, HA0) = HA
-            ),
-        list.foldl(SubHash, Args, H1, H)
-    ).
 
 %---------------------------------------------------------------------------%
 
@@ -411,14 +317,15 @@ copy(HT0) = HT :-
 %---------------------------------------------------------------------------%
 
 search(HT, K) = V :-
+    search(HT, K, V).
+
+search(HT, K, V) :-
     H = find_slot(HT, K),
     promise_equivalent_solutions [Buckets] (
         Buckets = HT ^ ht_buckets
     ),
     AL = Buckets ^ elem(H),
     alist_search(AL, K, V).
-
-search(HT, K, search(HT, K)).
 
 :- pred alist_search(hash_table_alist(K, V)::in, K::in, V::out) is semidet.
 
@@ -440,11 +347,14 @@ alist_search(AL, K, V) :-
 
 %---------------------------------------------------------------------------%
 
-lookup(HT, K) =
-    ( if V = search(HT, K) then
-        V
+lookup(HT, K) = V :-
+    lookup(HT, K, V).
+
+lookup(HT, K, V) :-
+    ( if search(HT, K, V0) then
+        V = V0
     else
-        func_error($pred, "key not found")
+        error($pred, "key not found")
     ).
 
 elem(K, HT) = lookup(HT, K).
@@ -666,15 +576,14 @@ from_assoc_list_2([K - V | T], !HT) :-
     % argument is not eliminated, nor is the creation of the type_info
     % delayed until the (rare) call to expand.
     %
-:- func expand(int, int, hash_pred(K), buckets(K, V)) =
-    version_hash_table(K, V).
+:- func expand(int::in, int::in, hash_pred(K)::in(hash_pred),
+    buckets(K, V)::in) = (version_hash_table(K, V)::out) is det.
 :- pragma no_inline(func(expand/4)).
 
-expand(NumOccupants, MaxOccupants0, HashPred0, Buckets0) = HT :-
+expand(NumOccupants, MaxOccupants0, HashPred, Buckets0) = HT :-
     NumBuckets0 = size(Buckets0),
     NumBuckets = NumBuckets0 + NumBuckets0,
     MaxOccupants = MaxOccupants0 + MaxOccupants0,
-    unsafe_hash_pred_cast(HashPred0, HashPred),
     Buckets1 = version_array.init(NumBuckets, ht_nil),
     reinsert_bindings(0, Buckets0, HashPred, NumBuckets, Buckets1, Buckets),
     HT = ht(NumOccupants, MaxOccupants, HashPred, Buckets).
@@ -723,14 +632,6 @@ unsafe_insert(K, V, HashPred, NumBuckets, Buckets0, Buckets) :-
         AL = ht_cons(K, V, AL0)
     ),
     Buckets = Buckets0 ^ elem(H) := AL.
-
-%---------------------------------------------------------------------------%
-
-:- func munge(int, int) = int.
-
-munge(N, X) =
-    (X `unchecked_left_shift` N) `xor`
-    (X `unchecked_right_shift` (int.bits_per_int - N)).
 
 %---------------------------------------------------------------------------%
 

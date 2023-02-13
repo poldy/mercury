@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ts=4 sw=4 et ft=mercury
 %---------------------------------------------------------------------------%
-% Copyright (C) 2018 The Mercury team.
+% Copyright (C) 2018-2021 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -258,12 +258,14 @@
     % Throws an exception if Y is not in [0, 64).
     %
 :- func (int64::in) << (int::in) = (int64::uo) is det.
+:- func (int64::in) <<u (uint::in) = (int64::uo) is det.
 
     % unchecked_left_shift(X, Y) is the same as X << Y except that
     % the behaviour is undefined if Y is not in [0, 64).
     % It will typically be implemented more efficiently than X << Y.
     %
 :- func unchecked_left_shift(int64::in, int::in) = (int64::uo) is det.
+:- func unchecked_left_ushift(int64::in, uint::in) = (int64::uo) is det.
 
     % Right shift.
     % X >> Y returns X "right shifted" by Y bits.
@@ -271,12 +273,14 @@
     % Throws an exception if Y is not in [0, 64).
     %
 :- func (int64::in) >> (int::in) = (int64::uo) is det.
+:- func (int64::in) >>u (uint::in) = (int64::uo) is det.
 
     % unchecked_right_shift(X, Y) is the same as X >> Y except that
     % the behaviour is undefined if Y is not in [0, 64).
     % It will typically be implemented more efficiently than X >> Y.
     %
 :- func unchecked_right_shift(int64::in, int::in) = (int64::uo) is det.
+:- func unchecked_right_ushift(int64::in, uint::in) = (int64::uo) is det.
 
 %---------------------------------------------------------------------------%
 %
@@ -366,6 +370,7 @@
     % Convert an int64 to a pretty_printer.doc for formatting.
     %
 :- func int64_to_doc(int64) = pretty_printer.doc.
+:- pragma obsolete(func(int64_to_doc/1), [pretty_printer.int64_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -375,7 +380,6 @@
 :- import_module exception.
 :- import_module int.
 :- import_module require.
-:- import_module string.
 :- import_module uint.
 :- import_module uint64.
 
@@ -612,7 +616,7 @@ odd(X) :-
 
 %---------------------------------------------------------------------------%
 
-% The operations unchecked_left_shift and unchecked_right_shift are builtins.
+% The unchecked shift operations are builtins.
 
 X << Y = Result :-
     ( if cast_from_int(Y) < 64u then
@@ -622,11 +626,27 @@ X << Y = Result :-
         throw(domain_error(Msg))
     ).
 
+X <<u Y = Result :-
+    ( if Y < 64u then
+        Result = unchecked_left_ushift(X, Y)
+    else
+        Msg = "int64.(<<u): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
 X >> Y = Result :-
     ( if cast_from_int(Y) < 64u then
         Result = unchecked_right_shift(X, Y)
     else
         Msg = "int64.(>>): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
+X >>u Y = Result :-
+    ( if Y < 64u then
+        Result = unchecked_right_ushift(X, Y)
+    else
+        Msg = "int64.(>>u): second operand is out of range",
         throw(domain_error(Msg))
     ).
 
@@ -712,7 +732,7 @@ max_int64 = 9_223_372_036_854_775_807_i64.
 
 %---------------------------------------------------------------------------%
 
-int64_to_doc(X) = str(string.int64_to_string(X)).
+int64_to_doc(I) = pretty_printer.int64_to_doc(I).
 
 %---------------------------------------------------------------------------%
 :- end_module int64.

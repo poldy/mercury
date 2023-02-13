@@ -33,13 +33,14 @@
 :- import_module check_hlds.type_util.
 :- import_module hlds.
 :- import_module hlds.hlds_class.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.file_util.
 :- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_type_subst.
+:- import_module parse_tree.prog_util.
+:- import_module parse_tree.vartypes.
 
 :- import_module bool.
 :- import_module list.
@@ -98,18 +99,18 @@ write_type_assign_set(Stream, [TypeAssign | TypeAssigns], VarSet, !IO) :-
     type_assign::in, prog_varset::in, io::di, io::uo) is det.
 
 write_type_assign(Stream, TypeAssign, VarSet, !IO) :-
-    type_assign_get_external_type_params(TypeAssign, ExternalTypeParams),
+    type_assign_get_existq_tvars(TypeAssign, ExistQTVars),
     type_assign_get_var_types(TypeAssign, VarTypes),
     type_assign_get_typeclass_constraints(TypeAssign, Constraints),
     type_assign_get_type_bindings(TypeAssign, TypeBindings),
     type_assign_get_typevarset(TypeAssign, TypeVarSet),
     vartypes_vars(VarTypes, Vars),
     (
-        ExternalTypeParams = []
+        ExistQTVars = []
     ;
-        ExternalTypeParams = [_ | _],
+        ExistQTVars = [_ | _],
         io.write_string(Stream, "some [", !IO),
-        mercury_output_vars(TypeVarSet, debug_varnums, ExternalTypeParams,
+        mercury_output_vars_vs(TypeVarSet, debug_varnums, ExistQTVars,
             Stream, !IO),
         io.write_string(Stream, "]\n\t", !IO)
     ),
@@ -139,7 +140,7 @@ write_type_assign_types(Stream, VarSet, TypeVarSet, VarTypes, TypeBindings,
         ;
             FoundOne = no
         ),
-        mercury_output_var(VarSet, debug_varnums, Var, Stream, !IO),
+        mercury_output_var_vs(VarSet, debug_varnums, Var, Stream, !IO),
         io.write_string(Stream, ": ", !IO),
         write_type_with_bindings(Stream, TypeVarSet, TypeBindings, Type, !IO),
         write_type_assign_types(Stream, VarSet, TypeVarSet, VarTypes,
@@ -157,7 +158,7 @@ write_type_assign_types(Stream, VarSet, TypeVarSet, VarTypes, TypeBindings,
 
 write_type_with_bindings(Stream, TypeVarSet, TypeBindings, Type0, !IO) :-
     apply_rec_subst_to_type(TypeBindings, Type0, Type1),
-    strip_builtin_qualifiers_from_type(Type1, Type),
+    strip_module_names_from_type(strip_builtin_module_name, Type1, Type),
     mercury_output_type(TypeVarSet, print_name_and_num, Type, Stream, !IO).
 
 :- pred write_type_assign_hlds_constraints(io.text_output_stream::in,

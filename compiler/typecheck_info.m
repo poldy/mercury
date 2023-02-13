@@ -9,16 +9,16 @@
 % File: typecheck_info.m.
 % Main author: fjh.
 %
-% This module defines the typecheck_info and type_assign types, plus some
-% useful predicates that work with those types.
+% This module defines the typecheck_info type, and access predicates
+% on that type.
 %
 %-----------------------------------------------------------------------------%
 
 :- module check_hlds.typecheck_info.
 :- interface.
 
+:- import_module check_hlds.type_assign.
 :- import_module hlds.
-:- import_module hlds.hlds_class.
 :- import_module hlds.hlds_cons.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_module.
@@ -28,13 +28,13 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 
 :- import_module bool.
 :- import_module list.
-:- import_module maybe.
 :- import_module map.
+:- import_module maybe.
 :- import_module set_tree234.
 
 %-----------------------------------------------------------------------------%
@@ -53,47 +53,11 @@
 % The purpose-specific types of the values held in the typecheck_info.
 %
 
-% XXX Values of type cons_type_info are not held in the typecheck_info,
-% though values of type cons_type_info_source are. Values of this type
-% are currently computed on demand, though they should be stored precomputed
-% for each data constructor for each type in the HLDS.
-:- type cons_type_info
-    --->    cons_type_info(
-                % Type variables.
-                cti_varset          :: tvarset,
-
-                % Existentially quantified type vars.
-                cti_exit_tvars      :: existq_tvars,
-
-                % Constructor type.
-                cti_result_type     :: mer_type,
-
-                % Types of the arguments.
-                cti_arg_types       :: list(mer_type),
-
-                % Constraints introduced by this constructor (e.g. if it is
-                % actually a function, or if it is an existentially quantified
-                % data constructor).
-                cti_constraints     :: hlds_constraints,
-
-                cti_source          :: cons_type_info_source
-            ).
-
-:- type cons_type_info_source
-    --->    source_type(type_ctor)
-    ;       source_builtin_type(string)
-    ;       source_get_field_access(type_ctor)
-    ;       source_set_field_access(type_ctor)
-    ;       source_apply(string)
-    ;       source_pred(pred_id).
-
-:- func project_cons_type_info_source(cons_type_info) = cons_type_info_source.
-
 :- type overloaded_symbol_map == map(overloaded_symbol, list(prog_context)).
 
 :- type overloaded_symbol
     --->    overloaded_pred(
-                sym_name_arity,
+                sym_name_pred_form_arity,
                 list(pred_id)
             )
     ;       overloaded_func(
@@ -197,8 +161,8 @@
 
 :- pred typecheck_info_get_module_name(typecheck_info::in, module_name::out)
     is det.
-:- pred typecheck_info_get_pred_table(typecheck_info::in, predicate_table::out)
-    is det.
+:- pred typecheck_info_get_predicate_table(typecheck_info::in,
+    predicate_table::out) is det.
 :- pred typecheck_info_get_type_table(typecheck_info::in, type_table::out)
     is det.
 :- pred typecheck_info_get_cons_table(typecheck_info::in, cons_table::out)
@@ -225,7 +189,7 @@
 :- import_module libs.globals.
 :- import_module libs.options.
 
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -343,16 +307,12 @@ typecheck_info_init(ModuleInfo, PredId, PredInfo, ClauseVarSet, Status,
         has_no_rhs_lambda, DebugInfo),
     ClauseNum = 0,
     ClauseContext = type_error_clause_context(ModuleInfo, PredId,
-        PredMarkers, ClauseNum, term.context_init, ClauseVarSet),
+        PredMarkers, ClauseNum, dummy_context, ClauseVarSet),
     map.init(OverloadedSymbolMap),
     globals.lookup_int_option(Globals, typecheck_ambiguity_error_limit,
         AmbiguityErrorLimit),
     Info = typecheck_info(SubInfo, ClauseContext, OverloadedSymbolMap,
         AmbiguityWarnLimit).
-
-%-----------------------------------------------------------------------------%
-
-project_cons_type_info_source(CTI) = CTI ^ cti_source.
 
 %-----------------------------------------------------------------------------%
 
@@ -446,7 +406,7 @@ typecheck_info_set_rhs_lambda(X, !Info) :-
 typecheck_info_get_module_name(Info, Name) :-
     typecheck_info_get_module_info(Info, ModuleInfo),
     module_info_get_name(ModuleInfo, Name).
-typecheck_info_get_pred_table(Info, Preds) :-
+typecheck_info_get_predicate_table(Info, Preds) :-
     typecheck_info_get_module_info(Info, ModuleInfo),
     module_info_get_predicate_table(ModuleInfo, Preds).
 typecheck_info_get_type_table(Info, Types) :-

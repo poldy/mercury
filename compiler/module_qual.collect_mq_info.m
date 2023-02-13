@@ -17,23 +17,6 @@
 
 %---------------------------------------------------------------------------%
 
-:- type mq_section
-    --->    mq_section_exported
-    ;       mq_section_local
-    ;       mq_section_imported(import_locn)
-    ;       mq_section_abstract_imported.
-
-:- type section_mq_info(MS) == (pred(MS, mq_section, module_permissions)).
-:- inst section_mq_info     == (pred(in, out, out) is det).
-
-:- pred src_section_mq_info(src_module_section::in,
-    mq_section::out, module_permissions::out) is det.
-
-:- pred int_section_mq_info(int_module_section::in,
-    mq_section::out, module_permissions::out) is det.
-
-%---------------------------------------------------------------------------%
-
 :- type int3_role
     --->    int3_as_src
     ;       int3_as_direct_int(read_why_int3).
@@ -68,66 +51,7 @@
 :- import_module one_or_more_map.
 :- import_module require.
 :- import_module string.
-
-%---------------------------------------------------------------------------%
-
-src_section_mq_info(SrcSection, MQSection, Permissions) :-
-    (
-        SrcSection = sms_interface,
-        MQSection = mq_section_exported,
-        PermInInt = may_use_in_int(may_be_unqualified)
-    ;
-        ( SrcSection = sms_implementation
-        ; SrcSection = sms_impl_but_exported_to_submodules
-        ),
-        MQSection = mq_section_local,
-        PermInInt = may_not_use_in_int
-    ),
-    PermInImp = may_use_in_imp(may_be_unqualified),
-    Permissions = module_permissions(PermInInt, PermInImp).
-
-int_section_mq_info(IntSection, MQSection, Permissions) :-
-    (
-        IntSection = ims_imported_or_used(_ModuleName, _IntFileKind,
-            Locn, ImportOrUse),
-        MQSection = mq_section_imported(Locn),
-        (
-            (
-                ImportOrUse = iou_imported,
-                NeedQual = may_be_unqualified
-            ;
-                ImportOrUse = iou_used,
-                NeedQual = must_be_qualified
-            ),
-            (
-                % XXX Whether this module's interface can use an mq_id
-                % that was imported by an ancestor should depend on whether
-                % the ancestor imported that mq_id in its INTERFACE or not.
-                % Since we don't know where that import was, this is a
-                % conservative approximation.
-                ( Locn = import_locn_interface
-                ; Locn = import_locn_import_by_ancestor
-                ; Locn = import_locn_ancestor_int0_interface
-                ; Locn = import_locn_ancestor_int0_implementation
-                ),
-                PermInInt = may_use_in_int(NeedQual)
-            ;
-                Locn = import_locn_implementation,
-                PermInInt = may_not_use_in_int
-            ),
-            PermInImp = may_use_in_imp(NeedQual)
-        ;
-            ImportOrUse = iou_used_and_imported,
-            PermInInt = may_use_in_int(must_be_qualified),
-            PermInImp = may_use_in_imp(may_be_unqualified)
-        )
-    ;
-        IntSection = ims_abstract_imported(_ModuleName, _IntFileKind),
-        MQSection = mq_section_abstract_imported,
-        PermInInt = may_not_use_in_int,
-        PermInImp = may_use_in_imp(must_be_qualified)
-    ),
-    Permissions = module_permissions(PermInInt, PermInImp).
+:- import_module term.
 
 %---------------------------------------------------------------------------%
 
@@ -286,9 +210,8 @@ collect_mq_info_in_parse_tree_int0(ReadWhy0, ParseTreeInt0, !Info) :-
     ),
 
     ParseTreeInt0 = parse_tree_int0(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntInclMap, _ImpInclMap, InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, _ImportUseMap,
-        _IntFIMSpecs, _ImpFIMSpecs,
+        _MaybeVersionNumbers, InclMap,
+        ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, _IntPredDecls, _IntModeDecls,
         _IntDeclPragmas, IntPromises,
@@ -301,14 +224,8 @@ collect_mq_info_in_parse_tree_int0(ReadWhy0, ParseTreeInt0, !Info) :-
     mq_info_set_modules(Modules, !Info),
 
     mq_info_get_imported_modules(!.Info, ImportedModules0),
-    list.foldl(collect_mq_info_in_int0_import_or_use, map.keys(IntImportMap),
-        ImportedModules0, ImportedModules1),
-    list.foldl(collect_mq_info_in_int0_import_or_use, map.keys(IntUseMap),
-        ImportedModules1, ImportedModules2),
-    list.foldl(collect_mq_info_in_int0_import_or_use, map.keys(ImpImportMap),
-        ImportedModules2, ImportedModules3),
-    list.foldl(collect_mq_info_in_int0_import_or_use, map.keys(ImpUseMap),
-        ImportedModules3, ImportedModules),
+    list.foldl(collect_mq_info_in_int0_import_or_use, map.keys(ImportUseMap),
+        ImportedModules0, ImportedModules),
     mq_info_set_imported_modules(ImportedModules, !Info),
 
     mq_info_get_types(!.Info, Types0),
@@ -390,8 +307,8 @@ collect_mq_info_in_parse_tree_int1(ReadWhy1, ParseTreeInt1, !Info) :-
     % We therefore do not need any ImpPermissions.
 
     ParseTreeInt1 = parse_tree_int1(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntInclMap, _ImpInclMap, InclMap,
-        _IntUseMap, _ImpUseMap, _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
+        _MaybeVersionNumbers, InclMap,
+        _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
         TypeCheckedMap, InstCheckedMap, ModeCheckedMap,
         IntTypeClasses, IntInstances, _IntPredDecls, _IntModeDecls,
         _IntDeclPragmas, IntPromises, _IntTypeRepnMap,
@@ -708,17 +625,19 @@ collect_mq_info_in_parse_tree_int3(Role, ParseTreeInt3, !Info) :-
     Permissions = module_permissions(PermInInt, PermInImp),
 
     ParseTreeInt3 = parse_tree_int3(_ModuleName, _ModuleNameContext,
-        _IntInclMap, InclMap, IntImportMap, _ImportUseMap,
+        IntInclMap, IntImportMap,
         IntTypeDefnMap, IntInstDefnMap, IntModeDefnMap,
         IntTypeClasses, IntInstances, _IntTypeRepns),
 
     mq_info_get_modules(!.Info, Modules0),
-    map.foldl(collect_mq_info_in_included_module_info(Permissions),
-        InclMap, Modules0, Modules),
+    IntInclMap = int_incl_context_map(IntInclMap0),
+    list.foldl(collect_mq_info_in_int_incl_context(Permissions),
+        map.keys(IntInclMap0), Modules0, Modules),
     mq_info_set_modules(Modules, !Info),
 
     mq_info_get_imported_modules(!.Info, ImportedModules0),
-    list.foldl(collect_mq_info_in_int3_import, map.keys(IntImportMap),
+    IntImportMap = int_import_context_map(IntImportMap0),
+    list.foldl(collect_mq_info_in_int3_import, map.keys(IntImportMap0),
         ImportedModules0, ImportedModules),
     mq_info_set_imported_modules(ImportedModules, !Info),
 
@@ -770,6 +689,7 @@ mode_ctor_to_mq_id(ModeCtor) = Id :-
 collect_mq_info_in_included_module_info(IntPermissions, ModuleName, InclInfo,
         !Modules) :-
     InclInfo = include_module_info(Section, _Context),
+    % XXX Why do we test Section if we do the same thing for both int and imp?
     (
         Section = ms_interface,
         Arity = 0,
@@ -779,6 +699,13 @@ collect_mq_info_in_included_module_info(IntPermissions, ModuleName, InclInfo,
         Arity = 0,
         id_set_insert(IntPermissions, mq_id(ModuleName, Arity), !Modules)
     ).
+
+:- pred collect_mq_info_in_int_incl_context(module_permissions::in,
+    module_name::in, module_id_set::in, module_id_set::out) is det.
+
+collect_mq_info_in_int_incl_context(IntPermissions, ModuleName, !Modules) :-
+    Arity = 0,
+    id_set_insert(IntPermissions, mq_id(ModuleName, Arity), !Modules).
 
 :- pred collect_mq_info_in_int0_import_or_use(module_name::in,
     set(module_name)::in, set(module_name)::out) is det.
@@ -861,15 +788,28 @@ collect_mq_info_in_item_promise(InInt, ItemPromise, !Info) :-
 
 collect_used_modules_in_promise_goal(Goal, !UsedModuleNames, !FoundUnqual) :-
     (
-        ( Goal = conj_expr(_, SubGoalA, SubGoalB)
-        ; Goal = par_conj_expr(_, SubGoalA, SubGoalB)
-        ; Goal = disj_expr(_, SubGoalA, SubGoalB)
-        ; Goal = implies_expr(_, SubGoalA, SubGoalB)
+        ( Goal = conj_expr(_, SubGoalA, SubGoalsB)
+        ; Goal = par_conj_expr(_, SubGoalA, SubGoalsB)
+        ),
+        collect_used_modules_in_promise_goal(SubGoalA,
+            !UsedModuleNames, !FoundUnqual),
+        collect_used_modules_in_promise_goals(SubGoalsB,
+            !UsedModuleNames, !FoundUnqual)
+    ;
+        ( Goal = implies_expr(_, SubGoalA, SubGoalB)
         ; Goal = equivalent_expr(_, SubGoalA, SubGoalB)
         ),
         collect_used_modules_in_promise_goal(SubGoalA,
             !UsedModuleNames, !FoundUnqual),
         collect_used_modules_in_promise_goal(SubGoalB,
+            !UsedModuleNames, !FoundUnqual)
+    ;
+        Goal = disj_expr(_, SubGoal1, SubGoal2, SubGoals),
+        collect_used_modules_in_promise_goal(SubGoal1,
+            !UsedModuleNames, !FoundUnqual),
+        collect_used_modules_in_promise_goal(SubGoal2,
+            !UsedModuleNames, !FoundUnqual),
+        collect_used_modules_in_promise_goals(SubGoals,
             !UsedModuleNames, !FoundUnqual)
     ;
         ( Goal = true_expr(_)

@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %----------------------------------------------------------------------------%
 % Copyright (C) 2003, 2005-2011 The University of Melbourne.
+% Copyright (C) 2014-2015, 2016, 2018, 2020-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %----------------------------------------------------------------------------%
@@ -54,12 +55,10 @@
 :- implementation.
 
 :- import_module hlds.hlds_pred.
+:- import_module hlds.pred_name.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
-:- import_module libs.globals.
 :- import_module libs.lp_rational.
-:- import_module libs.op_mode.
 :- import_module libs.polyhedron.
 :- import_module libs.rat.
 :- import_module mdbcomp.
@@ -69,6 +68,7 @@
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_pragma.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.term_constr_data.
 :- import_module transform_hlds.term_constr_errors.
 :- import_module transform_hlds.term_constr_main_types.
@@ -83,7 +83,6 @@
 :- import_module pair.
 :- import_module require.
 :- import_module set.
-:- import_module std_util.
 :- import_module term.
 
 %----------------------------------------------------------------------------%
@@ -109,8 +108,10 @@
 % Also look at builtin_compound_eq, builtin_compound_lt.
 
 term2_preprocess_module(!ModuleInfo) :-
+    should_we_believe_check_termination_markers(!.ModuleInfo,
+        BelieveCheckTerm),
     module_info_get_valid_pred_ids(!.ModuleInfo, PredIds),
-    process_builtin_preds(PredIds, !ModuleInfo),
+    process_builtin_preds(BelieveCheckTerm, PredIds, !ModuleInfo),
     process_imported_preds(PredIds, !ModuleInfo).
 
 %----------------------------------------------------------------------------%
@@ -145,18 +146,14 @@ process_imported_preds(PredIds, !ModuleInfo) :-
     is det.
 
 process_imported_pred(PredId, !ModuleInfo) :-
-    some [!PredTable] (
-        module_info_get_preds(!.ModuleInfo, !:PredTable),
-        module_info_get_type_spec_info(!.ModuleInfo, TypeSpecInfo),
-        TypeSpecInfo = type_spec_info(_, TypeSpecPredIds, _, _),
-        ( if set.member(PredId, TypeSpecPredIds) then
-            true
-        else
-            map.lookup(!.PredTable, PredId, PredInfo0),
-            process_imported_procs(PredInfo0, PredInfo),
-            map.det_update(PredId, PredInfo, !PredTable),
-            module_info_set_preds(!.PredTable, !ModuleInfo)
-        )
+    module_info_get_type_spec_info(!.ModuleInfo, TypeSpecInfo),
+    TypeSpecInfo = type_spec_info(_, TypeSpecPredIds, _, _),
+    ( if set.member(PredId, TypeSpecPredIds) then
+        true
+    else
+        module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+        process_imported_procs(PredInfo0, PredInfo),
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     ).
 
 :- pred process_imported_procs(pred_info::in, pred_info::out) is det.
@@ -216,8 +213,9 @@ process_imported_term_info(ProcInfo, !Term2Info) :-
     size_var_map::in, map(int, size_var)::out) is det.
 
 create_substitution_map(Ids, IdToProgVar, SizeVarMap, IdToSizeVar) :-
-    list.foldl((pred(Id::in, !.Map::in, !:Map::out) is det :-
-            ProgVar = IdToProgVar ^ det_elem(Id),
+    list.foldl(
+        ( pred(Id::in, !.Map::in, !:Map::out) is det :-
+            map.lookup(IdToProgVar, Id, ProgVar),
             SizeVar = map.lookup(SizeVarMap, ProgVar),
             map.set(Id, SizeVar, !Map)
         ), Ids, map.init, IdToSizeVar).
@@ -247,43 +245,38 @@ create_arg_size_constraint(SubstMap, eq(Terms0, Constant), Constraint) :-
 
 create_lp_term(SubstMap, ArgSizeTerm, Var - Coefficient) :-
     ArgSizeTerm = arg_size_term(VarId, Coefficient),
-    Var = SubstMap ^ det_elem(VarId).
+    map.lookup(SubstMap, VarId, Var).
 
 %----------------------------------------------------------------------------%
 %
 % Set up information for builtins.
 %
 
-:- pred process_builtin_preds(list(pred_id)::in,
-    module_info::in, module_info::out) is det.
+:- pred process_builtin_preds(maybe_believe_check_termination::in,
+    list(pred_id)::in, module_info::in, module_info::out) is det.
 
-process_builtin_preds([], !ModuleInfo).
-process_builtin_preds([PredId | PredIds], !ModuleInfo) :-
-    module_info_get_globals(!.ModuleInfo, Globals),
-    globals.get_op_mode(Globals, OpMode),
-    ( if OpMode = opm_top_args(opma_augment(opmau_make_opt_int)) then
-        MakeOptInt = yes
-    else
-        MakeOptInt = no
-    ),
-    some [!PredTable] (
-        module_info_get_preds(!.ModuleInfo, !:PredTable),
-        PredInfo0 = !.PredTable ^ det_elem(PredId),
-        process_builtin_procs(MakeOptInt, PredId, !.ModuleInfo,
-            PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, !PredTable),
-        module_info_set_preds(!.PredTable, !ModuleInfo)
-    ),
-    process_builtin_preds(PredIds, !ModuleInfo).
+process_builtin_preds(_, [], !ModuleInfo).
+process_builtin_preds(BelieveCheckTerm, [PredId | PredIds], !ModuleInfo) :-
+    process_builtin_pred(BelieveCheckTerm, PredId, !ModuleInfo),
+    process_builtin_preds(BelieveCheckTerm, PredIds, !ModuleInfo).
+
+:- pred process_builtin_pred(maybe_believe_check_termination::in,
+    pred_id::in, module_info::in, module_info::out) is det.
+
+process_builtin_pred(BelieveCheckTerm, PredId, !ModuleInfo) :-
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    process_builtin_procs(BelieveCheckTerm, !.ModuleInfo, PredId,
+        PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
     % It is possible for compiler generated/mercury builtin predicates
     % to be imported or locally defined, so they must be covered here
     % separately.
     %
-:- pred process_builtin_procs(bool::in, pred_id::in, module_info::in,
-    pred_info::in, pred_info::out) is det.
+:- pred process_builtin_procs(maybe_believe_check_termination::in,
+    module_info::in, pred_id::in, pred_info::in, pred_info::out) is det.
 
-process_builtin_procs(MakeOptInt, PredId, ModuleInfo, !PredInfo) :-
+process_builtin_procs(BelieveCheckTerm, ModuleInfo, PredId, !PredInfo) :-
     pred_info_get_status(!.PredInfo, PredStatus),
     pred_info_get_markers(!.PredInfo, Markers),
     pred_info_get_context(!.PredInfo, Context),
@@ -333,7 +326,7 @@ process_builtin_procs(MakeOptInt, PredId, ModuleInfo, !PredInfo) :-
                 (
                     check_marker(Markers, marker_terminates)
                 ;
-                    MakeOptInt = no,
+                    BelieveCheckTerm = do_believe_check_termination,
                     check_marker(Markers, marker_check_termination)
                 )
             then
@@ -368,12 +361,16 @@ process_builtin_procs(MakeOptInt, PredId, ModuleInfo, !PredInfo) :-
 
 set_compiler_gen_terminates(PredInfo, ProcIds, PredId, ModuleInfo,
         !ProcTable) :-
+    % XXX This code looks to be a near-identical copy of the predicate
+    % of the same name in termination.m.
     ( if
         hlds_pred.pred_info_is_builtin(PredInfo)
     then
         set_builtin_terminates(ProcIds, PredId, PredInfo, ModuleInfo,
             !ProcTable)
     else if
+        % XXX The origin test should be the only one needed;
+        % we should pay no attention to the name.
         ( if
             Name  = pred_info_name(PredInfo),
             Arity = pred_info_orig_arity(PredInfo),
@@ -384,26 +381,26 @@ set_compiler_gen_terminates(PredInfo, ProcIds, PredId, ModuleInfo,
             SpecialPredId = SpecialPredId0
         else
             pred_info_get_origin(PredInfo, PredOrigin),
-            PredOrigin = origin_special_pred(SpecialPredId, _)
+            PredOrigin = origin_compiler(made_for_uci(SpecialPredId, _))
         )
     then
-        set_generated_terminates(ProcIds, SpecialPredId, ModuleInfo,
+        set_generated_terminates(ModuleInfo, SpecialPredId, ProcIds,
             !ProcTable)
     else
         fail
     ).
 
-:- pred set_generated_terminates(list(proc_id)::in, special_pred_id::in,
-    module_info::in, proc_table::in, proc_table::out) is det.
+:- pred set_generated_terminates(module_info::in, special_pred_id::in,
+    list(proc_id)::in, proc_table::in, proc_table::out) is det.
 
-set_generated_terminates([], _, _, !ProcTable).
-set_generated_terminates([ProcId | ProcIds], SpecialPredId, ModuleInfo,
+set_generated_terminates(_, _, [], !ProcTable).
+set_generated_terminates(ModuleInfo, SpecialPredId, [ProcId | ProcIds],
         !ProcTable) :-
-    ProcInfo0 = !.ProcTable ^ det_elem(ProcId),
+    map.lookup(!.ProcTable, ProcId, ProcInfo0),
     proc_info_get_headvars(ProcInfo0, HeadVars),
-    proc_info_get_vartypes(ProcInfo0, VarTypes),
+    proc_info_get_var_table(ProcInfo0, VarTable),
     special_pred_id_to_termination(SpecialPredId, HeadVars, ModuleInfo,
-        VarTypes, ArgSize, Termination, VarMap, HeadSizeVars),
+        VarTable, ArgSize, Termination, VarMap, HeadSizeVars),
     some [!Term2Info] (
         proc_info_get_termination2_info(ProcInfo0, !:Term2Info),
         term2_info_set_success_constrs(yes(ArgSize), !Term2Info),
@@ -416,28 +413,28 @@ set_generated_terminates([ProcId | ProcIds], SpecialPredId, ModuleInfo,
         proc_info_set_termination2_info(!.Term2Info, ProcInfo0, ProcInfo)
     ),
     map.det_update(ProcId, ProcInfo, !ProcTable),
-    set_generated_terminates(ProcIds, SpecialPredId, ModuleInfo, !ProcTable).
+    set_generated_terminates(ModuleInfo, SpecialPredId, ProcIds, !ProcTable).
 
     % Handle the generation of constraints for special predicates.
     % XXX argument size constraints for unify predicates for types
     % with user-defined equality may not be correct.
     %
 :- pred special_pred_id_to_termination(special_pred_id::in, prog_vars::in,
-    module_info::in, vartypes::in, constr_arg_size_info::out,
+    module_info::in, var_table::in, constr_arg_size_info::out,
     constr_termination_info::out, size_var_map::out, size_vars::out) is det.
 
 special_pred_id_to_termination(SpecialPredId, HeadProgVars, ModuleInfo,
-        VarTypes, ArgSizeInfo, Termination, SizeVarMap, HeadSizeVars) :-
+        VarTable, ArgSizeInfo, Termination, SizeVarMap, HeadSizeVars) :-
     (
         SpecialPredId = spec_pred_compare,
-        make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTypes,
+        make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTable,
             ArgSizeInfo, Termination, SizeVarMap, HeadSizeVars)
     ;
         SpecialPredId = spec_pred_unify,
         make_size_var_map(HeadProgVars, _SizeVarset, SizeVarMap),
         HeadSizeVars = prog_vars_to_size_vars(SizeVarMap, HeadProgVars),
-        Zeros = find_zero_size_vars(ModuleInfo, SizeVarMap, VarTypes),
-        NonZeroHeadSizeVars = list.filter(isnt(is_zero_size_var(Zeros)),
+        Zeros = find_zero_size_vars(ModuleInfo, VarTable, SizeVarMap),
+        NonZeroHeadSizeVars = list.negated_filter(is_zero_size_var(Zeros),
             HeadSizeVars),
         % Unify may have more than two input arguments if one of them is a
         % type-info related arg, or some such thing. Since all these have
@@ -463,7 +460,7 @@ special_pred_id_to_termination(SpecialPredId, HeadProgVars, ModuleInfo,
         SpecialPredId = spec_pred_index,
         NumToDrop = list.length(HeadProgVars) - 2,
         ( if list.drop(NumToDrop, HeadProgVars, _ZeroSizeHeadVars) then
-            make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTypes,
+            make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTable,
                 ArgSizeInfo, Termination, SizeVarMap, HeadSizeVars)
         else
             unexpected($pred, "less than two arguments to builtin index")
@@ -475,13 +472,13 @@ special_pred_id_to_termination(SpecialPredId, HeadProgVars, ModuleInfo,
     % are either zero sized or unconstrained in size.
     %
 :- pred make_spec_pred_constr_term_info(list(prog_var)::in, module_info::in,
-    vartypes::in, constr_arg_size_info::out, constr_termination_info::out,
+    var_table::in, constr_arg_size_info::out, constr_termination_info::out,
     size_var_map::out, size_vars::out) is det.
 
-make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTypes,
+make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTable,
         ArgSize, Termination, SizeVarMap, HeadSizeVars) :-
     make_size_var_map(HeadProgVars, _SizeVarset, SizeVarMap),
-    Zeros = find_zero_size_vars(ModuleInfo, SizeVarMap, VarTypes),
+    Zeros = find_zero_size_vars(ModuleInfo, VarTable, SizeVarMap),
     Constraints = create_nonneg_constraints(SizeVarMap, Zeros),
     Polyhedron = polyhedron.from_constraints(Constraints),
     ArgSize = Polyhedron,
@@ -497,7 +494,7 @@ make_spec_pred_constr_term_info(HeadProgVars, ModuleInfo, VarTypes,
 set_builtin_terminates([], _, _, _, !ProcTable).
 set_builtin_terminates([ProcId | ProcIds], PredId, PredInfo, ModuleInfo,
         !ProcTable) :-
-    ProcInfo0 = !.ProcTable ^ det_elem(ProcId),
+    map.lookup(!.ProcTable, ProcId, ProcInfo0),
     proc_info_get_headvars(ProcInfo0, HeadVars),
     PredModule = pred_info_module(PredInfo),
     PredName   = pred_info_name(PredInfo),
@@ -686,7 +683,7 @@ process_no_type_info_builtin(PredName, HeadVars, SizeVarMap) = Constraints :-
 
 initialise_size_var_maps([], !ProcTable).
 initialise_size_var_maps([ProcId | ProcIds], !ProcTable) :-
-    ProcInfo0 = !.ProcTable ^ det_elem(ProcId),
+    map.lookup(!.ProcTable, ProcId, ProcInfo0),
     proc_info_get_termination2_info(ProcInfo0, Term2Info0),
     proc_info_get_headvars(ProcInfo0, HeadVars),
     make_size_var_map(HeadVars, _SizeVarset, SizeVarMap),

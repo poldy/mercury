@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2007-2009, 2011 The University of Melbourne.
-% Copyright (C) 2014-2015, 2018 The Mercury team.
+% Copyright (C) 2014-2015, 2018, 2021-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -51,7 +51,7 @@
 
     % new_stm_var(Value, TVar, !IO):
     %
-    % Create a new transaction variable with initial value `Value'.
+    % Create a new transaction variable with initial value Value.
     %
 :- pred new_stm_var(T::in, stm_var(T)::out, io::di, io::uo) is det.
 
@@ -136,8 +136,8 @@
 
     % stm_create_nested_transaction_log(Parent, Child):
     %
-    % `Child' is a new transaction log whose enclosing transaction's log
-    % is given by `Parent'.
+    % Child is a new transaction log whose enclosing transaction's log
+    % is given by Parent.
     %
 :- impure pred stm_create_nested_transaction_log(stm::ui, stm::uo) is det.
 
@@ -354,7 +354,7 @@
     [promise_pure, will_not_call_mercury, thread_safe],
 "
     STM = NULL;
-    MR_final_io_state(IO);
+    // ignore IO
 ").
 
 :- pragma foreign_proc("C",
@@ -362,7 +362,7 @@
     [promise_pure, will_not_call_mercury, thread_safe],
 "
     STM0 = NULL;
-    IO = MR_initial_io_state();
+    IO = 0; // The value does not matter.
 ").
 
 %---------------------------------------------------------------------------%

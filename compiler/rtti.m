@@ -40,9 +40,9 @@
 
 :- import_module bool.
 :- import_module list.
-:- import_module set.
 :- import_module map.
 :- import_module maybe.
+:- import_module set.
 :- import_module univ.
 
 %-----------------------------------------------------------------------------%
@@ -181,7 +181,8 @@
                 foreign_enum_language      :: foreign_language,
                 foreign_enum_axioms        :: equality_axioms,
                 foreign_enum_functors      :: list(foreign_enum_functor),
-                foreign_enum_ordinal_table :: map(uint32, foreign_enum_functor),
+                foreign_enum_ordinal_table :: map(uint32,
+                                                foreign_enum_functor),
                 foreign_enum_name_table    :: map(string,
                                                 foreign_enum_functor),
                 foreign_enum_functor_number_mapping
@@ -407,9 +408,9 @@
     % is non-ground, it should be bound to pseudo.
     %
 :- type rtti_maybe_pseudo_type_info_or_self
-    --->    pseudo(rtti_pseudo_type_info)
-    ;       plain(rtti_type_info)
-    ;       self.
+    --->    arg_pseudo(rtti_pseudo_type_info)
+    ;       arg_plain(rtti_type_info)
+    ;       arg_self.
 
     % The list of type constructors for types that are built into the
     % Mercury language or the Mercury standard library.
@@ -772,9 +773,9 @@
                 csharp_prefix   :: string
             ).
 
-    % Return the C representation of a pred_or_func indication.
+    % Return the C/Java/C# representation of a pred_or_func indication.
     %
-:- pred pred_or_func_to_string(pred_or_func::in,
+:- pred pred_or_func_to_target_string(pred_or_func::in,
     target_prefixes::out, string::out) is det.
 
     % Return the C representation of a secondary tag location.
@@ -785,8 +786,7 @@
     % Return the C representation of a secondary tag location.
     %
 :- pred sectag_and_locn_to_locn_string(sectag_and_locn::in,
-    target_prefixes::out, string::out)
-    is det.
+    target_prefixes::out, string::out) is det.
 
     % Return the C representation of a functor's subtype constraints info.
     %
@@ -1702,7 +1702,7 @@ type_info_list_to_string(TypeInfoList) =
 
 %-----------------------------------------------------------------------------%
 
-pred_or_func_to_string(PredOrFunc, TargetPrefixes, String) :-
+pred_or_func_to_target_string(PredOrFunc, TargetPrefixes, String) :-
     TargetPrefixes = target_prefixes("private_builtin.", "runtime.Constants."),
     (
         PredOrFunc = pf_predicate,
@@ -1780,11 +1780,11 @@ maybe_pseudo_type_info_to_rtti_data(pseudo(PseudoTypeInfo)) =
 maybe_pseudo_type_info_to_rtti_data(plain(TypeInfo)) =
     rtti_data_type_info(TypeInfo).
 
-maybe_pseudo_type_info_or_self_to_rtti_data(pseudo(PseudoTypeInfo)) =
+maybe_pseudo_type_info_or_self_to_rtti_data(arg_pseudo(PseudoTypeInfo)) =
     rtti_data_pseudo_type_info(PseudoTypeInfo).
-maybe_pseudo_type_info_or_self_to_rtti_data(plain(TypeInfo)) =
+maybe_pseudo_type_info_or_self_to_rtti_data(arg_plain(TypeInfo)) =
     rtti_data_type_info(TypeInfo).
-maybe_pseudo_type_info_or_self_to_rtti_data(self) =
+maybe_pseudo_type_info_or_self_to_rtti_data(arg_self) =
     rtti_data_pseudo_type_info(type_var(0)).
 
 type_ctor_details_num_ptags(TypeCtorDetails) = MaybeNumPtags :-

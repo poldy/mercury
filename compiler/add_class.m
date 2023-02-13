@@ -10,14 +10,12 @@
 :- interface.
 
 :- import_module hlds.hlds_module.
-:- import_module hlds.hlds_pred.
-:- import_module hlds.make_hlds.qual_info.
+:- import_module hlds.make_hlds.make_hlds_types.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
-:- import_module parse_tree.prog_data.
+:- import_module parse_tree.error_spec.
+:- import_module parse_tree.prog_item.
 
 :- import_module list.
-:- import_module term.
 
 %-----------------------------------------------------------------------------%
 
@@ -29,54 +27,42 @@
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-    % Given the definition for a predicate or function from a type class
-    % instance declaration, produce the clauses_info for that definition.
-    %
-:- pred do_produce_instance_method_clauses(instance_proc_def::in,
-    pred_or_func::in, arity::in, list(mer_type)::in,
-    pred_markers::in, term.context::in, instance_status::in, clauses_info::out,
-    tvarset::in, tvarset::out, module_info::in, module_info::out,
-    qual_info::in, qual_info::out, list(error_spec)::in, list(error_spec)::out)
-    is det.
-
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
 :- implementation.
 
+:- import_module check_hlds.                    % XXX Temporary import.
+:- import_module check_hlds.check_typeclass.    % XXX Temporary import.
 :- import_module hlds.add_pred.
 :- import_module hlds.default_func_mode.
-:- import_module hlds.hlds_args.
 :- import_module hlds.hlds_class.
-:- import_module hlds.hlds_goal.
-:- import_module hlds.hlds_rtti.
-:- import_module hlds.instmap.
-:- import_module hlds.make_hlds.add_clause.
-:- import_module hlds.make_hlds.make_hlds_warn.
+:- import_module hlds.hlds_pred.
 :- import_module hlds.make_hlds.state_var.
 :- import_module hlds.make_hlds_error.
-:- import_module hlds.pred_table.
-:- import_module hlds.vartypes.
+:- import_module hlds.status.
 :- import_module mdbcomp.
+:- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.maybe_error.
+:- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_type.
-:- import_module parse_tree.prog_type_subst.
 :- import_module parse_tree.prog_util.
-:- import_module parse_tree.set_of_var.
 
+:- import_module cord.
 :- import_module int.
 :- import_module map.
 :- import_module maybe.
+:- import_module pair.
 :- import_module require.
 :- import_module set.
+:- import_module term.
 :- import_module varset.
 
 %-----------------------------------------------------------------------------%
 
 add_typeclass_defns([], !ModuleInfo, !Specs).
 add_typeclass_defns([SecSubList | SecSubLists], !ModuleInfo, !Specs) :-
-    SecSubList = sec_sub_list(SectionInfo, Items), 
+    SecSubList = sec_sub_list(SectionInfo, Items),
     SectionInfo = sec_info(ItemMercuryStatus, NeedQual),
     item_mercury_status_to_typeclass_status(ItemMercuryStatus,
         TypeClassStatus0),
@@ -88,8 +74,8 @@ add_typeclass_defns([SecSubList | SecSubLists], !ModuleInfo, !Specs) :-
 add_instance_defns([], !ModuleInfo, !Specs).
 add_instance_defns([ImsSubList | ImsSubLists], !ModuleInfo, !Specs) :-
     ImsSubList = ims_sub_list(ItemMercuryStatus, Items),
-    item_mercury_status_to_instance_status(ItemMercuryStatus, InstanceStatus0),
-    list.foldl2(add_instance_defn(InstanceStatus0), Items,
+    item_mercury_status_to_instance_status(ItemMercuryStatus, InstanceStatus),
+    list.foldl2(add_instance_defn(InstanceStatus), Items,
         !ModuleInfo, !Specs),
     add_instance_defns(ImsSubLists, !ModuleInfo, !Specs).
 
@@ -102,10 +88,10 @@ add_instance_defns([ImsSubList | ImsSubLists], !ModuleInfo, !Specs) :-
 
 add_typeclass_defn(ItemMercuryStatus, TypeClassStatus0, NeedQual,
         ItemTypeClassInfo, !ModuleInfo, !Specs) :-
-    ItemTypeClassInfo = item_typeclass_info(ClassName, ClassParamVars,
+    ItemTypeClassInfo = item_typeclass_info(ClassName, ClassParamTVars,
         Constraints, FunDeps, Interface, VarSet, Context, _SeqNum),
     module_info_get_class_table(!.ModuleInfo, ClassTable0),
-    list.length(ClassParamVars, ClassArity),
+    list.length(ClassParamTVars, ClassArity),
     ClassId = class_id(ClassName, ClassArity),
     (
         Interface = class_interface_abstract,
@@ -114,11 +100,11 @@ add_typeclass_defn(ItemMercuryStatus, TypeClassStatus0, NeedQual,
         Interface = class_interface_concrete(_),
         TypeClassStatus1 = TypeClassStatus0
     ),
-    HLDSFunDeps = list.map(make_hlds_fundep(ClassParamVars), FunDeps),
+    HLDSFunDeps = list.map(make_hlds_fundep(ClassParamTVars), FunDeps),
     ( if map.search(ClassTable0, ClassId, OldDefn) then
-        OldDefn = hlds_class_defn(OldTypeClassStatus, OldConstraints,
-            OldFunDeps, _OldAncestors, OldClassParamVars, _OldKinds,
-            OldInterface, OldClassMethodPredProcIds0, OldVarSet, OldContext,
+        OldDefn = hlds_class_defn(OldTypeClassStatus, OldVarSet, _OldKinds,
+            OldClassParamTVars, OldConstraints, OldFunDeps, _OldAncestors,
+            OldInterface, OldClassMethodPredProcIds0, OldContext,
             _BadClassDefn0),
         % The typeclass is exported if *any* occurrence is exported,
         % even a previous abstract occurrence.
@@ -133,39 +119,52 @@ add_typeclass_defn(ItemMercuryStatus, TypeClassStatus0, NeedQual,
             OldClassMethodPredProcIds = [],
             ClassInterface = Interface
         ),
+        % Check that the superclass constraints are identical.
         ( if
-            % Check that the superclass constraints are identical.
-            not constraints_are_identical(OldClassParamVars, OldVarSet,
-                OldConstraints, ClassParamVars, VarSet, Constraints)
+            constraints_are_identical(OldClassParamTVars, OldVarSet,
+                OldConstraints, ClassParamTVars, VarSet, Constraints)
         then
-            % Always report the error, even in `.opt' files.
-            Extras = [words("The superclass constraints do not match."), nl],
-            report_multiple_def_error(ClassName, ClassArity, "typeclass",
-                Context, OldContext, Extras, !Specs),
-            HasIncompatibility = yes(OldDefn)
-        else if
-            % Check that the functional dependencies are identical.
-            not class_fundeps_are_identical(OldFunDeps, HLDSFunDeps)
-        then
-            % Always report the error, even in `.opt' files.
-            Extras = [words("The functional dependencies do not match."), nl],
-            report_multiple_def_error(ClassName, ClassArity, "typeclass",
-                Context, OldContext, Extras, !Specs),
-            HasIncompatibility = yes(OldDefn)
-        else if
-            Interface = class_interface_concrete(_),
-            OldInterface = class_interface_concrete(_)
-        then
-            ( if TypeClassStatus = typeclass_status(status_opt_imported) then
-                true
-            else
-                Extras = [],
-                report_multiple_def_error(ClassName, ClassArity, "typeclass",
-                    Context, OldContext, Extras, !Specs)
-            ),
-            HasIncompatibility = yes(OldDefn)
+            SuperClassMismatchPieces = []
         else
-            HasIncompatibility = no
+            SuperClassMismatchPieces =
+                [words("The superclass constraints do not match."), nl]
+        ),
+        % Check that the functional dependencies are identical.
+        ( if class_fundeps_are_identical(OldFunDeps, HLDSFunDeps) then
+            FunDepsMismatchPieces = []
+        else
+            FunDepsMismatchPieces =
+                [words("The functional dependencies do not match."), nl]
+        ),
+        MismatchPieces = SuperClassMismatchPieces ++ FunDepsMismatchPieces,
+        (
+            MismatchPieces = [],
+            ( if
+                Interface = class_interface_concrete(_),
+                OldInterface = class_interface_concrete(_)
+            then
+                TypeClassStatus = typeclass_status(OldImportStatus),
+                % This is a duplicate, but an identical duplicate.
+                ( if OldImportStatus = status_opt_imported then
+                    true
+                else
+                    report_multiply_defined("typeclass", ClassName,
+                        user_arity(ClassArity), Context, OldContext,
+                        [], !Specs)
+                ),
+                HasIncompatibility = yes(OldDefn)
+            else
+                HasIncompatibility = no
+            )
+        ;
+            MismatchPieces = [_ | _],
+            % This is a duplicate typeclass declaration that specifies
+            % different superclasses and/or functional dependencies than
+            % the original. Always report such errors, even in `.opt' files.
+            report_multiply_defined("typeclass", ClassName,
+                user_arity(ClassArity), Context, OldContext,
+                MismatchPieces, !Specs),
+            HasIncompatibility = yes(OldDefn)
         )
     else
         HasIncompatibility = no,
@@ -173,8 +172,10 @@ add_typeclass_defn(ItemMercuryStatus, TypeClassStatus0, NeedQual,
         ClassInterface = Interface,
         TypeClassStatus = TypeClassStatus1,
 
-        % When we find the class declaration, make an entry
-        % for the instances.
+        % When we find the class declaration, initialize the list of its
+        % instances, so that code processing the instances can just do
+        % map.lookups in the instance table once a search in the class table
+        % for the class_id has succeeded.
         module_info_get_instance_table(!.ModuleInfo, Instances0),
         map.det_insert(ClassId, [], Instances0, Instances),
         module_info_set_instance_table(Instances, !ModuleInfo)
@@ -196,7 +197,7 @@ add_typeclass_defn(ItemMercuryStatus, TypeClassStatus0, NeedQual,
         HasIncompatibility = no,
         (
             Interface = class_interface_concrete(ClassDecls),
-            module_add_class_interface(ClassName, ClassParamVars,
+            module_declare_class_method_preds(ClassName, ClassParamTVars,
                 TypeClassStatus, ItemMercuryStatus, NeedQual,
                 ClassDecls, ClassMethodPredProcIds, !ModuleInfo, !Specs)
         ;
@@ -210,9 +211,10 @@ add_typeclass_defn(ItemMercuryStatus, TypeClassStatus0, NeedQual,
         % We set all the kinds to `star' at the moment. This should be
         % done differently when we have a proper kind system.
         Kinds = map.init,
-        ClassDefn = hlds_class_defn(TypeClassStatus, Constraints, HLDSFunDeps,
-            Ancestors, ClassParamVars, Kinds, ClassInterface,
-            ClassMethodPredProcIds, VarSet, Context, has_no_bad_class_defn),
+        ClassDefn = hlds_class_defn(TypeClassStatus, VarSet, Kinds,
+            ClassParamTVars, Constraints, HLDSFunDeps, Ancestors,
+            ClassInterface, ClassMethodPredProcIds, Context,
+            has_no_bad_class_defn),
         map.set(ClassId, ClassDefn, ClassTable0, ClassTable),
         module_info_set_class_table(ClassTable, !ModuleInfo)
     ).
@@ -228,123 +230,136 @@ make_hlds_fundep(TVars, ProgFunDeps) = HLDSFunDeps :-
 :- pred convert_vars_to_arg_posns(list(tvar)::in, list(tvar)::in,
     set(hlds_class_argpos)::out) is det.
 
-convert_vars_to_arg_posns(TVars, List, ArgPosnsSet) :-
-    TVarToArgPosFunc = (func(TVar) = get_list_index(TVars, 1, TVar)),
-    ArgPosns = list.map(TVarToArgPosFunc, List),
+convert_vars_to_arg_posns(ProgTVars, HLDSTVars, ArgPosnsSet) :-
+    ArgPosns =
+        list.map(list.det_index1_of_first_occurrence(ProgTVars), HLDSTVars),
     set.list_to_set(ArgPosns, ArgPosnsSet).
-
-:- func get_list_index(list(T), hlds_class_argpos, T) = hlds_class_argpos.
-
-get_list_index([], _, _) = _ :-
-    unexpected($pred, "element not found").
-get_list_index([E | Es], CurPos, X) =
-    ( if X = E then
-        CurPos
-    else
-        get_list_index(Es, CurPos + 1, X)
-    ).
-
-:- pred constraints_are_identical(list(tvar)::in, tvarset::in,
-    list(prog_constraint)::in, list(tvar)::in, tvarset::in,
-    list(prog_constraint)::in) is semidet.
-
-constraints_are_identical(OldVars0, OldVarSet, OldConstraints0,
-        Vars, VarSet, Constraints) :-
-    tvarset_merge_renaming(VarSet, OldVarSet, _, Renaming),
-    apply_variable_renaming_to_prog_constraint_list(Renaming, OldConstraints0,
-        OldConstraints1),
-    apply_variable_renaming_to_tvar_list(Renaming, OldVars0,  OldVars),
-
-    map.from_corresponding_lists(OldVars, Vars, VarRenaming),
-    apply_variable_renaming_to_prog_constraint_list(VarRenaming,
-        OldConstraints1, OldConstraints),
-    OldConstraints = Constraints.
 
 :- pred class_fundeps_are_identical(hlds_class_fundeps::in,
     hlds_class_fundeps::in) is semidet.
 
-class_fundeps_are_identical(OldFunDeps0, FunDeps0) :-
+class_fundeps_are_identical(OldFunDeps, FunDeps) :-
     % Allow for the functional dependencies to be in a different order.
-    sort_and_remove_dups(OldFunDeps0, OldFunDeps),
-    sort_and_remove_dups(FunDeps0, FunDeps),
+    sort_and_remove_dups(OldFunDeps, SortedOldFunDeps),
+    sort_and_remove_dups(FunDeps, SortedFunDeps),
     % The list elements we are comparing are sets; we rely on the fact that
     % sets have a canonical representation.
-    OldFunDeps = FunDeps.
+    SortedOldFunDeps = SortedFunDeps.
 
-:- pred module_add_class_interface(sym_name::in, list(tvar)::in,
+    % Add the item_pred_decl_infos and item_mode_decl_infos in the given
+    % list of class_decls to the ModuleInfo, and record their identities
+    % in the list of MethodInfos. The methods in MethodInfos will be in
+    % the same order as the corresponding item_pred_decl_infos in ClassDecls.
+    %
+:- pred module_declare_class_method_preds(sym_name::in, list(tvar)::in,
     typeclass_status::in, item_mercury_status::in,
-    need_qualifier::in, list(class_decl)::in, list(pred_proc_id)::out,
+    need_qualifier::in, list(class_decl)::in, list(method_info)::out,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-module_add_class_interface(ClassName, ClassParamVars, TypeClassStatus,
-        ItemMercuryStatus, NeedQual, ClassDecls, !:PredProcIds,
+module_declare_class_method_preds(ClassName, ClassParamVars, TypeClassStatus,
+        ItemMercuryStatus, NeedQual, ClassDecls, MethodInfos,
         !ModuleInfo, !Specs) :-
-    classify_class_decls(ClassDecls, ClassPredOrFuncInfos, ClassModeInfos),
+    % We process ClassDecls in three stages.
+    %
+    % - In the first stage, classify_class_decls classifies each class_decl
+    %   as either pred/func declaration or as a mode declaration. It returns
+    %   the pred/func declarations in order, and puts the mode declarations
+    %   into a per-pred/func map (ClassModeInfoMap).
+    %
+    % - In the second stage, add_class_pred_or_func_decl adds to the HLDS,
+    %   for each class method, both the item_pred_decl_info of the method,
+    %   and any item_mode_decl_infos for it. It also adds the default mode
+    %   declarations for functions that have no explicit mode declaration,
+    %   and generates an error message for predicates that have no explicit
+    %   mode declaration. It deletes from ClassModeInfoMap all the mode
+    %   declarations that it has added to the HLDS.
+    %
+    % - In the third stage, we call report_mode_decls_for_undeclared_method
+    %   on all the mode declarations left over from ClassModeInfoMap,
+    %   since these represent mode declarations for nonexistent class methods.
+    %
+    % If ClassDecls declares N predicates and/or functions, then the
+    % MethodInfos list we return will contain N contiguous subsequences,
+    % each corresponding to one of these predicates or functions.
+    % The order of these subsequences will match the order of the
+    % predicate and/or function declarations in ClassDecls.
+    %
+    % Each subsequence will consist of one method_info for each mode
+    % declaration in for its method predicate or function ClassDecls,
+    % and the order of these method_infos will match the order of those
+    % mode declarations in ClassDecls.
 
-    % We collect !:PredProcIds, the pred_proc_ids of the methods
-    % of the typeclass, in three stages.
-    %
-    % - The first stage: add_class_pred_or_func_decl will add to it
-    %   the pred_proc_ids of methods that have predmode declarations.
-    %
-    % - The second stage: add_class_mode_decl will add to it
-    %   the pred_proc_ids of methods that have separate mode declarations.
-    %
-    % - The third stage: handle_no_mode_decl will add to it
-    %   the pred_proc_ids of the default modes of any function methods
-    %   that have no mode declaration, either separately or as part of the
-    %   function declaration.
-    %
-    % At the end, we sort the results, on pred_id and then proc_id.
-    % check_typeclass.m assumes this order when it is generating the
-    % corresponding list of pred_proc_ids for instance definitions.
-    !:PredProcIds = [],
+    % Stage 1.
+    classify_class_decls(ClassDecls, cord.init, ClassPredOrFuncInfosCord,
+        map.init, ClassModeInfoMap),
+    ClassPredOrFuncInfos = cord.list(ClassPredOrFuncInfosCord),
 
     % XXX STATUS
     TypeClassStatus = typeclass_status(OldImportStatus),
     PredStatus = pred_status(OldImportStatus),
-    list.foldl3(
-        add_class_pred_or_func_decl(ClassName, ClassParamVars,
+    % Stage 2.
+    list.foldl5(
+        add_class_pred_or_func_and_mode_decls(ClassName, ClassParamVars,
             ItemMercuryStatus, PredStatus, NeedQual),
-        ClassPredOrFuncInfos, !PredProcIds, !ModuleInfo, !Specs),
+        ClassPredOrFuncInfos, 1, _, cord.init, MethodInfosCord,
+        ClassModeInfoMap, UnhandledClassModeInfoMap, !ModuleInfo, !Specs),
+    MethodInfos = cord.list(MethodInfosCord),
 
-    % Add the mode declarations. Since we have already added the
-    % predicate/function declarations, there should already be an entry
-    % in the predicate table corresponding to the mode we are about to add.
-    % If not, report an error.
-    list.foldl3(
-        add_class_mode_decl(ItemMercuryStatus, PredStatus),
-        ClassModeInfos, !PredProcIds, !ModuleInfo, !Specs),
-    list.foldl3(handle_no_mode_decl,
-        ClassPredOrFuncInfos, !PredProcIds, !ModuleInfo, !Specs),
-    list.sort(!PredProcIds).
+    % Stage 3.
+    map.foldl(report_mode_decls_for_undeclared_method,
+        UnhandledClassModeInfoMap, !Specs).
 
 :- pred classify_class_decls(list(class_decl)::in,
-    list(class_pred_or_func_info)::out, list(class_mode_info)::out) is det.
+    cord(class_pred_or_func_info)::in,
+    cord(class_pred_or_func_info)::out,
+    map(pred_pf_name_arity, cord(class_mode_info))::in,
+    map(pred_pf_name_arity, cord(class_mode_info))::out) is det.
 
-classify_class_decls([], [], []).
-classify_class_decls([Decl | Decls], !:PredOrFuncInfos, !:ModeInfos) :-
-    classify_class_decls(Decls, !:PredOrFuncInfos, !:ModeInfos),
+classify_class_decls([], !PredOrFuncInfos, !ModeDeclMap).
+classify_class_decls([Decl | Decls], !PredOrFuncInfos, !ModeDeclMap) :-
     (
         Decl = class_decl_pred_or_func(PredOrFuncInfo),
-        !:PredOrFuncInfos = [PredOrFuncInfo | !.PredOrFuncInfos]
+        cord.snoc(PredOrFuncInfo, !PredOrFuncInfos)
     ;
         Decl = class_decl_mode(ModeInfo),
-        !:ModeInfos = [ModeInfo | !.ModeInfos]
-    ).
+        ModeInfo = class_mode_info(PredSymName, MaybePredOrFunc, Modes,
+            _WithInst, _MaybeDetism, _InstVarSet, _Context),
+        (
+            MaybePredOrFunc = no,
+            % The only way this could have happened now is if a `with_inst`
+            % annotation was not expanded.
+            unexpected($pred, "unexpanded `with_inst` annotation")
+        ;
+            MaybePredOrFunc = yes(PredOrFunc)
+        ),
+        PredFormArity = arg_list_arity(Modes),
+        user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+        MethodPredName =
+            pred_pf_name_arity(PredOrFunc, PredSymName, UserArity),
+        ( if map.search(!.ModeDeclMap, MethodPredName, ProcIdCord0) then
+            cord.snoc(ModeInfo, ProcIdCord0, ProcIdCord),
+            map.det_update(MethodPredName, ProcIdCord, !ModeDeclMap)
+        else
+            map.det_insert(MethodPredName, cord.singleton(ModeInfo),
+                !ModeDeclMap)
+        )
+    ),
+    classify_class_decls(Decls, !PredOrFuncInfos, !ModeDeclMap).
 
-:- pred add_class_pred_or_func_decl(sym_name::in, list(tvar)::in,
+:- pred add_class_pred_or_func_and_mode_decls(sym_name::in, list(tvar)::in,
     item_mercury_status::in, pred_status::in, need_qualifier::in,
-    class_pred_or_func_info::in,
-    list(pred_proc_id)::in, list(pred_proc_id)::out,
+    class_pred_or_func_info::in, int::in, int::out,
+    cord(method_info)::in, cord(method_info)::out,
+    map(pred_pf_name_arity, cord(class_mode_info))::in,
+    map(pred_pf_name_arity, cord(class_mode_info))::out,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-add_class_pred_or_func_decl(ClassName, ClassParamVars,
+add_class_pred_or_func_and_mode_decls(ClassName, ClassParamVars,
         ItemMercuryStatus, PredStatus, NeedQual, PredOrFuncInfo,
-        !PredProcIds, !ModuleInfo, !Specs) :-
-    PredOrFuncInfo = class_pred_or_func_info(PredName, PredOrFunc,
+        !MethodProcNum, !MethodInfosCord, !ModeDeclMap, !ModuleInfo, !Specs) :-
+    PredOrFuncInfo = class_pred_or_func_info(PredSymName, PredOrFunc,
         ArgTypesAndModes, WithType, WithInst, MaybeDetism,
         TypeVarSet, InstVarSet, ExistQVars, Purity, Constraints0, Context),
     % XXX kind inference:
@@ -356,134 +371,128 @@ add_class_pred_or_func_decl(ClassName, ClassParamVars,
     UnivConstraints = [ImplicitConstraint | UnivConstraints0],
     Constraints = constraints(UnivConstraints, ExistConstraints),
     ClassId = class_id(ClassName, list.length(ClassParamTypes)),
-    MethodId = pf_sym_name_arity(PredOrFunc, PredName,
-        list.length(ArgTypesAndModes)),
-    Origin = compiler_origin_class_method(ClassId, MethodId),
+    PredFormArity = arg_list_arity(ArgTypesAndModes),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+    MethodPredName = pred_pf_name_arity(PredOrFunc, PredSymName, UserArity),
+    Origin = compiler_origin_class_method(ClassId, MethodPredName),
     Attrs = item_compiler_attributes(Origin),
     MaybeAttrs = item_origin_compiler(Attrs),
     SeqNum = item_no_seq_num,
-    PredDecl = item_pred_decl_info(PredName, PredOrFunc,
+    PredDecl = item_pred_decl_info(PredSymName, PredOrFunc,
         ArgTypesAndModes, WithType, WithInst, MaybeDetism, MaybeAttrs,
         TypeVarSet, InstVarSet, ExistQVars, Purity, Constraints,
         Context, SeqNum),
     module_add_pred_decl(ItemMercuryStatus, PredStatus, NeedQual, PredDecl,
-        MaybePredProcId, !ModuleInfo, !Specs),
+        MaybePredMaybeProcId, !ModuleInfo, !Specs),
     (
-        MaybePredProcId = no
+        MaybePredMaybeProcId = no
+        % We could not add PredDecl to !ModuleInfo, but module_add_pred_decl
+        % will have generated an error message to report the reason.
     ;
-        MaybePredProcId = yes(PredProcId),
-        !:PredProcIds = [PredProcId | !.PredProcIds]
+        MaybePredMaybeProcId = yes(PredId - MaybeProcId),
+        ( if map.remove(MethodPredName, MethodModeDeclsCord, !ModeDeclMap) then
+            MethodModeDecls = cord.list(MethodModeDeclsCord)
+        else
+            MethodModeDecls = []
+        ),
+        (
+            MaybeProcId = no,
+            (
+                MethodModeDecls = [],
+                % If a method has no mode declaration, then
+                % - if the method is a function: add the default mode.
+                % - if the method is a predicate: report an error.
+                module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+                (
+                    PredOrFunc = pf_function,
+                    maybe_add_default_func_mode(!.ModuleInfo,
+                        PredInfo0, PredInfo, MaybeFuncProcId),
+                    (
+                        MaybeFuncProcId = no,
+                        % PredInfo0 was created fresh just above,
+                        % without any modes defined.
+                        unexpected($pred,
+                            "maybe_add_default_func_mode did not add proc")
+                    ;
+                        MaybeFuncProcId = yes(FuncProcId),
+                        module_info_set_pred_info(PredId, PredInfo,
+                            !ModuleInfo),
+                        PredProcId = proc(PredId, FuncProcId),
+                        MethodInfo = method_info(
+                            method_proc_num(!.MethodProcNum), MethodPredName,
+                            PredProcId, PredProcId),
+                        !:MethodProcNum = !.MethodProcNum + 1,
+                        cord.snoc(MethodInfo, !MethodInfosCord)
+                    )
+                ;
+                    PredOrFunc = pf_predicate,
+                    pred_method_with_no_modes_error(PredInfo0, !Specs)
+                )
+            ;
+                MethodModeDecls = [_ | _],
+                list.foldl4(
+                    add_class_mode_decl(ItemMercuryStatus, PredStatus,
+                        MethodPredName, PredId),
+                    MethodModeDecls,
+                    !MethodProcNum, !MethodInfosCord, !ModuleInfo, !Specs)
+            )
+        ;
+            MaybeProcId = yes(ProcId),
+            % The mode declaration has already been added to the pred_info
+            % of the class method in !.ModuleInfo.
+            PredProcId = proc(PredId, ProcId),
+            MethodInfo = method_info(
+                method_proc_num(!.MethodProcNum), MethodPredName,
+                PredProcId, PredProcId),
+            !:MethodProcNum = !.MethodProcNum + 1,
+            cord.snoc(MethodInfo, !MethodInfosCord),
+            (
+                MethodModeDecls = []
+                % The mode is part of the pred_info in !.ModuleInfo, and
+                % we added its method_info to !:MethodInfosCord above.
+            ;
+                MethodModeDecls = [_ | _],
+                % Every mode in MethodModeDecls is disallowed by the
+                % predmode declaration embedded in PredDecl. We keep
+                % the predmode declaration, and discard MethodModeDecls
+                % after reporting them.
+                ReportBadModeDecl =
+                    ( func(MMD) = Spec :-
+                        MMD = class_mode_info(_, _, _, _, _, _, MMDContext),
+                        Spec = report_mode_decl_after_predmode(MethodPredName,
+                            MMDContext)
+                    ),
+                BadModeDeclSpecs =
+                    list.map(ReportBadModeDecl, MethodModeDecls),
+                !:Specs = BadModeDeclSpecs ++ !.Specs
+            )
+        )
     ).
 
 :- pred add_class_mode_decl(item_mercury_status::in, pred_status::in,
-    class_mode_info::in,
-    list(pred_proc_id)::in, list(pred_proc_id)::out,
+    pred_pf_name_arity::in, pred_id::in, class_mode_info::in,
+    int::in, int::out, cord(method_info)::in, cord(method_info)::out,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-add_class_mode_decl(ItemMercuryStatus, PredStatus, ModeInfo,
-        !PredProcIds, !ModuleInfo, !Specs) :-
-    ModeInfo = class_mode_info(PredSymName, MaybePredOrFunc, Modes,
+add_class_mode_decl(ItemMercuryStatus, PredStatus, MethodPredName, PredId,
+        ModeInfo, !MethodProcNum, !MethodInfosCord, !ModuleInfo, !Specs) :-
+    MethodPredName = pred_pf_name_arity(PredOrFunc, PredSymName, _UserArity),
+    ModeInfo = class_mode_info(_PredSymName, _MaybePredOrFunc, Modes,
         _WithInst, MaybeDetism, InstVarSet, Context),
-    module_info_get_predicate_table(!.ModuleInfo, PredTable),
-    PredArity = list.length(Modes) : int,
-    (
-        MaybePredOrFunc = no,
-        % The only way this could have happened now is if a `with_inst`
-        % annotation was not expanded.
-        unexpected($pred, "unexpanded `with_inst` annotation")
-    ;
-        MaybePredOrFunc = yes(PredOrFunc)
-    ),
-    predicate_table_lookup_pf_sym_arity(PredTable, is_fully_qualified,
-        PredOrFunc, PredSymName, PredArity, PredIds),
-    (
-        PredIds = [],
-        missing_pred_or_func_method_error(PredSymName, PredArity, PredOrFunc,
-            Context, !Specs)
-    ;
-        PredIds = [HeadPredId | TailPredIds],
-        (
-            TailPredIds = [],
-            PredId = HeadPredId,
-            module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
-            pred_info_get_markers(PredInfo, PredMarkers),
-            ( if check_marker(PredMarkers, marker_class_method) then
-                WithInst = maybe.no,
-                SeqNum = item_no_seq_num,
-                ItemModeDecl = item_mode_decl_info(PredSymName,
-                    MaybePredOrFunc, Modes, WithInst, MaybeDetism, InstVarSet,
-                    Context, SeqNum),
-                module_add_mode_decl(not_part_of_predmode, is_a_class_method,
-                    ItemMercuryStatus, PredStatus, ItemModeDecl, PredProcId,
-                    !ModuleInfo, !Specs),
-                !:PredProcIds = [PredProcId | !.PredProcIds]
-            else
-                % XXX It may also be worth reporting that although there
-                % wasn't a matching class method, there was a matching
-                % predicate/function.
-                missing_pred_or_func_method_error(PredSymName, PredArity,
-                    PredOrFunc, Context, !Specs)
-            )
-        ;
-            TailPredIds = [_ | _],
-            % This shouldn't happen.
-            unexpected($pred, "multiple preds matching method mode")
-        )
-    ).
-
-    % If a method has no mode declaration, then
-    % - add a default mode, if the method is a function;
-    % - report an error, if the method is a predicate.
-    %
-:- pred handle_no_mode_decl(class_pred_or_func_info::in,
-    list(pred_proc_id)::in, list(pred_proc_id)::out,
-    module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-handle_no_mode_decl(PredOrFuncInfo, !PredProcIds, !ModuleInfo, !Specs) :-
-    PredOrFuncInfo = class_pred_or_func_info(QualPredOrFuncName, PorF,
-        TypesAndModes, _, _, _, _, _, _, _, _, _),
-    (
-        QualPredOrFuncName = qualified(ModuleName, PredOrFuncName)
-    ;
-        QualPredOrFuncName = unqualified(_),
-        % The class interface should be fully module qualified
-        % by the parser at the time it is read in.
-        unexpected($pred, "unqualified")
-    ),
-    list.length(TypesAndModes, PredArity),
-    module_info_get_predicate_table(!.ModuleInfo, PredTable),
-    predicate_table_lookup_pf_m_n_a(PredTable, is_fully_qualified,
-        PorF, ModuleName, PredOrFuncName, PredArity, PredIds),
-    (
-        PredIds = [PredId],
-        module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
-        (
-            PorF = pf_function,
-            maybe_add_default_func_mode(PredInfo0, PredInfo, MaybeProcId),
-            (
-                MaybeProcId = no
-            ;
-                MaybeProcId = yes(ProcId),
-                !:PredProcIds = [proc(PredId, ProcId) | !.PredProcIds],
-                module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
-            )
-        ;
-            PorF = pf_predicate,
-            pred_info_get_proc_table(PredInfo0, Procs),
-            ( if map.is_empty(Procs) then
-                pred_method_with_no_modes_error(PredInfo0, !Specs)
-            else
-                true
-            )
-        )
-    ;
-        ( PredIds = []
-        ; PredIds = [_, _ | _]
-        ),
-        unexpected($pred, "number of preds != 1")
-    ).
+    WithInst = maybe.no,
+    SeqNum = item_no_seq_num,
+    ItemModeDecl = item_mode_decl_info(PredSymName, yes(PredOrFunc), Modes,
+        WithInst, MaybeDetism, InstVarSet, Context, SeqNum),
+    module_add_mode_decl(not_part_of_predmode, is_a_class_method,
+        ItemMercuryStatus, PredStatus, ItemModeDecl, PredProcId,
+        !ModuleInfo, !Specs),
+    PredProcId = proc(PredPredId, _ProcId),
+    expect(unify(PredId, PredPredId), $pred, "pred_id mismatch"),
+    MethodInfo = method_info(method_proc_num(!.MethodProcNum),
+        MethodPredName, PredProcId, PredProcId),
+    !:MethodProcNum = !.MethodProcNum + 1,
+    cord.snoc(MethodInfo, !MethodInfosCord).
 
 %-----------------------------------------------------------------------------%
 
@@ -493,17 +502,21 @@ handle_no_mode_decl(PredOrFuncInfo, !PredProcIds, !ModuleInfo, !Specs) :-
 
 add_instance_defn(InstanceStatus0, ItemInstanceInfo, !ModuleInfo, !Specs) :-
     ItemInstanceInfo = item_instance_info(ClassName, Types, OriginalTypes,
-        Constraints, InstanceBody0, VarSet, InstanceModuleName,
+        Constraints, InstanceBody0, TVarSet, InstanceModuleName,
         Context, _SeqNum),
     (
         InstanceBody0 = instance_body_abstract,
+        InstanceBody = instance_body_abstract,
         % XXX This can make the status abstract_imported even if the instance
         % is NOT imported.
         % When this is fixed, please undo the workaround for this bug
         % in instance_used_modules in unused_imports.m.
         instance_make_status_abstract(InstanceStatus0, InstanceStatus)
     ;
-        InstanceBody0 = instance_body_concrete(_),
+        InstanceBody0 = instance_body_concrete(InstanceMethods0),
+        list.map(expand_bang_state_pairs_in_instance_method,
+            InstanceMethods0, InstanceMethods),
+        InstanceBody = instance_body_concrete(InstanceMethods),
         InstanceStatus = InstanceStatus0
     ),
 
@@ -511,336 +524,69 @@ add_instance_defn(InstanceStatus0, ItemInstanceInfo, !ModuleInfo, !Specs) :-
     module_info_get_instance_table(!.ModuleInfo, InstanceTable0),
     list.length(Types, ClassArity),
     ClassId = class_id(ClassName, ClassArity),
-    expand_bang_state_pairs_in_instance_body(InstanceBody0, InstanceBody),
     ( if map.search(Classes, ClassId, _) then
-        MaybeClassInterface = no,
+        % The MaybeSubsumedContext is set later, by check_typeclass.m.
+        MaybeSubsumedContext = maybe.no,
+        MaybeMethodInfos = maybe.no,
         map.init(ProofMap),
         NewInstanceDefn = hlds_instance_defn(InstanceModuleName,
-            Types, OriginalTypes, InstanceStatus, Context, Constraints,
-            InstanceBody, MaybeClassInterface, VarSet, ProofMap),
+            InstanceStatus, TVarSet, OriginalTypes, Types,
+            Constraints, MaybeSubsumedContext, ProofMap,
+            InstanceBody, MaybeMethodInfos, Context),
         map.lookup(InstanceTable0, ClassId, OldInstanceDefns),
-        check_for_overlapping_instances(NewInstanceDefn, OldInstanceDefns,
-            ClassId, !Specs),
-        check_instance_compatibility(NewInstanceDefn, OldInstanceDefns,
-            ClassId, !Specs),
         map.det_update(ClassId, [NewInstanceDefn | OldInstanceDefns],
             InstanceTable0, InstanceTable),
         module_info_set_instance_table(InstanceTable, !ModuleInfo)
     else
-        undefined_type_class_error(ClassName, ClassArity, Context,
-            "instance declaration", !Specs)
+        report_instance_for_undefined_typeclass(ClassId, Context, !Specs)
     ).
 
-:- pred check_for_overlapping_instances(hlds_instance_defn::in,
-    list(hlds_instance_defn)::in, class_id::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-check_for_overlapping_instances(NewInstanceDefn, OtherInstanceDefns,
-        ClassId, !Specs) :-
-    NewInstanceDefn = hlds_instance_defn(_, NewTypes, _, _, NewContext,
-        _, NewInstanceBody, _, NewTVarSet, _),
-    ( if
-        NewInstanceBody = instance_body_concrete(_) % XXX
-    then
-        report_any_overlapping_instance_declarations(ClassId,
-            NewTypes, NewTVarSet, NewContext, OtherInstanceDefns, !Specs)
-    else
-        true
-    ).
-
-:- pred report_any_overlapping_instance_declarations(class_id::in,
-    list(mer_type)::in, tvarset::in, prog_context::in,
-    list(hlds_instance_defn)::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-report_any_overlapping_instance_declarations(_, _, _, _, [], !Specs).
-report_any_overlapping_instance_declarations(ClassId,
-        NewTypes, NewTVarSet, NewContext,
-        [OtherInstanceDefn | OtherInstanceDefns], !Specs) :-
-    OtherInstanceDefn = hlds_instance_defn(_, OtherTypes, _, _, OtherContext,
-        _, OtherInstanceBody, _, OtherTVarSet, _),
-    ( if
-        OtherInstanceBody = instance_body_concrete(_), % XXX
-        tvarset_merge_renaming(NewTVarSet, OtherTVarSet, _MergedTVarSet,
-            Renaming),
-        apply_variable_renaming_to_type_list(Renaming, OtherTypes,
-            NewOtherTypes),
-        type_list_subsumes(NewTypes, NewOtherTypes, _)
-    then
-        ClassId = class_id(ClassName, ClassArity),
-        % XXX STATUS Multiply defined if type_list_subsumes in BOTH directions.
-        NewPieces = [words("Error: multiply defined (or overlapping)"),
-            words("instance declarations for class"),
-            qual_sym_name_arity(sym_name_arity(ClassName, ClassArity)),
-            suffix("."), nl],
-        NewMsg = simplest_msg(NewContext, NewPieces),
-        OtherPieces = [words("Previous instance declaration was here.")],
-        OtherMsg = error_msg(yes(OtherContext), always_treat_as_first, 0,
-            [always(OtherPieces)]),
-        Spec = error_spec($pred, severity_error, phase_parse_tree_to_hlds,
-            [NewMsg, OtherMsg]),
-        !:Specs = [Spec | !.Specs]
-    else
-        true
-    ),
-    % Maybe we shouldn't recurse if we generated an error above,
-    % but triply-defined instances are so rare that it doesn't much matter,
-    % and in some even more rare cases, the extra info may be useful.
-    report_any_overlapping_instance_declarations(ClassId,
-        NewTypes, NewTVarSet, NewContext, OtherInstanceDefns, !Specs).
-
-    % If two instance declarations are about the same type, then one must be
-    % the abstract declaration and the other the concrete definition.
-    % The two must be compatible, i.e. their constraints must be identical.
-    % If they are not, then generate an error message.
-    %
-:- pred check_instance_compatibility(hlds_instance_defn::in,
-    list(hlds_instance_defn)::in, class_id::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-check_instance_compatibility(InstanceDefn, InstanceDefns, ClassId, !Specs) :-
-    list.filter(same_type_hlds_instance_defn(InstanceDefn),
-        InstanceDefns, EquivInstanceDefns),
-    list.foldl(check_instance_constraints(InstanceDefn, ClassId),
-        EquivInstanceDefns, !Specs).
-
-:- pred check_instance_constraints(hlds_instance_defn::in,
-    class_id::in, hlds_instance_defn::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-check_instance_constraints(InstanceDefnA, ClassId, InstanceDefnB, !Specs) :-
-    type_vars_list(InstanceDefnA ^ instdefn_types, TVarsA),
-    TVarSetA = InstanceDefnA ^ instdefn_tvarset,
-    ConstraintsA = InstanceDefnA ^ instdefn_constraints,
-
-    type_vars_list(InstanceDefnB ^ instdefn_types, TVarsB),
-    TVarSetB = InstanceDefnB ^ instdefn_tvarset,
-    ConstraintsB = InstanceDefnB ^ instdefn_constraints,
-
-    ( if
-        constraints_are_identical(TVarsA, TVarSetA, ConstraintsA,
-            TVarsB, TVarSetB, ConstraintsB)
-    then
-        true
-    else
-        ClassId = class_id(ClassName, ClassArity),
-        ClassSNA = sym_name_arity(ClassName, ClassArity),
-
-        ContextA = InstanceDefnA ^ instdefn_context,
-        ContextB = InstanceDefnB ^ instdefn_context,
-        % The flattening of source item blocks by modules.m puts
-        % all items in a given section together. Since the original
-        % source code may have had the contents of the different sections
-        % intermingled, this may change the relative order of items.
-        % Put them back in the original order for this error message.
-        compare(CmpRes, ContextA, ContextB),
-        (
-            ( CmpRes = (<)
-            ; CmpRes = (=)
-            ),
-            FirstContext = ContextA,
-            SecondContext = ContextB
-        ;
-            CmpRes = (>),
-            FirstContext = ContextB,
-            SecondContext = ContextA
-        ),
-
-        % Since the first declaration by itself is fine, the first sign
-        % of a problem appears at the second declaration. This is why
-        % we start the report of the problem with *its* context.
-        SecondDeclPieces = [words("In instance declaration for class"),
-            qual_sym_name_arity(ClassSNA), suffix(":"), nl,
-            words("the instance constraints here"),
-            words("are incompatible with ..."), nl],
-        SecondDeclMsg = simplest_msg(SecondContext, SecondDeclPieces),
-
-        FirstDeclPieces = [words("... the instance constraints here."), nl],
-        FirstDeclMsg = simplest_msg(FirstContext, FirstDeclPieces),
-
-        Spec = error_spec($pred, severity_error,
-            phase_parse_tree_to_hlds, [SecondDeclMsg, FirstDeclMsg]),
-        !:Specs = [Spec | !.Specs]
-    ).
-
-    % Do two hlds_instance_defn refer to the same type?
-    % e.g. "instance tc(f(T))" compares equal to "instance tc(f(U))"
-    %
-    % Note we don't check that the constraints of the declarations are the
-    % same.
-    %
-:- pred same_type_hlds_instance_defn(hlds_instance_defn::in,
-    hlds_instance_defn::in) is semidet.
-
-same_type_hlds_instance_defn(InstanceDefnA, InstanceDefnB) :-
-    TypesA = InstanceDefnA ^ instdefn_types,
-    TypesB0 = InstanceDefnB ^ instdefn_types,
-
-    VarSetA = InstanceDefnA ^ instdefn_tvarset,
-    VarSetB = InstanceDefnB ^ instdefn_tvarset,
-
-    % Rename the two lists of types apart.
-    tvarset_merge_renaming(VarSetA, VarSetB, _NewVarSet, RenameApart),
-    apply_variable_renaming_to_type_list(RenameApart, TypesB0, TypesB1),
-
-    type_vars_list(TypesA, TVarsA),
-    type_vars_list(TypesB1, TVarsB),
-
-    % If the lengths are different they can't be the same type.
-    list.length(TVarsA, NumTVars),
-    list.length(TVarsB, NumTVars),
-
-    map.from_corresponding_lists(TVarsB, TVarsA, Renaming),
-    apply_variable_renaming_to_type_list(Renaming, TypesB1, TypesB),
-
-    TypesA = TypesB.
-
-do_produce_instance_method_clauses(InstanceProcDefn, PredOrFunc, PredArity,
-        ArgTypes, Markers, Context, InstanceStatus, ClausesInfo,
-        !TVarSet, !ModuleInfo, !QualInfo, !Specs) :-
-    (
-        % Handle the `pred(<MethodName>/<Arity>) is <ImplName>' syntax.
-        InstanceProcDefn = instance_proc_def_name(InstancePredName),
-        % Add the body of the introduced pred.
-        % First the goal info, ...
-        set_of_var.list_to_set(HeadVars, NonLocals),
-        ( if check_marker(Markers, marker_is_impure) then
-            Purity = purity_impure
-        else if check_marker(Markers, marker_is_semipure) then
-            Purity = purity_semipure
-        else
-            Purity = purity_pure
-        ),
-        instmap_delta_init_unreachable(DummyInstMapDelta),
-        DummyDetism = detism_erroneous,
-        goal_info_init(NonLocals, DummyInstMapDelta, DummyDetism, Purity,
-            Context, GoalInfo),
-        % ... and then the goal itself.
-        varset.init(VarSet0),
-        make_n_fresh_vars("HeadVar__", PredArity, HeadVars, VarSet0, VarSet),
-        construct_pred_or_func_call(invalid_pred_id, PredOrFunc,
-            InstancePredName, HeadVars, GoalInfo, IntroducedGoal, !QualInfo),
-        IntroducedClause = clause(all_modes, IntroducedGoal, impl_lang_mercury,
-            Context, []),
-
-        map.init(TVarNameMap),
-        vartypes_from_corresponding_lists(HeadVars, ArgTypes, VarTypes),
-        HeadVarVec = proc_arg_vector_init(PredOrFunc, HeadVars),
-        set_clause_list([IntroducedClause], ClausesRep),
-        rtti_varmaps_init(RttiVarMaps),
-        ClausesInfo = clauses_info(VarSet, TVarNameMap, VarTypes, VarTypes,
-            HeadVarVec, ClausesRep, init_clause_item_numbers_comp_gen,
-            RttiVarMaps, no_foreign_lang_clauses, no_clause_syntax_errors)
-    ;
-        % Handle the arbitrary clauses syntax.
-        InstanceProcDefn = instance_proc_def_clauses(InstanceClauses),
-        clauses_info_init(PredOrFunc, PredArity,
-            init_clause_item_numbers_comp_gen, ClausesInfo0),
-        list.foldl5(
-            produce_instance_method_clause(PredOrFunc, Context,
-                InstanceStatus),
-            InstanceClauses, !TVarSet, !ModuleInfo, !QualInfo,
-            ClausesInfo0, ClausesInfo, !Specs)
-    ).
-
-:- pred produce_instance_method_clause(pred_or_func::in,
-    prog_context::in, instance_status::in, item_clause_info::in,
-    tvarset::in, tvarset::out, module_info::in, module_info::out,
-    qual_info::in, qual_info::out, clauses_info::in, clauses_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-produce_instance_method_clause(PredOrFunc, Context, InstanceStatus,
-        InstanceClause, TVarSet0, TVarSet, !ModuleInfo, !QualInfo,
-        !ClausesInfo, !Specs) :-
-    InstanceClause = item_clause_info(ClausePredOrFunc, PredName, HeadTerms0,
-        ClauseVarSet, MaybeBodyGoal, _ClauseContext, _SeqNum),
-    % XXX Can this ever fail? If yes, we should generate an error message
-    % instead of aborting.
-    expect(unify(PredOrFunc, ClausePredOrFunc), $pred, "PredOrFunc mismatch"),
-    ( if
-        illegal_state_var_func_result(PredOrFunc, HeadTerms0, StateVar,
-            StateVarContext)
-    then
-        TVarSet = TVarSet0,
-        report_illegal_func_svar_result(StateVarContext, ClauseVarSet,
-            StateVar, !Specs),
-        !:Specs = get_any_errors_warnings2(MaybeBodyGoal) ++ !.Specs
-    else
-        (
-            MaybeBodyGoal = error2(BodyGoalSpecs),
-            TVarSet = TVarSet0,
-            !:Specs = BodyGoalSpecs ++ !.Specs
-        ;
-            MaybeBodyGoal = ok2(BodyGoal, BodyGoalWarningSpecs),
-            !:Specs = BodyGoalWarningSpecs ++ !.Specs,
-            expand_bang_state_pairs_in_terms(HeadTerms0, HeadTerms),
-            PredArity = list.length(HeadTerms),
-            adjust_func_arity(PredOrFunc, Arity, PredArity),
-
-            % AllProcIds is only used when the predicate has foreign procs,
-            % which the instance method pred should not have, so this
-            % dummy value should be ok.
-            AllProcIds = [],
-            % XXX STATUS
-            InstanceStatus = instance_status(OldImportStatus),
-            PredStatus = pred_status(OldImportStatus),
-            clauses_info_add_clause(all_modes, AllProcIds,
-                PredStatus, clause_not_for_promise,
-                PredOrFunc, Arity, HeadTerms,
-                Context, item_no_seq_num, Warnings,
-                BodyGoal, Goal, ClauseVarSet, VarSet, TVarSet0, TVarSet,
-                !ClausesInfo, !ModuleInfo, !QualInfo, !Specs),
-
-            PFSymNameArity = pf_sym_name_arity(PredOrFunc, PredName, Arity),
-            % Warn about singleton variables.
-            warn_singletons(!.ModuleInfo, PFSymNameArity, VarSet, Goal,
-                !Specs),
-            % Warn about variables with overlapping scopes.
-            add_quant_warnings(PFSymNameArity, VarSet, Warnings, !Specs)
-        )
-    ).
+%-----------------------------------------------------------------------------%
 
 :- pred pred_method_with_no_modes_error(pred_info::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 pred_method_with_no_modes_error(PredInfo, !Specs) :-
+    pred_info_get_pf_sym_name_arity(PredInfo, PFSNA),
     pred_info_get_context(PredInfo, Context),
-    ModuleName = pred_info_module(PredInfo),
-    PredName = pred_info_name(PredInfo),
-    Arity = pred_info_orig_arity(PredInfo),
-
-    Pieces = [words("Error: no mode declaration"),
-        words("for type class method predicate"),
-        qual_sym_name_arity(
-            sym_name_arity(qualified(ModuleName, PredName), Arity)),
-        suffix("."), nl],
+    Pieces = [words("Error: no mode declaration for method"),
+        unqual_pf_sym_name_pred_form_arity(PFSNA), suffix("."), nl],
     Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
         Context, Pieces),
     !:Specs = [Spec | !.Specs].
 
-:- pred undefined_type_class_error(sym_name::in, arity::in, prog_context::in,
-    string::in, list(error_spec)::in, list(error_spec)::out) is det.
-
-undefined_type_class_error(ClassName, ClassArity, Context, Description,
-        !Specs) :-
-    Pieces = [words("Error:"), words(Description), words("for"),
-        qual_sym_name_arity(sym_name_arity(ClassName, ClassArity)),
-        words("without corresponding"), decl("typeclass"),
-        words("declaration."), nl],
-    Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
-
-:- pred missing_pred_or_func_method_error(sym_name::in, arity::in,
-    pred_or_func::in, prog_context::in,
+:- pred report_instance_for_undefined_typeclass(class_id::in, prog_context::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-missing_pred_or_func_method_error(MethodName, MethodArity, PredOrFunc,
-        Context, !Specs) :-
+report_instance_for_undefined_typeclass(ClassId, Context, !Specs) :-
+    Pieces = [words("Error:"), decl("instance"), words("declaration"),
+        words("for"), qual_class_id(ClassId), words("without corresponding"),
+        decl("typeclass"), words("declaration."), nl],
+    Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
+        Context, Pieces),
+    !:Specs = [Spec | !.Specs].
+
+:- pred report_mode_decls_for_undeclared_method(pred_pf_name_arity::in,
+    cord(class_mode_info)::in,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+report_mode_decls_for_undeclared_method(MethodPredName, ModeInfosCord,
+        !Specs) :-
+    ModeInfos = cord.list(ModeInfosCord),
+    list.foldl(report_mode_decl_for_undeclared_method(MethodPredName),
+        ModeInfos, !Specs).
+
+:- pred report_mode_decl_for_undeclared_method(pred_pf_name_arity::in,
+    class_mode_info::in,
+    list(error_spec)::in, list(error_spec)::out) is det.
+
+report_mode_decl_for_undeclared_method(MethodPredName, ModeInfo, !Specs) :-
+    MethodPredName = pred_pf_name_arity(PredOrFunc, _, _),
+    ModeInfo = class_mode_info(_, _, _, _, _, _, Context),
     Pieces = [words("Error: mode declaration for type class method"),
-        qual_sym_name_arity(sym_name_arity(MethodName, MethodArity)),
+        unqual_pf_sym_name_user_arity(MethodPredName),
         words("without corresponding"), p_or_f(PredOrFunc),
-        words("method declaration."), nl],
+        words("declaration."), nl],
     Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
         Context, Pieces),
     !:Specs = [Spec | !.Specs].

@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2000, 2005-2006 The University of Melbourne.
-% Copyright (C) 2014-2015, 2017-2018 The Mercury team.
+% Copyright (C) 2014-2015, 2017-2018, 2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -10,7 +10,7 @@
 % Author: stayl.
 % Stability: medium
 %
-% This module provides the typeclass `enum', which describes types
+% This module provides the typeclass enum, which describes types
 % which can be converted to and from integers without loss of information.
 %
 %---------------------------------------------------------------------------%
@@ -43,10 +43,23 @@
     func from_int(int) = T is semidet
 ].
 
-    % `det_from_int(I)' returns the result of `from_int(I)', but throws an
-    % exception if `from_int' fails.
+    % This is another version of the above typeclass, which maps
+    % values of type T to *unsigned* integers.
+    %
+    % The other difference is that the from_uint method is a semidet
+    % *predicate*, not a semidet *function*. This is because programmers
+    % are more likely to expect predicates to be able to fail than functions.
+    %
+:- typeclass uenum(T) where [
+    func to_uint(T) = uint,
+    pred from_uint(uint::in, T::out) is semidet
+].
+
+    % det_from_int(I) returns the result of from_int(I), but throws an
+    % exception if from_int fails.
     %
 :- func det_from_int(int) = T <= enum(T).
+:- func det_from_uint(uint) = T <= uenum(T).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -60,6 +73,13 @@ det_from_int(I) = X :-
         X = X0
     else
         unexpected($pred, "from_int failed")
+    ).
+
+det_from_uint(U) = X :-
+    ( if from_uint(U, X0) then
+        X = X0
+    else
+        unexpected($pred, "from_uint failed")
     ).
 
 %---------------------------------------------------------------------------%

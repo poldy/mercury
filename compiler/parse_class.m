@@ -61,7 +61,7 @@
 :- implementation.
 
 :- import_module mdbcomp.prim_data.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_inst_mode_name.
 :- import_module parse_tree.parse_item.
 :- import_module parse_tree.parse_sym_name.
@@ -77,6 +77,9 @@
 :- import_module maybe.
 :- import_module one_or_more.
 :- import_module require.
+:- import_module set.
+:- import_module term_int.
+:- import_module term_subst.
 
 %---------------------------------------------------------------------------%
 
@@ -221,10 +224,10 @@ parse_constrained_class(ModuleName, VarSet, NameTerm, ConstraintsTerm,
                 NotInParams = [_ | _],
                 ClassTVarSet = ItemTypeClass0 ^ tc_varset,
                 ConstraintNotInParamsStrs = list.map(
-                    mercury_var_to_name_only(ClassTVarSet),
+                    mercury_var_to_name_only_vs(ClassTVarSet),
                     ConstraintNotInParams),
                 FunDepNotInParamsStrs = list.map(
-                    mercury_var_to_name_only(ClassTVarSet),
+                    mercury_var_to_name_only_vs(ClassTVarSet),
                     FunDepNotInParams),
                 ConstraintNotInParamsPieces =
                     list_to_pieces(ConstraintNotInParamsStrs),
@@ -339,8 +342,8 @@ parse_unconstrained_class(ModuleName, TVarSet, NameTerm, Context, SeqNum,
     ( if is_the_name_a_variable(VarSet, vtk_class_decl, NameTerm, Spec) then
         MaybeTypeClassInfo = error1([Spec])
     else
-        parse_implicitly_qualified_sym_name_and_args(ModuleName, NameTerm,
-            VarSet, ContextPieces, MaybeClassName),
+        parse_implicitly_qualified_sym_name_and_args(ModuleName, VarSet,
+            ContextPieces, NameTerm, MaybeClassName),
         (
             MaybeClassName = ok2(ClassName, TermVars0),
             list.map(term.coerce, TermVars0, TermVars),
@@ -355,7 +358,7 @@ parse_unconstrained_class(ModuleName, TVarSet, NameTerm, Context, SeqNum,
             ;
                 TermVars = [_ | _],
                 ( if
-                    term.term_list_to_var_list(TermVars, Vars),
+                    term_subst.term_list_to_var_list(TermVars, Vars),
                     list.sort_and_remove_dups(TermVars, SortedTermVars),
                     list.length(SortedTermVars, NumSortedTermVars),
                     list.length(TermVars, NumTermVars),
@@ -592,12 +595,11 @@ check_tvars_in_instance_constraint(ItemInstanceInfo, NameTerm, MaybeSpec) :-
     % declaration.
     ( if
         prog_type.constraint_list_get_tvars(Constraints, TVars),
-        type_vars_list(Types, TypesVars),
-        list.filter(list.contains(TypesVars), TVars, _BoundTVars,
-            UnboundTVars),
+        set_of_type_vars_in_types(Types, TypesVars),
+        list.filter(set.contains(TypesVars), TVars, _BoundTVars, UnboundTVars),
         UnboundTVars = [_ | _]
     then
-        UnboundTVarStrs = list.map(mercury_var_to_name_only(TVarSet),
+        UnboundTVarStrs = list.map(mercury_var_to_name_only_vs(TVarSet),
             UnboundTVars),
         UnboundTVarPieces = list_to_pieces(UnboundTVarStrs),
         ( if list.length(UnboundTVars) = 1 then
@@ -650,13 +652,15 @@ term_to_instance_method(_ModuleName, VarSet, MethodTerm,
                 [PredNameTerm, ArityTerm], _)
         then
             ( if
-                try_parse_sym_name_and_no_args(PredNameTerm, PredName),
-                decimal_term_to_int(ArityTerm, ArityInt),
+                try_parse_sym_name_and_no_args(PredNameTerm, PredSymName),
+                term_int.decimal_term_to_int(ArityTerm, ArityInt),
                 try_parse_sym_name_and_no_args(InstanceMethodTerm,
                     InstanceMethodName)
             then
-                InstanceMethod = instance_method(pf_predicate, PredName,
-                    instance_proc_def_name(InstanceMethodName), ArityInt,
+                ProcDef = instance_proc_def_name(InstanceMethodName),
+                MethodName = pred_pf_name_arity(pf_predicate, PredSymName,
+                    user_arity(ArityInt)),
+                InstanceMethod = instance_method(MethodName, ProcDef,
                     TermContext),
                 MaybeInstanceMethod = ok1(InstanceMethod)
             else
@@ -676,13 +680,15 @@ term_to_instance_method(_ModuleName, VarSet, MethodTerm,
                 [FuncNameTerm, ArityTerm], _)
         then
             ( if
-                try_parse_sym_name_and_no_args(FuncNameTerm, FuncName),
-                decimal_term_to_int(ArityTerm, ArityInt),
+                try_parse_sym_name_and_no_args(FuncNameTerm, FuncSymName),
+                term_int.decimal_term_to_int(ArityTerm, ArityInt),
                 try_parse_sym_name_and_no_args(InstanceMethodTerm,
                     InstanceMethodName)
             then
-                InstanceMethod = instance_method(pf_function, FuncName,
-                    instance_proc_def_name(InstanceMethodName), ArityInt,
+                ProcDef = instance_proc_def_name(InstanceMethodName),
+                MethodName = pred_pf_name_arity(pf_function, FuncSymName,
+                    user_arity(ArityInt)),
+                InstanceMethod = instance_method(MethodName, ProcDef,
                     TermContext),
                 MaybeInstanceMethod = ok1(InstanceMethod)
             else
@@ -710,51 +716,53 @@ term_to_instance_method(_ModuleName, VarSet, MethodTerm,
             MaybeInstanceMethod = error1([Spec])
         )
     else
-        % For the clauses in an instance declaration, the default module name
-        % for the clause heads is the module name of the class that this is an
-        % instance declaration for, but we don't necessarily know what module
-        % that is at this point, since the class name hasn't been fully
-        % qualified yet. So here we give the special module name "" as the
-        % default, which means that there is no default. (If the module
-        % qualifiers in the clauses don't match the module name of the class,
-        % we will pick that up later, in check_typeclass.m.)
-
-        DefaultModuleName = unqualified(""),
-        parse_item_or_marker(DefaultModuleName, VarSet, MethodTerm,
-            item_no_seq_num, MaybeIOM, [], IOMSpecs),
-        ( if
-            MaybeIOM = ok1(IOM),
-            IOMSpecs = []
-        then
-            ( if
-                IOM = iom_item(Item),
-                Item = item_clause(ItemClause)
-            then
-                ItemClause = item_clause_info(PredOrFunc, ClassMethodName,
-                    HeadArgs, _VarSet, _ClauseBody, Context, _SeqNum),
-                adjust_func_arity(PredOrFunc, ArityInt, list.length(HeadArgs)),
-                InstanceMethod = instance_method(PredOrFunc, ClassMethodName,
-                    instance_proc_def_clauses([ItemClause]), ArityInt,
-                    Context),
-                MaybeInstanceMethod = ok1(InstanceMethod)
-            else
-                MethodTermStr = describe_error_term(VarSet, MethodTerm),
-                Pieces = [words("Error: expected clause or"),
-                    quote("pred(<Name> / <Arity>) is <InstanceName>"),
-                    words("or"),
-                    quote("func(<Name> / <Arity>) is <InstanceName>"),
-                    suffix(","),
-                    words("not"), words(MethodTermStr), suffix("."), nl],
-                Spec = simplest_spec($pred, severity_error,
-                    phase_term_to_parse_tree,
-                    get_term_context(MethodTerm), Pieces),
-                MaybeInstanceMethod = error1([Spec])
-            )
+        ( if MethodTerm = term.functor(term.atom(":-"), [_], _) then
+            Spec = report_unexpected_method_term(VarSet, MethodTerm),
+            MaybeInstanceMethod = error1([Spec])
         else
-            Specs = IOMSpecs ++ get_any_errors1(MaybeIOM),
-            MaybeInstanceMethod = error1(Specs)
+            % For the clauses in an instance declaration, the default
+            % module name for the clause heads is the module name of the class
+            % that this is an instance declaration for, but we don't
+            % necessarily know what module that is at this point,
+            % since the class name hasn't been fully qualified yet.
+            % So here we pass "no" in the first argument to indicate
+            % the absence of a default module name. (If the module qualifiers
+            % in the clauses don't match the module name of the class,
+            % we will pick that up later, in check_typeclass.m.)
+
+            parse_clause_term(no, VarSet, MethodTerm, item_no_seq_num,
+                MaybeClause),
+            (
+                MaybeClause = ok1(ItemClause),
+                ItemClause = item_clause_info(PredOrFunc, MethodSymName,
+                    ArgTerms, _VarSet, _ClauseBody, Context, _SeqNum),
+                PredFormArity = arg_list_arity(ArgTerms),
+                user_arity_pred_form_arity(PredOrFunc,
+                    UserArity, PredFormArity),
+                ClauseCord = cord.singleton(ItemClause),
+                ProcDef = instance_proc_def_clauses(ClauseCord),
+                MethodName = pred_pf_name_arity(PredOrFunc, MethodSymName,
+                    UserArity),
+                InstanceMethod = instance_method(MethodName, ProcDef, Context),
+                MaybeInstanceMethod = ok1(InstanceMethod)
+            ;
+                MaybeClause = error1(Specs),
+                MaybeInstanceMethod = error1(Specs)
+            )
         )
     ).
+
+:- func report_unexpected_method_term(varset, term) = error_spec.
+
+report_unexpected_method_term(VarSet, MethodTerm) = Spec :-
+    MethodTermStr = describe_error_term(VarSet, MethodTerm),
+    Pieces = [words("Error: expected clause or"),
+        quote("pred(<Name> / <Arity>) is <InstanceName>"),
+        words("or"),
+        quote("func(<Name> / <Arity>) is <InstanceName>"), suffix(","),
+        words("not"), words(MethodTermStr), suffix("."), nl],
+    Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
+        get_term_context(MethodTerm), Pieces).
 
 %---------------------------------------------------------------------------%
 %
@@ -769,7 +777,7 @@ parse_class_constraints(ModuleName, VarSet, ConstraintsTerm, Result) :-
         Result).
 
 :- pred parse_simple_class_constraints(module_name::in, varset::in, term::in,
-    list(format_component)::in, maybe1(list(prog_constraint))::out) is det.
+    list(format_piece)::in, maybe1(list(prog_constraint))::out) is det.
 
 parse_simple_class_constraints(_ModuleName, VarSet, ConstraintsTerm, Pieces,
         Result) :-
@@ -996,7 +1004,7 @@ parse_fundep(Term, Result) :-
 parse_fundep_2(TypesTerm0, TypeVars) :-
     TypesTerm = term.coerce(TypesTerm0),
     conjunction_to_list(TypesTerm, TypeTerms),
-    term.term_list_to_var_list(TypeTerms, TypeVars).
+    term_subst.term_list_to_var_list(TypeTerms, TypeVars).
 
 :- pred constraint_is_not_simple(prog_constraint::in) is semidet.
 

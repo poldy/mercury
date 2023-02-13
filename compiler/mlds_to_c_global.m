@@ -76,8 +76,8 @@
 :- import_module backend_libs.rtti.
 :- import_module libs.
 :- import_module libs.globals.
-:- import_module ml_backend.mlds_to_c_data.
 :- import_module ml_backend.mlds_to_c_class.
+:- import_module ml_backend.mlds_to_c_data.
 :- import_module ml_backend.mlds_to_c_name.
 :- import_module ml_backend.mlds_to_c_stmt.
 :- import_module ml_backend.mlds_to_c_type.
@@ -90,7 +90,7 @@
 :- import_module pair.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -124,8 +124,8 @@ mlds_output_scalar_cell_group_decl(Opts, Stream, Indent, MangledModuleName,
     output_n_indents(Stream, Indent, !IO),
     io.write_string(Stream, "\nstatic /* final */ const ", !IO),
     NumRows = cord.length(Rows),
-    mlds_output_scalar_cell_group_type_and_name(Opts, Stream, MangledModuleName,
-        TypeRawNum, Type, InitArraySize, NumRows, !IO),
+    mlds_output_scalar_cell_group_type_and_name(Opts, Stream,
+        MangledModuleName, TypeRawNum, Type, InitArraySize, NumRows, !IO),
     io.write_string(Stream, ";\n", !IO).
 
 :- pred mlds_output_scalar_cell_group_type_and_name(mlds_to_c_opts::in,
@@ -292,15 +292,13 @@ mlds_output_vector_cell_group_defn(Opts, Stream, Indent, MangledModuleName,
     io::di, io::uo) is det.
 
 mlds_output_cell(Opts, Stream, Indent, Initializer, !RowNum, !IO) :-
-    output_n_indents(Stream, Indent, !IO),
-    io.write_string(Stream, "/* row ", !IO),
-    io.write_int(Stream, !.RowNum, !IO),
-    io.write_string(Stream, " */", !IO),
     ( if Initializer = init_struct(_, [_]) then
-        io.write_char(Stream, ' ', !IO)
+        EndChar = ' '
     else
-        io.nl(Stream, !IO)
+        EndChar = '\n'
     ),
+    output_n_indents(Stream, Indent, !IO),
+    io.format(Stream, "/* row %3d */%c", [i(!.RowNum), c(EndChar)], !IO),
     !:RowNum = !.RowNum + 1,
     mlds_output_initializer_body(Opts, Indent, Initializer, Stream, !IO),
     io.write_string(Stream, ",\n", !IO).
@@ -346,18 +344,18 @@ mlds_output_alloc_site_defn(_Opts, Stream, Indent, MLDS_ModuleName,
         _AllocId - AllocData, !IO) :-
     AllocData = ml_alloc_site_data(FuncName, Context, Type, Size),
     QualFuncName = qual_function_name(MLDS_ModuleName, FuncName),
-    term.context_file(Context, FileName),
-    term.context_line(Context, LineNumber),
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
     output_n_indents(Stream, Indent, !IO),
     io.write_string(Stream, "{ ", !IO),
     mlds_output_fully_qualified_function_name(Stream, QualFuncName, !IO),
-    io.write_string(Stream, ", """, !IO),
-    c_util.output_quoted_string(Stream, FileName, !IO),
-    io.write_string(Stream, """, ", !IO),
+    io.write_string(Stream, ", ", !IO),
+    output_quoted_string_c(Stream, FileName, !IO),
+    io.write_string(Stream, ", ", !IO),
     io.write_int(Stream, LineNumber, !IO),
-    io.write_string(Stream, ", """, !IO),
-    c_util.output_quoted_string(Stream, Type, !IO),
-    io.write_string(Stream, """, ", !IO),
+    io.write_string(Stream, ", ", !IO),
+    output_quoted_string_c(Stream, Type, !IO),
+    io.write_string(Stream, ", ", !IO),
     io.write_int(Stream, Size, !IO),
     io.write_string(Stream, "},\n", !IO).
 

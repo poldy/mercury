@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ts=4 sw=4 et ft=mercury
 %---------------------------------------------------------------------------%
-% Copyright (C) 2014-2015, 2017-2021 The Mercury team.
+% Copyright (C) 2014-2015, 2017-2023 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -59,15 +59,6 @@
 :- pred format_signed_int_component_width_prec(string_format_flags::in,
     int::in, int::in, int::in, string::out) is det.
 
-:- pred format_unsigned_int_component_nowidth_noprec(string_format_flags::in,
-    string_format_int_base::in, int::in, string::out) is det.
-:- pred format_unsigned_int_component_nowidth_prec(string_format_flags::in,
-    int::in, string_format_int_base::in, int::in, string::out) is det.
-:- pred format_unsigned_int_component_width_noprec(string_format_flags::in,
-    int::in, string_format_int_base::in, int::in, string::out) is det.
-:- pred format_unsigned_int_component_width_prec(string_format_flags::in,
-    int::in, int::in, string_format_int_base::in, int::in, string::out) is det.
-
 :- pred format_uint_component_nowidth_noprec(string_format_flags::in,
     string_format_int_base::in, uint::in, string::out) is det.
 :- pred format_uint_component_nowidth_prec(string_format_flags::in,
@@ -120,6 +111,10 @@
 :- pred format_cast_int8_to_int(int8::in, int::out) is det.
 :- pred format_cast_int16_to_int(int16::in, int::out) is det.
 :- pred format_cast_int32_to_int(int32::in, int::out) is det.
+:- pred format_cast_int_to_uint(int::in, uint::out) is det.
+:- pred format_cast_int8_to_uint(int8::in, uint::out) is det.
+:- pred format_cast_int16_to_uint(int16::in, uint::out) is det.
+:- pred format_cast_int32_to_uint(int32::in, uint::out) is det.
 :- pred format_cast_uint8_to_uint(uint8::in, uint::out) is det.
 :- pred format_cast_uint16_to_uint(uint16::in, uint::out) is det.
 :- pred format_cast_uint32_to_uint(uint32::in, uint::out) is det.
@@ -227,9 +222,9 @@ spec_to_string(Spec, String) :-
             format_unsigned_int64_component(Flags, MaybeWidth, MaybePrec, Base,
                 Int64, String)
         else
-            Int = sized_int_to_int(SizedInt),
-            format_unsigned_int_component(Flags, MaybeWidth, MaybePrec, Base,
-                Int, String)
+            UInt = sized_int_to_uint(SizedInt),
+            format_uint_component(Flags, MaybeWidth, MaybePrec, Base, UInt,
+                String)
         )
     ;
         % Unsigned int conversion specifiers (for unsigned values).
@@ -310,33 +305,6 @@ format_signed_int_component_width_prec(Flags, Width, Prec, Int, String) :-
     MaybeWidth = specified_width(Width),
     MaybePrec = specified_prec(Prec),
     format_signed_int_component(Flags, MaybeWidth, MaybePrec, Int, String).
-
-%---------------------------------------------------------------------------%
-
-format_unsigned_int_component_nowidth_noprec(Flags, Base, Int, String) :-
-    MaybeWidth = no_specified_width,
-    MaybePrec = no_specified_prec,
-    format_unsigned_int_component(Flags, MaybeWidth, MaybePrec, Base, Int,
-        String).
-
-format_unsigned_int_component_nowidth_prec(Flags, Prec, Base, Int, String) :-
-    MaybeWidth = no_specified_width,
-    MaybePrec = specified_prec(Prec),
-    format_unsigned_int_component(Flags, MaybeWidth, MaybePrec, Base, Int,
-        String).
-
-format_unsigned_int_component_width_noprec(Flags, Width, Base, Int, String) :-
-    MaybeWidth = specified_width(Width),
-    MaybePrec = no_specified_prec,
-    format_unsigned_int_component(Flags, MaybeWidth, MaybePrec, Base, Int,
-        String).
-
-format_unsigned_int_component_width_prec(Flags, Width, Prec, Base, Int,
-        String) :-
-    MaybeWidth = specified_width(Width),
-    MaybePrec = specified_prec(Prec),
-    format_unsigned_int_component(Flags, MaybeWidth, MaybePrec, Base, Int,
-        String).
 
 %---------------------------------------------------------------------------%
 
@@ -518,27 +486,6 @@ format_signed_int_component(Flags, MaybeWidth, MaybePrec, Int, String) :-
         String = native_format_int(FormatStr, Int)
     else
         String = format_signed_int(Flags, MaybeWidth, MaybePrec, Int)
-    ).
-
-:- pred format_unsigned_int_component(string_format_flags::in,
-    string_format_maybe_width::in, string_format_maybe_prec::in,
-    string_format_int_base::in, int::in, string::out) is det.
-
-format_unsigned_int_component(Flags, MaybeWidth, MaybePrec, Base, Int,
-        String) :-
-    ( if using_sprintf then
-        ( Base = base_octal,   SpecChar = "o"
-        ; Base = base_decimal, SpecChar = "u"
-        ; Base = base_hex_lc,  SpecChar = "x"
-        ; Base = base_hex_uc,  SpecChar = "X"
-        ; Base = base_hex_p,   SpecChar = "p"
-        ),
-        FormatStr = make_format_sprintf(Flags, MaybeWidth, MaybePrec,
-            int_length_modifier, SpecChar),
-        String = native_format_int(FormatStr, Int)
-    else
-        UInt = cast_from_int(Int),
-        String = format_uint(Flags, MaybeWidth, MaybePrec, Base, UInt)
     ).
 
 :- pred format_uint_component(string_format_flags::in,
@@ -880,7 +827,7 @@ native_format_float(_, _) = _ :-
     % by default.
     error("string.native_format_float/2 not defined").
 
-    % Create a string from a int using the format string.
+    % Create a string from an int using the format string.
     % Note it is the responsibility of the caller to ensure that the
     % format string is valid.
     %
@@ -1025,7 +972,7 @@ format_char(Flags, MaybeWidth, Char) = String :-
 format_string(Flags, MaybeWidth, MaybePrec, OldStr) = NewStr :-
     (
         MaybePrec = specified_prec(NumChars),
-        PrecStr = string.left_by_codepoint(OldStr, NumChars)
+        PrecStr = string.left_by_code_point(OldStr, NumChars)
     ;
         MaybePrec = no_specified_prec,
         PrecStr = OldStr
@@ -1068,7 +1015,7 @@ format_signed_int(Flags, MaybeWidth, MaybePrec, Int) = String :-
             AbsIntStr = abs_integer_to_decimal(AbsInteger)
         )
     ),
-    AbsIntStrLength = string.count_codepoints(AbsIntStr),
+    AbsIntStrLength = string.count_code_points(AbsIntStr),
 
     % Do we need to increase precision?
     ( if
@@ -1083,7 +1030,7 @@ format_signed_int(Flags, MaybeWidth, MaybePrec, Int) = String :-
     % Do we need to pad to the field width?
     ( if
         MaybeWidth = specified_width(Width),
-        Width > string.count_codepoints(PrecStr),
+        Width > string.count_code_points(PrecStr),
         Flags ^ flag_zero = flag_zero_set,
         Flags ^ flag_minus = flag_minus_clear,
         MaybePrec = no_specified_prec
@@ -1136,7 +1083,7 @@ format_uint(Flags, MaybeWidth, MaybePrec, Base, UInt) = String :-
             UIntStr = uint_to_uc_hex_string(UInt)
         )
     ),
-    UIntStrLength = string.count_codepoints(UIntStr),
+    UIntStrLength = string.count_code_points(UIntStr),
 
     % Do we need to increase precision?
     ( if
@@ -1162,7 +1109,7 @@ format_uint(Flags, MaybeWidth, MaybePrec, Base, UInt) = String :-
     % Do we need to pad to the field width?
     ( if
         MaybeWidth = specified_width(Width),
-        Width > string.count_codepoints(PrecModStr),
+        Width > string.count_code_points(PrecModStr),
         Flags ^ flag_zero = flag_zero_set,
         Flags ^ flag_minus = flag_minus_clear,
         MaybePrec = no_specified_prec
@@ -1252,7 +1199,7 @@ format_signed_int64(Flags, MaybeWidth, MaybePrec, Int) = String :-
         AbsInt = int64.unchecked_abs(Int),
         AbsIntStr = int64_to_string(AbsInt)
     ),
-    AbsIntStrLength = string.count_codepoints(AbsIntStr),
+    AbsIntStrLength = string.count_code_points(AbsIntStr),
 
     % Do we need to increase precision?
     ( if
@@ -1267,7 +1214,7 @@ format_signed_int64(Flags, MaybeWidth, MaybePrec, Int) = String :-
     % Do we need to pad to the field width?
     ( if
         MaybeWidth = specified_width(Width),
-        Width > string.count_codepoints(PrecStr),
+        Width > string.count_code_points(PrecStr),
         Flags ^ flag_zero = flag_zero_set,
         Flags ^ flag_minus = flag_minus_clear,
         MaybePrec = no_specified_prec
@@ -1320,7 +1267,7 @@ format_uint64(Flags, MaybeWidth, MaybePrec, Base, UInt64) = String :-
             UInt64Str = uint64_to_uc_hex_string(UInt64)
         )
     ),
-    UInt64StrLength = string.count_codepoints(UInt64Str),
+    UInt64StrLength = string.count_code_points(UInt64Str),
 
     % Do we need to increase precision?
     ( if
@@ -1346,7 +1293,7 @@ format_uint64(Flags, MaybeWidth, MaybePrec, Base, UInt64) = String :-
     % Do we need to pad to the field width?
     ( if
         MaybeWidth = specified_width(Width),
-        Width > string.count_codepoints(PrecModStr),
+        Width > string.count_code_points(PrecModStr),
         Flags ^ flag_zero = flag_zero_set,
         Flags ^ flag_minus = flag_minus_clear,
         MaybePrec = no_specified_prec
@@ -1488,7 +1435,7 @@ format_float(Flags, MaybeWidth, MaybePrec, Kind, Float) = String :-
                 Flags ^ flag_hash = flag_hash_clear,
                 MaybePrec = specified_prec(0)
             then
-                PrecStrLen = string.count_codepoints(PrecStr),
+                PrecStrLen = string.count_code_points(PrecStr),
                 PrecModStr = string.between(PrecStr, 0, PrecStrLen - 1)
             else
                 PrecModStr = PrecStr
@@ -1507,7 +1454,7 @@ format_float(Flags, MaybeWidth, MaybePrec, Kind, Float) = String :-
         % Do we need to change field width?
         ( if
             MaybeWidth = specified_width(Width),
-            Width > string.count_codepoints(PrecModStr),
+            Width > string.count_code_points(PrecModStr),
             Flags ^ flag_zero = flag_zero_set,
             Flags ^ flag_minus = flag_minus_clear
         then
@@ -1633,7 +1580,7 @@ add_sign_like_prefix_to_float_if_needed(Flags, ZeroPadded, Float, FieldStr)
 justify_string(Flags, MaybeWidth, Str) = JustifiedStr :-
     ( if
         MaybeWidth = specified_width(Width),
-        Width > string.count_codepoints(Str)
+        Width > string.count_code_points(Str)
     then
         ( if Flags ^ flag_minus = flag_minus_set then
             string.pad_right(Str, ' ', Width, JustifiedStr)
@@ -1886,7 +1833,7 @@ change_to_e_notation(Float, Prec, E) = ScientificFloat :-
 
     % Is mantissa greater than one digit long?
     split_at_decimal_point(UnsafeBase, MantissaStr, _FractionStr),
-    ( if string.count_codepoints(MantissaStr) > 1 then
+    ( if string.count_code_points(MantissaStr) > 1 then
         % Need to append 0, to fix the problem of having no numbers
         % after the decimal point.
         SafeBase = calculate_base_unsafe(string.append(UnsafeBase, "0"),
@@ -1926,7 +1873,7 @@ size_of_required_exponent(Float, Prec) = Exponent :-
 
     % Is mantissa one digit long?
     split_at_decimal_point(UnsafeBase, MantissaStr, _FractionStr),
-    ( if string.count_codepoints(MantissaStr) > 1 then
+    ( if string.count_code_points(MantissaStr) > 1 then
         % We will need to move decimal pt one place to the left:
         % therefore, increment exponent.
         Exponent = UnsafeExponent + 1
@@ -1967,7 +1914,7 @@ remove_zeros(CharNum) = TrimmedNum :-
 
 decimal_pos(Float) = Pos :-
     split_at_decimal_point(Float, MantissaStr, _FractionStr),
-    NumZeros = string.count_codepoints(MantissaStr) - 1,
+    NumZeros = string.count_code_points(MantissaStr) - 1,
     Pos = find_non_zero_pos(string.to_char_list(Float), NumZeros).
 
     % Given a list of chars representing a floating point number, this
@@ -2035,7 +1982,7 @@ calculate_base_unsafe(Float, Prec) = Exp :-
 
 change_precision(OldFloat, Prec) = NewFloat :-
     split_at_decimal_point(OldFloat, MantissaStr, FractionStr),
-    FracStrLen = string.count_codepoints(FractionStr),
+    FracStrLen = string.count_code_points(FractionStr),
     ( if Prec > FracStrLen then
         PrecFracStr = string.pad_right(FractionStr, '0', Prec),
         PrecMantissaStr = MantissaStr
@@ -2050,8 +1997,8 @@ change_precision(OldFloat, Prec) = NewFloat :-
             NewPrecFracStrNotOK = string.int_to_string( NewPrecFrac),
             NewPrecFracStr = string.pad_left(NewPrecFracStrNotOK, '0', Prec),
             ( if
-                string.count_codepoints(NewPrecFracStr) >
-                    string.count_codepoints(UnroundedFrac)
+                string.count_code_points(NewPrecFracStr) >
+                    string.count_code_points(UnroundedFrac)
             then
                 PrecFracStr = between(NewPrecFracStr, 1, 1 + Prec),
                 PrecMantissaInt = det_to_int(MantissaStr) + 1,
@@ -2126,6 +2073,26 @@ sized_int_to_int(SizedInt) = Int :-
         throw(software_error("formatting int64 via a cast"))
     ).
 
+:- func sized_int_to_uint(sized_int) = uint.
+
+sized_int_to_uint(SizedInt) = UInt :-
+    (
+        SizedInt = sized_int(Int),
+        format_cast_int_to_uint(Int, UInt)
+    ;
+        SizedInt = sized_int8(Int8),
+        format_cast_int8_to_uint(Int8, UInt)
+    ;
+        SizedInt = sized_int16(Int16),
+        format_cast_int16_to_uint(Int16, UInt)
+    ;
+        SizedInt = sized_int32(Int32),
+        format_cast_int32_to_uint(Int32, UInt)
+    ;
+        SizedInt = sized_int64(_),
+        throw(software_error("formatting int64 via a cast"))
+    ).
+
 :- func sized_uint_to_uint(sized_uint) = uint.
 
 sized_uint_to_uint(SizedUInt) = UInt :-
@@ -2151,6 +2118,15 @@ format_cast_int16_to_int(Int16, Int) :-
     Int = int16.cast_to_int(Int16).
 format_cast_int32_to_int(Int32, Int) :-
     Int = int32.cast_to_int(Int32).
+
+format_cast_int_to_uint(Int, UInt) :-
+    UInt = uint.cast_from_int(Int).
+format_cast_int8_to_uint(Int8, UInt) :-
+    UInt = uint8.cast_to_uint(uint8.cast_from_int8(Int8)).
+format_cast_int16_to_uint(Int16, UInt) :-
+    UInt = uint16.cast_to_uint(uint16.cast_from_int16(Int16)).
+format_cast_int32_to_uint(Int32, UInt) :-
+    UInt = uint32.cast_to_uint(uint32.cast_from_int32(Int32)).
 
 format_cast_uint8_to_uint(UInt8, UInt) :-
     UInt = uint8.cast_to_uint(UInt8).

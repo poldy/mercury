@@ -96,11 +96,11 @@
     % XXX We currently discover the need to import the modules needed
     % to compile away format strings by traversing all parts of all clauses,
     % and checking every predicate name and functor name to see whether
-    % it could refer to any of the predicates recognized by the is_format_call
-    % predicate. This is inefficient. It is also a bit unpredictable, since
-    % it will lead us to implicitly import those modules even if a call
-    % to unqualified("format") eventually turns out to call some other
-    % predicate of that name.
+    % it *could* refer to any of the predicates recognized by the
+    % is_builtin_format_call predicate. This is inefficient. It is also
+    % a bit unpredictable, since it will lead us to implicitly import
+    % those modules even if a call to unqualified("format") eventually
+    % turns out to call some other predicate of that name.
     %
     % We should therefore consider ALWAYS implicitly importing the predicates
     % needed by format_call.m.
@@ -122,6 +122,8 @@
 
 %---------------------%
 
+:- pred acc_implicit_avail_needs_in_instance(item_instance_info::in,
+    implicit_avail_needs::in, implicit_avail_needs::out) is det.
 :- pred acc_implicit_avail_needs_in_instance_method(instance_method::in,
     implicit_avail_needs::in, implicit_avail_needs::out) is det.
 :- pred acc_implicit_avail_needs_in_mutable(item_mutable_info::in,
@@ -181,11 +183,12 @@
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.item_util.
+:- import_module parse_tree.maybe_error.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_foreign.
-:- import_module parse_tree.maybe_error.
 
 :- import_module bool.
+:- import_module cord.
 :- import_module map.
 :- import_module maybe.
 :- import_module one_or_more.
@@ -437,9 +440,8 @@ acc_implicit_avail_needs_in_int_for_opt_spec(IntForOptIntSpec,
 acc_implicit_avail_needs_in_parse_tree_int0(ParseTreeInt0,
         !ImplicitAvailNeeds) :-
     ParseTreeInt0 = parse_tree_int0(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntInclMap, _ImpInclMap, _InclMap,
-        _IntImportMap, _IntUsedMap, _ImpImportMap, _ImpUseMap, _ImportUseMap,
-        _IntFIMSpecs, _ImpFIMSpecs,
+        _MaybeVersionNumbers, _InclMap,
+        _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
         TypeCtorCheckedMap, _InstCtorCheckedMap, _ModeCtorCheckedMap,
         _IntTypeClasses, IntInstances, _IntPredDecls, _IntModeDecls,
         _IntDeclPragmas, IntPromises,
@@ -448,8 +450,12 @@ acc_implicit_avail_needs_in_parse_tree_int0(ParseTreeInt0,
 
     map.foldl_values(acc_implicit_avail_needs_in_type_ctor_checked_defn,
         TypeCtorCheckedMap, !ImplicitAvailNeeds),
+    % XXX IMPLICIT Instance items in the interface must be abstract,
+    % so they cannot have any implicit avail needs.
     list.foldl(acc_implicit_avail_needs_in_instance,
         IntInstances, !ImplicitAvailNeeds),
+    % XXX IMPLICIT None of the implicit avail needs this call looks for
+    % has any business occurring in a promise.
     list.foldl(acc_implicit_avail_needs_in_promise,
         IntPromises, !ImplicitAvailNeeds),
 
@@ -464,8 +470,8 @@ acc_implicit_avail_needs_in_parse_tree_int0(ParseTreeInt0,
 acc_implicit_avail_needs_in_parse_tree_int1(ParseTreeInt1,
         !ImplicitAvailNeeds) :-
     ParseTreeInt1 = parse_tree_int1(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntInclMap, _ImpInclMap, _InclMap,
-        _IntUseMap, _ImpUseMap, _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
+        _MaybeVersionNumbers, _InclMap,
+        _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
         TypeDefnCheckedMap, _InstDefnCheckedMap, _ModeDefnCheckedMap,
         _IntTypeClasses, IntInstances, _IntPredDecls, _IntModeDecls,
         _IntDeclPragmas, IntPromises, _IntTypeRepnMap,
@@ -484,13 +490,15 @@ acc_implicit_avail_needs_in_parse_tree_int1(ParseTreeInt1,
 acc_implicit_avail_needs_in_parse_tree_int2(ParseTreeInt2,
         !ImplicitAvailNeeds) :-
     ParseTreeInt2 = parse_tree_int2(_ModuleName, _ModuleNameContext,
-        _MaybeVersionNumbers, _IntInclMap, _InclMap,
-        _IntUseMap, _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
+        _MaybeVersionNumbers, _InclMap,
+        _ImportUseMap, _IntFIMSpecs, _ImpFIMSpecs,
         TypeDefnCheckedMap, _InstDefnCheckedMap, _ModeDefnCheckedMap,
         _IntTypeClasses, IntInstances, _IntTypeRepnMap),
 
     map.foldl_values(acc_implicit_avail_needs_in_type_ctor_checked_defn,
         TypeDefnCheckedMap, !ImplicitAvailNeeds),
+    % XXX IMPLICIT Instance items in the interface must be abstract,
+    % so they cannot have any implicit avail needs.
     list.foldl(acc_implicit_avail_needs_in_instance,
         IntInstances, !ImplicitAvailNeeds).
 
@@ -539,6 +547,8 @@ acc_implicit_avail_needs_in_type_ctor_checked_defn(CheckedDefn,
             SolverDefn = solver_type_abstract(_, _)
         ;
             SolverDefn = solver_type_full(_MaybeAbsDefn, ItemTypeDefnSolver),
+            % XXX IMPLICIT None of the implicit avail needs this call looks for
+            % has any business occurring in a solver type.
             acc_implicit_avail_needs_in_type_defn_solver(ItemTypeDefnSolver,
                 !ImplicitAvailNeeds)
         )
@@ -561,6 +571,8 @@ acc_implicit_avail_needs_in_type_defn(ItemTypeDefn, !ImplicitAvailNeeds) :-
         )
     ;
         TypeDefn = parse_tree_solver_type(DetailsSolver),
+        % XXX IMPLICIT None of the implicit avail needs this call looks for
+        % has any business occurring in a solver type.
         acc_implicit_avail_needs_in_solver_details(DetailsSolver,
             !ImplicitAvailNeeds)
     ).
@@ -588,9 +600,6 @@ acc_implicit_avail_needs_in_solver_details(DetailsSolver,
     list.foldl(acc_implicit_avail_needs_in_mutable, MutableItems,
         !ImplicitAvailNeeds).
 
-:- pred acc_implicit_avail_needs_in_instance(item_instance_info::in,
-    implicit_avail_needs::in, implicit_avail_needs::out) is det.
-
 acc_implicit_avail_needs_in_instance(ItemInstance, !ImplicitAvailNeeds) :-
     ItemInstance = item_instance_info(_DerivingClass, _ClassName,
         _Types, _OriginalTypes, InstanceBody, _VarSet,
@@ -605,13 +614,12 @@ acc_implicit_avail_needs_in_instance(ItemInstance, !ImplicitAvailNeeds) :-
 
 acc_implicit_avail_needs_in_instance_method(InstanceMethod,
         !ImplicitAvailNeeds) :-
-    InstanceMethod = instance_method(_PredOrFunc, _MethodName, ProcDef,
-        _Arity, _Context),
+    InstanceMethod = instance_method(_MethodName, ProcDef, _Context),
     (
         ProcDef = instance_proc_def_name(_Name)
     ;
-        ProcDef = instance_proc_def_clauses(ItemClauses),
-        list.foldl(acc_implicit_avail_needs_in_clause, ItemClauses,
+        ProcDef = instance_proc_def_clauses(ItemClausesCord),
+        cord.foldl_pred(acc_implicit_avail_needs_in_clause, ItemClausesCord,
             !ImplicitAvailNeeds)
     ).
 
@@ -663,6 +671,8 @@ acc_implicit_avail_needs_in_mutable(ItemMutableInfo,
     ItemMutableInfo = item_mutable_info(_Name,
         _OrigType, _Type, _OrigInst, _Inst, InitValue,
         _Attrs, _VarSet, _Context, _SeqNum),
+    % XXX IMPLICIT None of the implicit avail needs  this call looks for
+    % has any business occurring in a mutable.
     acc_implicit_avail_needs_in_term(InitValue, !ImplicitAvailNeeds).
 
 acc_implicit_avail_needs_in_clause(ItemClause, !ImplicitAvailNeeds) :-
@@ -691,14 +701,22 @@ acc_implicit_avail_needs_in_goal(Goal, !ImplicitAvailNeeds) :-
         )
         % Cannot contain anything that requires implicit imports.
     ;
-        ( Goal = conj_expr(_, SubGoalA, SubGoalB)
-        ; Goal = par_conj_expr(_, SubGoalA, SubGoalB)
-        ; Goal = disj_expr(_, SubGoalA, SubGoalB)
-        ; Goal = implies_expr(_, SubGoalA, SubGoalB)
+        ( Goal = conj_expr(_, SubGoalA, SubGoalsB)
+        ; Goal = par_conj_expr(_, SubGoalA, SubGoalsB)
+        ),
+        acc_implicit_avail_needs_in_goal(SubGoalA, !ImplicitAvailNeeds),
+        acc_implicit_avail_needs_in_goals(SubGoalsB, !ImplicitAvailNeeds)
+    ;
+        ( Goal = implies_expr(_, SubGoalA, SubGoalB)
         ; Goal = equivalent_expr(_, SubGoalA, SubGoalB)
         ),
         acc_implicit_avail_needs_in_goal(SubGoalA, !ImplicitAvailNeeds),
         acc_implicit_avail_needs_in_goal(SubGoalB, !ImplicitAvailNeeds)
+    ;
+        Goal = disj_expr(_, SubGoal1, SubGoal2, SubGoals),
+        acc_implicit_avail_needs_in_goal(SubGoal1, !ImplicitAvailNeeds),
+        acc_implicit_avail_needs_in_goal(SubGoal2, !ImplicitAvailNeeds),
+        acc_implicit_avail_needs_in_goals(SubGoals, !ImplicitAvailNeeds)
     ;
         ( Goal = not_expr(_, SubGoal)
         ; Goal = quant_expr(_, _, _, _Vars, SubGoal)
@@ -1220,7 +1238,7 @@ acc_foreign_export_langs_from_impl_pragma(ItemImplPragma, !Langs) :-
     ItemImplPragma = item_pragma_info(ImplPragma, _, _),
     (
         ImplPragma = impl_pragma_foreign_proc_export(FPEInfo),
-        FPEInfo = pragma_info_foreign_proc_export(_, Lang, _, _),
+        FPEInfo = pragma_info_foreign_proc_export(_, Lang, _, _, _),
         set.insert(Lang, !Langs)
     ;
         ( ImplPragma = impl_pragma_foreign_decl(_)
@@ -1264,7 +1282,7 @@ acc_foreign_code_langs_from_impl_pragma(ItemImplPragma, !Langs) :-
             % foreign procs in that language, so this mechanism is unnecessary.
         ;
             ImplPragma = impl_pragma_foreign_proc_export(FPEInfo),
-            FPEInfo = pragma_info_foreign_proc_export(_, Lang, _, _)
+            FPEInfo = pragma_info_foreign_proc_export(_, Lang, _, _, _)
         ;
             ImplPragma = impl_pragma_fact_table(_),
             Lang = lang_c

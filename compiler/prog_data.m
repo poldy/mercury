@@ -28,12 +28,14 @@
 :- import_module parse_tree.prog_item.
 
 :- import_module char.
+:- import_module cord.
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
 :- import_module one_or_more.
 :- import_module set.
 :- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -50,8 +52,7 @@
     %
     %   cons
     %   tuple_cons
-    %   int*_const
-    %   uint*_const
+    %   some_int_const
     %   float_const
     %   char_const
     %   string_const
@@ -803,6 +804,8 @@ cons_id_is_const_struct(ConsId, ConstNum) :-
                 std_representation_type :: mer_type,
                 std_ground_inst         :: mer_inst,
                 std_any_inst            :: mer_inst,
+                % XXX The item_mutable_info type is defined in prog_item.m.
+                % The reference to that module here is undesirable.
                 std_mutable_items       :: list(item_mutable_info)
             ).
 
@@ -1128,10 +1131,11 @@ get_type_kind(kinded_type(_, Kind)) = Kind.
 
 :- type prog_constraints
     --->    constraints(
+                % Universally quantified constraints.
                 univ_constraints    :: list(prog_constraint),
-                                    % Universally quantified constraints.
+
+                % Existentially quantified constraints.
                 exist_constraints   :: list(prog_constraint)
-                                    % Existentially quantified constraints.
             ).
 
     % A functional dependency on the variables in the head of a class
@@ -1154,16 +1158,16 @@ get_type_kind(kinded_type(_, Kind)) = Kind.
 :- type class_interface
     --->    class_interface_abstract
     ;       class_interface_concrete(list(class_decl)).
+            % XXX The class_decl type is defined in prog_item.m.
+            % The reference to that module here is undesirable.
 
 :- type instance_method
     --->    instance_method(
-                instance_method_p_or_f          :: pred_or_func,
-                instance_method_name            :: sym_name,
+                instance_method_pf_name_arity   :: pred_pf_name_arity,
                 instance_method_proc_def        :: instance_proc_def,
-                instance_method_arity           :: arity,
 
-                instance_method_decl_context    :: prog_context
                 % The context of the instance declaration.
+                instance_method_decl_context    :: prog_context
             ).
 
 :- type instance_proc_def
@@ -1173,7 +1177,9 @@ get_type_kind(kinded_type(_, Kind)) = Kind.
             )
     ;       instance_proc_def_clauses(
                 % defined using clauses
-                list(item_clause_info)
+                % XXX The item_clause_info type is defined in prog_item.m.
+                % The reference to that module here is undesirable.
+                cord(item_clause_info)
             ).
 
 :- type instance_body
@@ -1852,7 +1858,7 @@ best_purity(purity_impure, purity_impure) = purity_impure.
     ;       print_name_and_num
     ;       print_num_only.
 
-:- type prog_context == term.context.
+:- type prog_context == term_context.
 
 :- type trace_expr(Base)
     --->    trace_base(Base)
@@ -1913,7 +1919,8 @@ best_purity(purity_impure, purity_impure) = purity_impure.
     ;       goal_warning_occurs_check
     ;       goal_warning_non_tail_recursive_calls
     ;       goal_warning_suspicious_recursion
-    ;       goal_warning_no_solution_disjunct.
+    ;       goal_warning_no_solution_disjunct
+    ;       goal_warning_unknown_format_calls.
 
 :- implementation.
 
@@ -1999,15 +2006,14 @@ valid_trace_grade_name(GradeName) :-
 :- type name_arity
     --->    name_arity(string, arity).
 
-:- type sym_name_specifier
-    --->    sym_name_specifier_name(sym_name)
-    ;       sym_name_specifier_name_arity(sym_name, arity).
-
 :- type sym_name_arity
     --->    sym_name_arity(sym_name, arity).
 
+:- type sym_name_pred_form_arity
+    --->    sym_name_pred_form_arity(sym_name, pred_form_arity).
+
 :- type pf_sym_name_arity
-    --->    pf_sym_name_arity(pred_or_func, sym_name, arity).
+    --->    pf_sym_name_arity(pred_or_func, sym_name, pred_form_arity).
 
     % This type is part of a family of related types, the rest of which are
     % in prog_item.m. Its name fits in with those types.
@@ -2055,6 +2061,8 @@ valid_trace_grade_name(GradeName) :-
 :- type pred_form_arity
     --->    pred_form_arity(int).
 
+:- func arg_list_arity(list(T)) = pred_form_arity.
+
     % Describes whether an item can be used without an explicit module
     % qualifier.
     %
@@ -2067,6 +2075,12 @@ valid_trace_grade_name(GradeName) :-
 :- type has_main
     --->    has_main
     ;       no_main.
+
+%---------------------------------------------------------------------------%
+
+:- implementation.
+
+arg_list_arity(ArgList) = pred_form_arity(list.length(ArgList)).
 
 %---------------------------------------------------------------------------%
 :- end_module parse_tree.prog_data.

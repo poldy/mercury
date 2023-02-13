@@ -30,6 +30,10 @@
     :- include_module typecheck.
     :- include_module typecheck_debug.
     :- include_module typecheck_errors.
+    :- include_module typecheck_error_overload.
+    :- include_module typecheck_error_type_assign.
+    :- include_module typecheck_error_undef.
+    :- include_module typecheck_error_util.
     :- include_module typecheck_info.
     :- include_module typecheck_msgs.
     :- include_module typeclasses.
@@ -44,6 +48,8 @@
 % Polymorphism transformation.
 :- include_module introduce_exists_casts.
 :- include_module polymorphism.
+:- include_module polymorphism_clause.
+:- include_module polymorphism_goal.
 :- include_module polymorphism_info.
 :- include_module polymorphism_lambda.
 :- include_module polymorphism_post_copy.
@@ -119,6 +125,9 @@
 
 % Expand try goals.
 :- include_module try_expand.
+
+% Check the information in format_call pragmas.
+:- include_module check_pragma_format_call.
 
 % Warnings about simple code.
 :- include_module simplify.

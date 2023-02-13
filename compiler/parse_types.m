@@ -17,7 +17,7 @@
 
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_item.
 :- import_module recompilation.
@@ -29,6 +29,11 @@
 :- type item_or_marker
     --->    iom_item(item)
             % The term contains an item.
+
+    ;       iom_item_and_error_specs(item, list(error_spec))
+            % The term contains an item. This item has errors that we want
+            % to report, but from which we have recovered in a useful
+            % though probably not perfect manner.
 
     ;       iom_marker_include(one_or_more(item_include))
             % The term contains an `:- include_module' declaration.
@@ -66,16 +71,16 @@
             % The arguments give the section's kind, and the context
             % and sequence number of the declaration.
 
-    ;       iom_handled(list(error_spec)).
-            % The term was completely dealt with during parsing, which
-            % may have generated some messages. If it did, they are attached;
-            % otherwise, the list will be empty.
+    ;       iom_handled_no_error
+    ;       iom_handled_error(list(error_spec)).
+            % The term was completely dealt with during parsing.
+            % If there was an error, one or more messages for it are attached.
             %
-            % As of this writing, this is used only for require_feature_set
+            % As of this writing, these are used only for require_feature_set
             % pragmas that don't require any features, and for version_number
             % items recorded by old compiler versions in a now-obsolete format.
 
-:- func iom_desc_pieces(item_or_marker) = list(format_component).
+:- func iom_desc_pieces(item_or_marker) = list(format_piece).
 
 %---------------------------------------------------------------------------%
 
@@ -85,7 +90,9 @@
 
 iom_desc_pieces(IOM) = Pieces :-
     (
-        IOM = iom_item(Item),
+        ( IOM = iom_item(Item)
+        ; IOM = iom_item_and_error_specs(Item, _Specs)
+        ),
         Pieces = item_desc_pieces(Item)
     ;
         IOM = iom_marker_include(_),
@@ -127,7 +134,9 @@ iom_desc_pieces(IOM) = Pieces :-
                 words("declaration")]
         )
     ;
-        IOM = iom_handled(_Specs),
+        ( IOM = iom_handled_no_error
+        ; IOM = iom_handled_error(_Specs)
+        ),
         Pieces = []
     ).
 

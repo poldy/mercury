@@ -21,8 +21,7 @@
 %
 %---------------------------------------------------------------------------%
 %
-% This module is also used as a test case in two test directories, debugger
-% and general.
+% This module is also used as a test case in tests/debugger.
 %
 %---------------------------------------------------------------------------%
 
@@ -63,7 +62,7 @@ main(!IO) :-
 
 main_loop(Database, !IO) :-
     io.write_string("?- ", !IO),
-    mercury_term_parser.read_term(ReadTerm, !IO),
+    read_term(ReadTerm, !IO),
     (
         ReadTerm = eof
     ;
@@ -124,7 +123,7 @@ consult_file(File, Database0, Database, !IO) :-
     database::in, database::out, io::di, io::uo) is det.
 
 consult_until_eof(Stream, !Database, !IO) :-
-    mercury_term_parser.read_term(Stream, ReadTerm, !IO),
+    read_term(Stream, ReadTerm, !IO),
     (
         ReadTerm = eof
     ;

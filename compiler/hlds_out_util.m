@@ -25,10 +25,12 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module io.
@@ -62,24 +64,64 @@
 
 %---------------------------------------------------------------------------%
 
-    % pred_id_to_string returns a string such as
-    %       predicate `foo.bar/3'
-    % or    function `foo.myfoo/5'
-    % except in some special cases where the predicate name is mangled
-    % and we can print a more meaningful identification of the predicate
-    % in question.
+    % pred_id_to_user_string returns a string that is suitable to identify
+    % a predicate to a user
     %
-:- func pred_id_to_string(module_info, pred_id) = string.
+    % - in progress messages,
+    % - in error messages, and
+    % - as the expansion of $pred.
+    %
+    % For user written predicates, the result will look like this:
+    %
+    %       predicate `foo.bar'/3
+    %       function `foo.myfoo'/5
+    %
+    % For predicates created by the compiler, the result be a description
+    % such as
+    %
+    %       unification predicate for `map'/2
+    %
+    % For predicates that are the transformed version of another predicate,
+    % the result will identify the original predicate at the start of the
+    % transformation chain (which may contain more than one transformation)
+    % and will say that a transformation happened, but will not say
+    % how many transformations happened, or what the transformations were,
+    % because
+    %
+    % - such details are not needed in progress messages, and
+    % - they *should* not be needed for error messages, since we should
+    %   not be reporting any errors for transformed predicates at all.
+    %
+    % The versions that also specify a proc_id do the same job, only
+    % they also append the procedure's mode number.
+    %
+:- func pred_id_to_user_string(module_info, pred_id) = string.
+:- func pred_proc_id_to_user_string(module_info, pred_proc_id) = string.
+:- func pred_proc_id_pair_to_user_string(module_info, pred_id, proc_id)
+    = string.
 
-    % Do the same job as pred_id_to_string, but don't look up the pred_info
-    % in the module_info; get it directly from the caller.
+    % pred_id_to_dev_string returns a string that is suitable to identify
+    % a predicate to a developer
     %
-:- func pred_info_id_to_string(pred_info) = string.
-
-    % Do the same job as pred_id_to_string, only for a procedure.
+    % - in HLDS dumps (the parts other than the full pred provenance),
+    % - in compiler output intended to debug the compiler itself, and
+    % - in progress messages intended to help make sense of such output.
     %
-:- func pred_proc_id_to_string(module_info, pred_proc_id) = string.
-:- func pred_proc_id_pair_to_string(module_info, pred_id, proc_id) = string.
+    % The output will differ from pred_id_to_user_string in two main ways:
+    %
+    % - it will contain no quotes, because the unbalanced `' quote style
+    %   we usually use screws up syntax highlighting in HLDS dumps, and
+    %
+    % - it will contain a description of each transformation applied to
+    %   the base predicate.
+    %
+    % The versions that also specify a proc_id do the same job, only
+    % they also append the procedure's mode number.
+    %
+:- func pred_id_to_dev_string(module_info, pred_id) = string.
+:- func pred_proc_id_to_dev_string(module_info, pred_proc_id) = string.
+:- func pred_proc_id_pair_to_dev_string(module_info, pred_id, proc_id)
+    = string.
 
 %---------------------------------------------------------------------------%
 
@@ -89,7 +131,7 @@
     % based on the unify_context and prog_context.
     %
 :- pred unify_context_to_pieces(unify_context::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
     % unify_context_first_to_pieces is the same as above, except that
     % it also takes and returns a flag which specifies whether this is the
@@ -104,7 +146,7 @@
     %
 :- pred unify_context_first_to_pieces(is_first::in, is_first::out,
     unify_context::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
 %---------------------------------------------------------------------------%
 
@@ -115,6 +157,8 @@
     %
 :- pred maybe_output_context_comment(io.text_output_stream::in, int::in,
     string::in, term.context::in, io::di, io::uo) is det.
+
+:- func context_to_brief_string(term.context) = string.
 
 %---------------------------------------------------------------------------%
 
@@ -136,32 +180,32 @@
     % Return a printable representation of a functor and its arguments.
     % The prog_varset gives the names of any variables.
     %
-:- func functor_to_string(prog_varset, var_name_print, const, list(prog_var))
-    = string.
+:- func functor_to_string(var_name_source, var_name_print, const,
+    list(prog_var)) = string.
 
-:- func functor_to_string_maybe_needs_quotes(prog_varset, var_name_print,
+:- func functor_to_string_maybe_needs_quotes(var_name_source, var_name_print,
     needs_quotes, const, list(prog_var)) = string.
 
-:- func qualified_functor_to_string(prog_varset, var_name_print,
+:- func qualified_functor_to_string(var_name_source, var_name_print,
     module_name, const, list(prog_var)) = string.
 
-:- func qualified_functor_with_term_args_to_string(prog_varset, var_name_print,
-    module_name, const, list(prog_term)) = string.
+:- func qualified_functor_with_term_args_to_string(var_name_source,
+    var_name_print, module_name, const, list(prog_term)) = string.
 
     % Return a printable representation of a cons_id and arguments.
     % The prog_varset gives the names of any variables, while the module_info
     % allows the interpretation of cons_ids that are shrouded references
     % to procedures.
     %
-:- func functor_cons_id_to_string(module_info, prog_varset, var_name_print,
+:- func functor_cons_id_to_string(module_info, var_name_source, var_name_print,
     cons_id, list(prog_var)) = string.
 
 :- type maybe_qualify_cons_id
     --->    qualify_cons_id
     ;       do_not_qualify_cons_id.
 
-:- func cons_id_and_vars_or_arity_to_string(prog_varset,
-    maybe_qualify_cons_id, cons_id, maybe(list(prog_var))) = string.
+:- func cons_id_and_vars_or_arity_to_string(var_table, maybe_qualify_cons_id,
+    cons_id, maybe(list(prog_var))) = string.
 
 %---------------------------------------------------------------------------%
 
@@ -172,13 +216,12 @@
 %---------------------------------------------------------------------------%
 
     % Return a string representing a list of variables and their
-    % corresponding modes (e.g. for a lambda expressions). The varsets
-    % give the context.
+    % corresponding modes (e.g. for a lambda expressions).
     %
-:- func var_modes_to_string(output_lang, prog_varset, inst_varset,
+:- func var_modes_to_string(output_lang, var_name_source, inst_varset,
     var_name_print, assoc_list(prog_var, mer_mode)) = string.
 
-:- func var_mode_to_string(output_lang, prog_varset, inst_varset,
+:- func var_mode_to_string(output_lang, var_name_source, inst_varset,
     var_name_print, pair(prog_var, mer_mode)) = string.
 
 %---------------------------------------------------------------------------%
@@ -198,34 +241,25 @@
     io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
-
-    % Write out the given indent level (two spaces per indent).
-    %
-:- pred write_indent(io.text_output_stream::in, int::in, io::di, io::uo) is det.
-
-    % Return the indent for the given level as a string.
-    %
-:- func indent_string(int) = string.
-
-%---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
 :- implementation.
 
-:- import_module hlds.hlds_rtti.
-:- import_module hlds.special_pred.
+:- import_module hlds.pred_name.
 :- import_module libs.options.
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.parse_tree_out_inst.
-:- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_item.  % undesirable dependency
+:- import_module parse_tree.prog_out.
 
 :- import_module int.
 :- import_module map.
 :- import_module string.
+:- import_module term_context.
 :- import_module term_io.
+:- import_module term_subst.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -242,111 +276,42 @@ init_hlds_out_info(Globals, Lang) = Info :-
 % Write out the ids of predicates and procedures.
 %
 
-pred_id_to_string(ModuleInfo, PredId) = Str :-
-    module_info_get_preds(ModuleInfo, PredTable),
-    ( if map.search(PredTable, PredId, PredInfo) then
-        Str = pred_info_id_to_string(PredInfo)
+pred_id_to_user_string(ModuleInfo, PredId) = Str :-
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+    ( if map.search(PredIdTable, PredId, PredInfo) then
+        pred_info_get_origin(PredInfo, PredOrigin),
+        Str = pred_origin_to_user_string(PredOrigin)
     else
         % The predicate has been deleted, so we print what we can.
         pred_id_to_int(PredId, PredIdInt),
         Str = "deleted predicate " ++ int_to_string(PredIdInt)
     ).
 
-pred_info_id_to_string(PredInfo) = Str :-
-    % XXX CLEANUP Either this function should replace write_origin in
-    % hlds_out_pred.m, or vice versa.
-    Module = pred_info_module(PredInfo),
-    Name = pred_info_name(PredInfo),
-    Arity = pred_info_orig_arity(PredInfo),
-    PredOrFunc = pred_info_is_pred_or_func(PredInfo),
-    pred_info_get_origin(PredInfo, Origin),
-    (
-        Origin = origin_special_pred(SpecialId, TypeCtor),
-        special_pred_description(SpecialId, Descr),
-        TypeCtor = type_ctor(_TypeSymName, TypeArity),
-        ( if TypeArity = 0 then
-            ForStr = " for type "
-        else
-            ForStr = " for type constructor "
-        ),
-        Str = Descr ++ ForStr ++ type_name_to_string(TypeCtor)
-    ;
-        Origin = origin_instance_method(MethodName, MethodConstraints),
-        MethodConstraints = instance_method_constraints(ClassId,
-            InstanceTypes, _, _),
-        MethodStr = pf_sym_name_orig_arity_to_string(PredOrFunc, MethodName,
-            Arity),
-        ClassId = class_id(ClassName, _),
-        ClassStr = sym_name_to_string(ClassName),
-        TypeStrs = mercury_type_list_to_string(varset.init, InstanceTypes),
-        string.format("instance method %s for `%s(%s)'",
-            [s(MethodStr), s(ClassStr), s(TypeStrs)], Str)
-    ;
-        Origin = origin_class_method(ClassId, MethodId),
-        ClassId = class_id(ClassSymName, ClassArity),
-        MethodId = pf_sym_name_arity(MethodPredOrFunc,
-            MethodSymName, MethodArity),
-        string.format("class method %s %s/%d for %s/%d",
-            [s(pred_or_func_to_string(MethodPredOrFunc)),
-            s(sym_name_to_string(MethodSymName)), i(MethodArity),
-            s(sym_name_to_string(ClassSymName)), i(ClassArity)], Str)
-    ;
-        Origin = origin_assertion(FileName, LineNumber),
-        ( if pred_info_is_promise(PredInfo, PromiseType) then
-            Str = string.format("`%s' declaration (%s:%d)",
-                [s(prog_out.promise_to_string(PromiseType)),
-                s(FileName), i(LineNumber)])
-        else
-            SymName = qualified(Module, Name),
-            Str = pf_sym_name_orig_arity_to_string(PredOrFunc, SymName, Arity)
-        )
-    ;
-        Origin = origin_tabling(BasePredId, TablingAuxPredKind),
-        BasePredIdStr = pf_sym_name_orig_arity_to_string(BasePredId),
-        (
-            TablingAuxPredKind = tabling_aux_pred_stats,
-            Str = "table statistics predicate for " ++ BasePredIdStr
-        ;
-            TablingAuxPredKind = tabling_aux_pred_reset,
-            Str = "table reset predicate for " ++ BasePredIdStr
-        )
-    ;
-        Origin = origin_solver_type(TypeCtorSymName, TypeCtorArity,
-            SolverAuxPredKind),
-        TypeStr = sym_name_arity_to_string(
-            sym_name_arity(TypeCtorSymName, TypeCtorArity)),
-        (
-            SolverAuxPredKind = solver_type_to_ground_pred,
-            Str = "to ground representation predicate for " ++ TypeStr
-        ;
-            SolverAuxPredKind = solver_type_to_any_pred,
-            Str = "to any representation predicate for " ++ TypeStr
-        ;
-            SolverAuxPredKind = solver_type_from_ground_pred,
-            Str = "from ground representation predicate for " ++ TypeStr
-        ;
-            SolverAuxPredKind = solver_type_from_any_pred,
-            Str = "from any representation predicate for " ++ TypeStr
-        )
-    ;
-        ( Origin = origin_transformed(_, _, _)
-        ; Origin = origin_created(_)
-        ; Origin = origin_mutable(_, _, _)
-        ; Origin = origin_lambda(_, _, _)
-        ; Origin = origin_initialise
-        ; Origin = origin_finalise
-        ; Origin = origin_user(_)
-        ),
-        SymName = qualified(Module, Name),
-        Str = pf_sym_name_orig_arity_to_string(PredOrFunc, SymName, Arity)
+pred_proc_id_to_user_string(ModuleInfo, proc(PredId, ProcId)) =
+    pred_proc_id_pair_to_user_string(ModuleInfo, PredId, ProcId).
+
+pred_proc_id_pair_to_user_string(ModuleInfo, PredId, ProcId) = Str :-
+    proc_id_to_int(ProcId, ModeNum),
+    Str = pred_id_to_user_string(ModuleInfo, PredId)
+        ++ " mode " ++ int_to_string(ModeNum).
+
+pred_id_to_dev_string(ModuleInfo, PredId) = Str :-
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+    ( if map.search(PredIdTable, PredId, PredInfo) then
+        pred_info_get_origin(PredInfo, PredOrigin),
+        Str = pred_origin_to_user_string(PredOrigin)
+    else
+        % The predicate has been deleted, so we print what we can.
+        pred_id_to_int(PredId, PredIdInt),
+        Str = "deleted predicate " ++ int_to_string(PredIdInt)
     ).
 
-pred_proc_id_to_string(ModuleInfo, proc(PredId, ProcId)) =
-    pred_proc_id_pair_to_string(ModuleInfo, PredId, ProcId).
+pred_proc_id_to_dev_string(ModuleInfo, proc(PredId, ProcId)) =
+    pred_proc_id_pair_to_dev_string(ModuleInfo, PredId, ProcId).
 
-pred_proc_id_pair_to_string(ModuleInfo, PredId, ProcId) = Str :-
+pred_proc_id_pair_to_dev_string(ModuleInfo, PredId, ProcId) = Str :-
     proc_id_to_int(ProcId, ModeNum),
-    Str = pred_id_to_string(ModuleInfo, PredId)
+    Str = pred_id_to_dev_string(ModuleInfo, PredId)
         ++ " mode " ++ int_to_string(ModeNum).
 
 %---------------------------------------------------------------------------%
@@ -365,7 +330,7 @@ unify_context_first_to_pieces(!First, UnifyContext, !Pieces) :-
 
 :- pred unify_main_context_to_pieces(is_first::in, is_first::out,
     unify_main_context::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
 unify_main_context_to_pieces(!First, MainContext, !Pieces) :-
     (
@@ -406,7 +371,7 @@ unify_main_context_to_pieces(!First, MainContext, !Pieces) :-
 
 :- pred unify_sub_contexts_to_pieces(is_first::in, is_first::out,
     unify_sub_contexts::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
 unify_sub_contexts_to_pieces(!First, [], !Pieces).
 unify_sub_contexts_to_pieces(!First, [SubContext | SubContexts], !Pieces) :-
@@ -448,7 +413,7 @@ contexts_describe_list_element([SubContext | SubContexts],
     ).
 
 :- pred in_argument_to_pieces(is_first::in, unify_sub_context::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
 in_argument_to_pieces(First, SubContext, !Pieces) :-
     start_in_message_to_pieces(First, !Pieces),
@@ -461,7 +426,7 @@ in_argument_to_pieces(First, SubContext, !Pieces) :-
         words("of functor"), quote(ConsIdStr), suffix(":"), nl].
 
 :- pred in_element_to_pieces(is_first::in, int::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
 in_element_to_pieces(First, ElementNum, !Pieces) :-
     start_in_message_to_pieces(First, !Pieces),
@@ -470,7 +435,7 @@ in_element_to_pieces(First, ElementNum, !Pieces) :-
         prefix("#"), fixed(ElementNumStr), suffix(":"), nl].
 
 :- pred start_in_message_to_pieces(is_first::in,
-    list(format_component)::in, list(format_component)::out) is det.
+    list(format_piece)::in, list(format_piece)::out) is det.
 
 start_in_message_to_pieces(First, !Pieces) :-
     (
@@ -486,8 +451,8 @@ start_in_message_to_pieces(First, !Pieces) :-
 %---------------------------------------------------------------------------%
 
 maybe_output_context_comment(Stream, Indent, Suffix, Context, !IO) :-
-    term.context_file(Context, FileName),
-    term.context_line(Context, LineNumber),
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
     ( if FileName = "" then
         true
     else
@@ -496,13 +461,22 @@ maybe_output_context_comment(Stream, Indent, Suffix, Context, !IO) :-
             [s(FileName), i(LineNumber), s(Suffix)], !IO)
     ).
 
+context_to_brief_string(Context) = Str :-
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
+    ( if FileName = "" then
+        Str = "dummy context"
+    else
+        Str = string.format("<%s>:%d", [s(FileName), i(LineNumber)])
+    ).
+
 %---------------------------------------------------------------------------%
 %
 % Write out ids of calls.
 %
 
 call_id_to_string(plain_call_id(PredCallId)) =
-    pf_sym_name_orig_arity_to_string(PredCallId).
+    pf_sym_name_pred_form_arity_to_string(PredCallId).
 call_id_to_string(generic_call_id(GenericCallId)) =
     generic_call_id_to_string(GenericCallId).
 
@@ -510,7 +484,7 @@ generic_call_id_to_string(gcid_higher_order(Purity, PredOrFunc, _)) =
     purity_prefix_to_string(Purity) ++ "higher-order "
     ++ prog_out.pred_or_func_to_full_str(PredOrFunc) ++ " call".
 generic_call_id_to_string(gcid_class_method(_ClassId, MethodId)) =
-    pf_sym_name_orig_arity_to_string(MethodId).
+    pf_sym_name_pred_form_arity_to_string(MethodId).
 generic_call_id_to_string(gcid_event_call(EventName)) =
     "event " ++ EventName.
 generic_call_id_to_string(gcid_cast(CastType)) =
@@ -563,7 +537,9 @@ call_arg_id_to_string(CallId, ArgNum, PredMarkers) = Str :-
 
 arg_number_to_string(CallId, ArgNum) = Str :-
     (
-        CallId = plain_call_id(pf_sym_name_arity(PredOrFunc, _, Arity)),
+        CallId = plain_call_id(PFSymNameArity),
+        PFSymNameArity = pf_sym_name_arity(PredOrFunc, _, PredFormArity),
+        PredFormArity = pred_form_arity(Arity),
         ( if
             PredOrFunc = pf_function,
             Arity = ArgNum
@@ -575,10 +551,12 @@ arg_number_to_string(CallId, ArgNum) = Str :-
     ;
         CallId = generic_call_id(GenericCallId),
         (
-            GenericCallId = gcid_higher_order(_Purity, PredOrFunc, Arity),
+            GenericCallId = gcid_higher_order(_Purity, PredOrFunc,
+                PredFormArity),
+            PredFormArity = pred_form_arity(PredFormArityInt),
             ( if
                 PredOrFunc = pf_function,
-                ArgNum = Arity
+                ArgNum = PredFormArityInt
             then
                 Str = "the return value"
             else
@@ -618,57 +596,55 @@ arg_number_to_string(CallId, ArgNum) = Str :-
 % Write out functors.
 %
 
-functor_to_string(VarSet, VarNamePrint, Functor, ArgVars)  =
-    functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint,
+functor_to_string(VarNameSrc, VarNamePrint, Functor, ArgVars)  =
+    functor_to_string_maybe_needs_quotes(VarNameSrc, VarNamePrint,
         not_next_to_graphic_token, Functor, ArgVars).
 
-functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint, NextToGraphicToken,
-        Functor, ArgVars) = Str :-
-    term.context_init(Context),
-    term.var_list_to_term_list(ArgVars, ArgTerms),
-    Term = term.functor(Functor, ArgTerms, Context),
-    Str = mercury_term_nq_to_string(VarSet, VarNamePrint, NextToGraphicToken,
-        Term).
+functor_to_string_maybe_needs_quotes(VarNameSrc, VarNamePrint,
+        NextToGraphicToken, Functor, ArgVars) = Str :-
+    term_subst.var_list_to_term_list(ArgVars, ArgTerms),
+    Term = term.functor(Functor, ArgTerms, dummy_context),
+    Str = mercury_term_nq_to_string_src(VarNameSrc, VarNamePrint,
+        NextToGraphicToken, Term).
 
-qualified_functor_to_string(VarSet, VarNamePrint, ModuleName, Functor,
+qualified_functor_to_string(VarNameSrc, VarNamePrint, ModuleName, Functor,
         ArgVars) = Str :-
     ModuleNameStr = mercury_bracketed_sym_name_to_string(ModuleName),
-    FunctorStr = functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint,
+    FunctorStr = functor_to_string_maybe_needs_quotes(VarNameSrc, VarNamePrint,
         next_to_graphic_token, Functor, ArgVars),
     Str = ModuleNameStr ++ "." ++ FunctorStr.
 
-qualified_functor_with_term_args_to_string(VarSet, VarNamePrint,
+qualified_functor_with_term_args_to_string(VarNameSrc, VarNamePrint,
         ModuleName, Functor, ArgTerms) = Str :-
     ModuleNameStr = mercury_bracketed_sym_name_to_string(ModuleName),
-    term.context_init(Context),
-    Term = term.functor(Functor, ArgTerms, Context),
-    TermStr = mercury_term_nq_to_string(VarSet, VarNamePrint,
+    Term = term.functor(Functor, ArgTerms, dummy_context),
+    TermStr = mercury_term_nq_to_string_src(VarNameSrc, VarNamePrint,
         next_to_graphic_token, Term),
     Str = ModuleNameStr ++ "." ++ TermStr.
 
-functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint, ConsId, ArgVars)
-        = Str :-
+functor_cons_id_to_string(ModuleInfo, VarNameSrc, VarNamePrint,
+        ConsId, ArgVars) = Str :-
     (
         ConsId = cons(SymName, _, _),
         (
             SymName = qualified(Module, Name),
-            Str = qualified_functor_to_string(VarSet, VarNamePrint,
+            Str = qualified_functor_to_string(VarNameSrc, VarNamePrint,
                 Module, term.atom(Name), ArgVars)
         ;
             SymName = unqualified(Name),
-            Str = functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint,
-                next_to_graphic_token, term.atom(Name), ArgVars)
+            Str = functor_to_string_maybe_needs_quotes(VarNameSrc,
+                VarNamePrint, next_to_graphic_token, term.atom(Name), ArgVars)
         )
     ;
         ConsId = tuple_cons(_),
-        Str = functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint,
+        Str = functor_to_string_maybe_needs_quotes(VarNameSrc, VarNamePrint,
             next_to_graphic_token, term.atom("{}"), ArgVars)
     ;
         ConsId = some_int_const(IntConst),
         Str = int_const_to_string_with_suffix(IntConst)
     ;
         ConsId = float_const(Float),
-        Str = functor_to_string(VarSet, VarNamePrint,
+        Str = functor_to_string(VarNameSrc, VarNamePrint,
             term.float(Float), ArgVars)
     ;
         ConsId = char_const(Char),
@@ -681,7 +657,7 @@ functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint, ConsId, ArgVars)
         Str = "(" ++ term_io.quoted_char(Char) ++ ")"
     ;
         ConsId = string_const(String),
-        Str = functor_to_string(VarSet, VarNamePrint,
+        Str = functor_to_string(VarNameSrc, VarNamePrint,
             term.string(String), ArgVars)
     ;
         ConsId = impl_defined_const(IDCKind),
@@ -695,7 +671,7 @@ functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint, ConsId, ArgVars)
         PredSymName = qualified(PredModule, PredName),
         PredConsId = cons(PredSymName, list.length(ArgVars),
             cons_id_dummy_type_ctor),
-        Str = functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint,
+        Str = functor_cons_id_to_string(ModuleInfo, VarNameSrc, VarNamePrint,
             PredConsId, ArgVars)
     ;
         ConsId = type_ctor_info_const(Module, Name, Arity),
@@ -711,12 +687,12 @@ functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint, ConsId, ArgVars)
             ++ ", " ++ string.int_to_string(Arity) ++ "), " ++ Instance ++ ")"
     ;
         ConsId = type_info_cell_constructor(_),
-        Str = functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint,
+        Str = functor_to_string_maybe_needs_quotes(VarNameSrc, VarNamePrint,
             next_to_graphic_token,
             term.atom("type_info_cell_constructor"), ArgVars)
     ;
         ConsId = typeclass_info_cell_constructor,
-        Str = functor_to_string_maybe_needs_quotes(VarSet, VarNamePrint,
+        Str = functor_to_string_maybe_needs_quotes(VarNameSrc, VarNamePrint,
             next_to_graphic_token,
             term.atom("typeclass_info_cell_constructor"), ArgVars)
     ;
@@ -727,8 +703,8 @@ functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint, ConsId, ArgVars)
         Str = "typeclass_info_const(" ++ int_to_string(TCIConstNum) ++ ")"
     ;
         ConsId = ground_term_const(ConstNum, SubConsId),
-        SubStr = functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint,
-            SubConsId, []),
+        SubStr = functor_cons_id_to_string(ModuleInfo, VarNameSrc,
+            VarNamePrint, SubConsId, []),
         Str = "ground_term_const(" ++ int_to_string(ConstNum) ++ ", " ++
             SubStr ++ ")"
     ;
@@ -736,25 +712,25 @@ functor_cons_id_to_string(ModuleInfo, VarSet, VarNamePrint, ConsId, ArgVars)
         proc(PredId, ProcId) = unshroud_pred_proc_id(ShroudedPredProcId),
         proc_id_to_int(ProcId, ProcIdInt),
         Str = "tabling_info_const("
-            ++ pred_id_to_string(ModuleInfo, PredId)
+            ++ pred_id_to_dev_string(ModuleInfo, PredId)
             ++ ", " ++ int_to_string(ProcIdInt) ++ ")"
     ;
         ConsId = table_io_entry_desc(ShroudedPredProcId),
         proc(PredId, ProcId) = unshroud_pred_proc_id(ShroudedPredProcId),
         proc_id_to_int(ProcId, ProcIdInt),
         Str = "table_io_entry_desc("
-            ++ pred_id_to_string(ModuleInfo, PredId)
+            ++ pred_id_to_dev_string(ModuleInfo, PredId)
             ++ " (mode " ++ int_to_string(ProcIdInt) ++ "))"
     ;
         ConsId = deep_profiling_proc_layout(ShroudedPredProcId),
         proc(PredId, ProcId) = unshroud_pred_proc_id(ShroudedPredProcId),
         proc_id_to_int(ProcId, ProcIdInt),
         Str = "deep_profiling_proc_layout("
-            ++ pred_id_to_string(ModuleInfo, PredId)
+            ++ pred_id_to_dev_string(ModuleInfo, PredId)
             ++ " (mode " ++ int_to_string(ProcIdInt) ++ "))"
     ).
 
-cons_id_and_vars_or_arity_to_string(VarSet, Qual, ConsId, MaybeArgVars)
+cons_id_and_vars_or_arity_to_string(VarTable, Qual, ConsId, MaybeArgVars)
         = String :-
     (
         ConsId = cons(SymName0, Arity, _TypeCtor),
@@ -791,7 +767,7 @@ cons_id_and_vars_or_arity_to_string(VarSet, Qual, ConsId, MaybeArgVars)
                 String = SymNameString ++ "/" ++ string.int_to_string(Arity)
             ;
                 ArgVars = [_ | _],
-                ArgStr = mercury_vars_to_name_only(VarSet, ArgVars),
+                ArgStr = mercury_vars_to_name_only(VarTable, ArgVars),
                 String = SymNameString ++ "(" ++ ArgStr ++ ")"
             )
         )
@@ -807,7 +783,7 @@ cons_id_and_vars_or_arity_to_string(VarSet, Qual, ConsId, MaybeArgVars)
                 String = "{}/" ++ string.int_to_string(Arity)
             ;
                 ArgVars = [_ | _],
-                ArgStr = mercury_vars_to_name_only(VarSet, ArgVars),
+                ArgStr = mercury_vars_to_name_only(VarTable, ArgVars),
                 String = "{" ++ ArgStr ++ "}"
             )
         )
@@ -905,9 +881,8 @@ write_constraint_proof(Indent, VarNamePrint, TVarSet, Constraint - Proof,
     mercury_output_constraint(TVarSet, VarNamePrint, Constraint, Stream, !IO),
     io.write_string(Stream, ": ", !IO),
     (
-        Proof = apply_instance(Num),
-        io.write_string(Stream, "apply instance decl #", !IO),
-        io.write_int(Stream, Num, !IO)
+        Proof = apply_instance(instance_id(InstanceNum)),
+        io.format(Stream, "apply instance decl #%d", [i(InstanceNum)], !IO)
     ;
         Proof = superclass(Super),
         io.write_string(Stream, "super class of ", !IO),
@@ -919,14 +894,16 @@ write_constraint_proof(Indent, VarNamePrint, TVarSet, Constraint - Proof,
 % Write out modes.
 %
 
-var_modes_to_string(Lang, VarSet, InstVarSet, VarNamePrint, VarModes) = Str :-
-    Strs = list.map(var_mode_to_string(Lang, VarSet, InstVarSet, VarNamePrint),
+var_modes_to_string(Lang, VarNameSrc, InstVarSet, VarNamePrint, VarModes)
+        = Str :-
+    Strs = list.map(
+        var_mode_to_string(Lang, VarNameSrc, InstVarSet, VarNamePrint),
         VarModes),
     Str = string.join_list(", ", Strs).
 
-var_mode_to_string(Lang, VarSet, InstVarSet, VarNamePrint, Var - Mode) =
-    mercury_var_to_string(VarSet, VarNamePrint, Var)
-        ++ "::" ++ mercury_mode_to_string(Lang, InstVarSet, Mode).
+var_mode_to_string(Lang, VarNameSrc, InstVarSet, VarNamePrint, Var - Mode) =
+    mercury_var_to_string_src(VarNameSrc, VarNamePrint, Var) ++ "::" ++
+        mercury_mode_to_string(Lang, InstVarSet, Mode).
 
 %---------------------------------------------------------------------------%
 %
@@ -1037,26 +1014,6 @@ write_intlist_lag(Stream, H, T, !IO) :-
         write_intlist_lag(Stream, TH, TT, !IO)
     ;
         T = []
-    ).
-
-%---------------------------------------------------------------------------%
-%
-% Write out indentation.
-%
-
-write_indent(Stream, Indent, !IO) :-
-    ( if Indent = 0 then
-        true
-    else
-        io.write_string(Stream, "  ", !IO),
-        write_indent(Stream, Indent - 1, !IO)
-    ).
-
-indent_string(Indent) = Str :-
-    ( if Indent = 0 then
-        Str = ""
-    else
-        Str = "  " ++ indent_string(Indent - 1)
     ).
 
 %---------------------------------------------------------------------------%

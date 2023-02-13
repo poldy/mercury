@@ -11,12 +11,17 @@
 %
 % A module to invoke interactive queries using dynamic linking.
 %
-% This module reads in a query, writes out Mercury code for it to the file
-% `mdb_query.m', invokes the Mercury compiler mmc to compile that file to
-% `libmdb_query.{so,dylib}', dynamically loads in the object code for the
-% module `mdb_query' from the file `libmdb_query.{so,dylib}', looks up the
-% address of the procedure query/2 in that module, calls that procedure, and
-% then cleans up the generated files.
+% This module
+%
+% - reads in a query,
+% - writes out Mercury code for it to the file `mdb_query.m',
+% - invokes the Mercury compiler mmc to compile that file to
+%   `libmdb_query.{so,dylib}',
+% - dynamically loads in the object code for the module `mdb_query'
+%   from the file `libmdb_query.{so,dylib}',
+% - looks up the address of the procedure query/2 in that module,
+% - calls that procedure, and then
+% - cleans up the generated files.
 %
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -69,12 +74,16 @@
 
 :- import_module bool.
 :- import_module exception.
+:- import_module io.call_system.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module map.
 :- import_module maybe.
 :- import_module mercury_term_parser.
 :- import_module string.
 :- import_module term.
 :- import_module term_io.
+:- import_module term_vars.
 :- import_module type_desc.
 :- import_module varset.
 
@@ -146,8 +155,8 @@ query_3(Env, ReadTerm, !IO) :-
             io.nl(Env ^ qe_outstream, !IO)
         ;
             Cmd = qc_options(NewOptions),
-            print(Env ^ qe_outstream, "Compilation options: ", !IO),
-            print(Env ^ qe_outstream, NewOptions, !IO),
+            io.print(Env ^ qe_outstream, "Compilation options: ", !IO),
+            io.print(Env ^ qe_outstream, NewOptions, !IO),
             io.nl(Env ^ qe_outstream, !IO),
             Env1 = Env ^ qe_options := NewOptions,
             query_2(Env1, !IO)
@@ -194,7 +203,7 @@ query_external(QueryType, Imports, Options, Names, Values, SocketIn, SocketOut,
 :- pred query_external_2(query_env::in, io::di, io::uo) is cc_multi.
 
 query_external_2(Env, !IO) :-
-    term_io.read_term(Env ^ qe_instream, Result, !IO),
+    mercury_term_parser.read_term(Env ^ qe_instream, Result, !IO),
     (
         Result = eof,
         query_send_term_to_socket(Env ^ qe_outstream, iq_eof, !IO)
@@ -271,20 +280,21 @@ parse_query_command(Term, Cmd) :-
 :- pred term_to_list(term::in, list(string)::out) is semidet.
 
 term_to_list(term.functor(term.atom("[]"), [], _), []).
-term_to_list(term.functor(term.atom("[|]"),
-        [term.functor(term.atom(Module), [], _C1), Rest], _C2),
-        [Module | Modules]) :-
-    term_to_list(Rest, Modules).
+term_to_list(term.functor(term.atom("[|]"), [HeadTerm, TailTerms], _),
+        [HeadModule | TailModules]) :-
+    HeadTerm = term.functor(term.atom(HeadModule), [], _),
+    term_to_list(TailTerms, TailModules).
 
 :- pred run_query(query_env::in, term::in, varset::in, io::di, io::uo)
     is cc_multi.
 
 run_query(Env, Goal, Varset, !IO) :-
     SourceFile = query_module_name ++ ".m",
-    io.get_environment_var("MERCURY_OPTIONS", MaybeMercuryOptions, !IO),
+    io.environment.get_environment_var("MERCURY_OPTIONS",
+        MaybeMercuryOptions, !IO),
     (
         MaybeMercuryOptions = yes(MercuryOptions),
-        io.set_environment_var("MERCURY_OPTIONS", "", !IO),
+        io.environment.set_environment_var("MERCURY_OPTIONS", "", !IO),
         make_program(Env, Goal, Varset, Program),
         % XXX Shouldn't our caller give us this information?
         io.get_line_number(Env ^ qe_instream, LineNumberForDirective, !IO),
@@ -298,7 +308,8 @@ run_query(Env, Goal, Varset, !IO) :-
             Succeeded = no
         ),
         cleanup_query(Env ^ qe_options, !IO),
-        io.set_environment_var("MERCURY_OPTIONS", MercuryOptions, !IO)
+        io.environment.set_environment_var("MERCURY_OPTIONS",
+            MercuryOptions, !IO)
     ;
         MaybeMercuryOptions = no,
         io.write_string(Env ^ qe_outstream,
@@ -374,7 +385,7 @@ run_query(Env, Goal, Varset, !IO) :-
 
 make_program(Env, Goal, Varset, Program) :-
     QueryType = Env ^ qe_query_type,
-    term.vars(Goal, Vars0),
+    term_vars.vars_in_term(Goal, Vars0),
     list.remove_dups(Vars0, Vars1),
     list.filter_map(varset.search_name(Varset), Vars1, Vars),
     list.filter(map.contains(Env ^ qe_bindings), Vars, Inputs, Outputs0),
@@ -674,7 +685,7 @@ cleanup_query(_Options, !IO) :-
 :- pred cleanup_file(string::in, string::in, io::di, io::uo) is det.
 
 cleanup_file(Prefix, Suffix, !IO) :-
-    io.remove_file(Prefix ++ query_module_name ++ Suffix, _, !IO).
+    io.file.remove_file(Prefix ++ query_module_name ++ Suffix, _, !IO).
 
     % `grade_option' returns MR_GRADE_OPT, which is defined in
     % runtime/mercury_grade.h. This is a string containing the grade
@@ -714,7 +725,7 @@ invoke_system_command(OutputStream, Command, Succeeded, !IO) :-
     ;
         Verbose = no
     ),
-    io.call_system(Command, Result, !IO),
+    io.call_system.call_system(Command, Result, !IO),
     (
         Result = ok(Status),
         ( if Status = 0 then

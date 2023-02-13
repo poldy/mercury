@@ -95,15 +95,13 @@
 :- implementation.
 
 :- import_module hlds.arg_info.
-:- import_module hlds.vartypes.
 
 find_input_output_args(ModuleInfo, CalleeProcInfo, Inputs, Outputs) :-
     proc_info_get_headvars(CalleeProcInfo, ArgVars),
-    proc_info_get_vartypes(CalleeProcInfo, VarTypes),
-    lookup_var_types(VarTypes, ArgVars, ArgTypes),
+    proc_info_get_var_table(CalleeProcInfo, VarTable),
     proc_info_get_argmodes(CalleeProcInfo, ArgModes),
-    arg_info.compute_in_and_out_vars(ModuleInfo, ArgVars, ArgModes, ArgTypes,
-        Inputs, Outputs).
+    arg_info.compute_in_and_out_vars(ModuleInfo, VarTable,
+        ArgVars, ArgModes, Inputs, Outputs).
 
 region_set_equal(RegionSet1, RegionSet2) :-
     set.equal(RegionSet1, RegionSet2).

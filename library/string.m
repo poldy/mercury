@@ -2,7 +2,7 @@
 % vim: ts=4 sw=4 et ft=mercury
 %---------------------------------------------------------------------------%
 % Copyright (C) 1993-2012 The University of Melbourne.
-% Copyright (C) 2013-2020 The Mercury team.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -121,65 +121,32 @@
 
     % Convert the string to a list of characters (code points).
     %
-    % In the forward mode:
-    % If strings use UTF-8 encoding, then each code unit in an ill-formed
-    % sequence is replaced by U+FFFD REPLACEMENT CHARACTER in the list.
-    % If strings use UTF-16 encoding then each unpaired surrogate code point
-    % is returned as a separate code point in the list.
-    %
-    % The reverse mode of the predicate throws an exception if the list
-    % contains a null character or code point that cannot be encoded in a
-    % string (namely, surrogate code points cannot be encoded in UTF-8
-    % strings).
-    %
-    % The reverse mode of to_char_list/2 is deprecated because the implied
-    % ability to round trip convert a string to a list then back to the same
-    % string does not hold in the presence of ill-formed code unit sequences.
-    %
-:- pragma obsolete_proc(to_char_list(uo, in), [from_char_list/2]).
-:- func to_char_list(string) = list(char).
-:- pred to_char_list(string, list(char)).
-:- mode to_char_list(in, out) is det.
-:- mode to_char_list(uo, in) is det.
-
-    % Convert the string to a list of characters (code points) in reverse
-    % order.
-    %
-    % In the forward mode:
     % If strings use UTF-8 encoding, then each code unit in an ill-formed
     % sequence is replaced by U+FFFD REPLACEMENT CHARACTER in the list.
     % If strings use UTF-16 encoding, then each unpaired surrogate code point
     % is returned as a separate code point in the list.
     %
-    % The reverse mode of the predicate throws an exception if the list
-    % contains a null character or code point that cannot be encoded in a
-    % string (namely, surrogate code points cannot be encoded in UTF-8
-    % strings).
+:- func to_char_list(string) = list(char).
+:- pred to_char_list(string::in, list(char)::out) is det.
+
+    % Convert the string to a list of characters (code points) in reverse
+    % order.
     %
-    % The reverse mode of to_rev_char_list/2 is deprecated because the implied
-    % ability to round trip convert a string to a list then back to the same
-    % string does not hold in the presence of ill-formed code unit sequences.
+    % If strings use UTF-8 encoding, then each code unit in an ill-formed
+    % sequence is replaced by U+FFFD REPLACEMENT CHARACTER in the list.
+    % If strings use UTF-16 encoding, then each unpaired surrogate code point
+    % is returned as a separate code point in the list.
     %
-:- pragma obsolete_proc(to_rev_char_list(uo, in), [from_rev_char_list/2]).
 :- func to_rev_char_list(string) = list(char).
-:- pred to_rev_char_list(string, list(char)).
-:- mode to_rev_char_list(in, out) is det.
-:- mode to_rev_char_list(uo, in) is det.
+:- pred to_rev_char_list(string::in, list(char)::out) is det.
 
     % Convert a list of characters (code points) to a string.
     % Throws an exception if the list contains a null character or code point
     % that cannot be encoded in a string (namely, surrogate code points cannot
     % be encoded in UTF-8 strings).
     %
-    % The reverse mode of from_char_list/2 is deprecated because the implied
-    % ability to round trip convert a string to a list then back to the same
-    % string does not hold in the presence of ill-formed code unit sequences.
-    %
-:- pragma obsolete_proc(from_char_list(out, in), [to_char_list/2]).
 :- func from_char_list(list(char)::in) = (string::uo) is det.
-:- pred from_char_list(list(char), string).
-:- mode from_char_list(in, uo) is det.
-:- mode from_char_list(out, in) is det.
+:- pred from_char_list(list(char)::in, string::uo) is det.
 
     % As above, but fail instead of throwing an exception if the list contains
     % a null character or code point that cannot be encoded in a string.
@@ -272,33 +239,33 @@
 
     % index(String, Index, Char):
     %
-    % If `Index' is the initial code unit offset of a well-formed code unit
-    % sequence in `String' then `Char' is the code point encoded by that
+    % If Index is the initial code unit offset of a well-formed code unit
+    % sequence in String then Char is the code point encoded by that
     % sequence.
     %
-    % Otherwise, if `Index' is in range, `Char' is either a U+FFFD REPLACEMENT
+    % Otherwise, if Index is in range, Char is either a U+FFFD REPLACEMENT
     % CHARACTER (when strings are UTF-8 encoded) or the unpaired surrogate
-    % code point at `Index' (when strings are UTF-16 encoded).
+    % code point at Index (when strings are UTF-16 encoded).
     %
-    % Fails if `Index' is out of range (negative, or greater than or equal to
-    % the length of `String').
+    % Fails if Index is out of range (negative, or greater than or equal to
+    % the length of String).
     %
 :- pred index(string::in, int::in, char::uo) is semidet.
 
     % det_index(String, Index, Char):
     %
-    % Like index/3 but throws an exception if `Index' is out of range
-    % (negative, or greater than or equal to the length of `String').
+    % Like index/3 but throws an exception if Index is out of range
+    % (negative, or greater than or equal to the length of String).
     %
 :- func det_index(string, int) = char.
 :- pred det_index(string::in, int::in, char::uo) is det.
 
     % unsafe_index(String, Index, Char):
     %
-    % Like index/3 but does not check that `Index' is in range.
+    % Like index/3 but does not check that Index is in range.
     %
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than or equal to the length of `String').
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than or equal to the length of String).
     % This version is constant time, whereas det_index
     % may be linear in the length of the string. Use with care!
     %
@@ -317,18 +284,18 @@
 
     % index_next(String, Index, NextIndex, Char):
     %
-    % If `Index' is the initial code unit offset of a well-formed code unit
-    % sequence in `String' then `Char' is the code point encoded by that
-    % sequence, and `NextIndex' is the offset immediately following that
+    % If Index is the initial code unit offset of a well-formed code unit
+    % sequence in String then Char is the code point encoded by that
+    % sequence, and NextIndex is the offset immediately following that
     % sequence.
     %
-    % Otherwise, if `Index' is in range, `Char' is either a U+FFFD REPLACEMENT
+    % Otherwise, if Index is in range, Char is either a U+FFFD REPLACEMENT
     % CHARACTER (when strings are UTF-8 encoded) or the unpaired surrogate
-    % code point at `Index' (when strings are UTF-16 encoded), and `NextIndex'
+    % code point at Index (when strings are UTF-16 encoded), and NextIndex
     % is Index + 1.
     %
-    % Fails if `Index' is out of range (negative, or greater than or equal to
-    % the length of `String').
+    % Fails if Index is out of range (negative, or greater than or equal to
+    % the length of String).
     %
 :- pred index_next(string::in, int::in, int::out, char::uo) is semidet.
 
@@ -350,38 +317,38 @@
 
     % unsafe_index_next(String, Index, NextIndex, Char):
     %
-    % Like index_next/4 but does not check that `Index' is in range.
-    % Fails if `Index' is equal to the length of `String'.
+    % Like index_next/4 but does not check that Index is in range.
+    % Fails if Index is equal to the length of String.
     %
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than the length of `String').
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than the length of String).
     %
 :- pred unsafe_index_next(string::in, int::in, int::out, char::uo) is semidet.
 
     % unsafe_index_next_repl(String, Index, NextIndex, Char, MaybeReplaced):
     %
-    % Like index_next_repl/5 but does not check that `Index' is in range.
-    % Fails if `Index' is equal to the length of `String'.
+    % Like index_next_repl/5 but does not check that Index is in range.
+    % Fails if Index is equal to the length of String.
     %
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than the length of `String').
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than the length of String).
     %
 :- pred unsafe_index_next_repl(string::in, int::in, int::out, char::uo,
     maybe_replaced::out) is semidet.
 
     % prev_index(String, Index, PrevIndex, Char):
     %
-    % If `Index - 1' is the final code unit offset of a well-formed sequence in
-    % `String' then `Char' is the code point encoded by that sequence, and
-    % `PrevIndex' is the initial code unit offset of that sequence.
+    % If Index - 1 is the final code unit offset of a well-formed sequence in
+    % String then Char is the code point encoded by that sequence, and
+    % PrevIndex is the initial code unit offset of that sequence.
     %
-    % Otherwise, if `Index' is in range, `Char' is either a U+FFFD REPLACEMENT
+    % Otherwise, if Index is in range, Char is either a U+FFFD REPLACEMENT
     % CHARACTER (when strings are UTF-8 encoded) or the unpaired surrogate
-    % code point at `Index - 1' (when strings are UTF-16 encoded), and
-    % `PrevIndex' is `Index - 1'.
+    % code point at Index - 1 (when strings are UTF-16 encoded), and
+    % PrevIndex is Index - 1.
     %
-    % Fails if `Index' is out of range (non-positive, or greater than the
-    % length of `String').
+    % Fails if Index is out of range (non-positive, or greater than the
+    % length of String).
     %
 :- pred prev_index(string::in, int::in, int::out, char::uo) is semidet.
 
@@ -403,30 +370,30 @@
 
     % unsafe_prev_index(String, Index, PrevIndex, Char):
     %
-    % Like prev_index/4 but does not check that `Index' is in range.
-    % Fails if `Index' is zero.
+    % Like prev_index/4 but does not check that Index is in range.
+    % Fails if Index is zero.
     %
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than the length of `String').
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than the length of String).
     %
 :- pred unsafe_prev_index(string::in, int::in, int::out, char::uo) is semidet.
 
     % unsafe_prev_index_repl(String, Index, PrevIndex, Char, MaybeReplaced):
     %
-    % Like prev_index_repl/5 but does not check that `Index' is in range.
-    % Fails if `Index' is zero.
+    % Like prev_index_repl/5 but does not check that Index is in range.
+    % Fails if Index is zero.
     %
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than the length of `String').
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than the length of String).
     %
 :- pred unsafe_prev_index_repl(string::in, int::in, int::out, char::uo,
     maybe_replaced::out) is semidet.
 
     % unsafe_index_code_unit(String, Index, CodeUnit):
     %
-    % `CodeUnit' is the code unit in `String' at the offset `Index'.
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than or equal to the length of `String').
+    % CodeUnit is the code unit in String at the offset Index.
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than or equal to the length of String).
     %
 :- pred unsafe_index_code_unit(string::in, int::in, int::out) is det.
 
@@ -437,16 +404,16 @@
 
     % set_char(Char, Index, String0, String):
     %
-    % `String' is `String0', with the code unit sequence beginning at `Index'
-    % replaced by the encoding of `Char'. If the code unit at `Index' is the
+    % String is String0, with the code unit sequence beginning at Index
+    % replaced by the encoding of Char. If the code unit at Index is the
     % initial code unit in a valid encoding of a code point, then that entire
-    % code unit sequence is replaced. Otherwise, only the code unit at `Index'
+    % code unit sequence is replaced. Otherwise, only the code unit at Index
     % is replaced.
     %
-    % Fails if `Index' is out of range (negative, or greater than or equal to
-    % the length of `String0').
+    % Fails if Index is out of range (negative, or greater than or equal to
+    % the length of String0).
     %
-    % Throws an exception if `Char' is the null character or a code point that
+    % Throws an exception if Char is the null character or a code point that
     % cannot be encoded in a string (namely, surrogate code points cannot be
     % encoded in UTF-8 strings).
     %
@@ -458,8 +425,8 @@
 
     % det_set_char(Char, Index, String0, String):
     %
-    % Same as set_char/4 but throws an exception if `Index' is out of range
-    % (negative, or greater than or equal to the length of `String0').
+    % Same as set_char/4 but throws an exception if Index is out of range
+    % (negative, or greater than or equal to the length of String0).
     %
 :- func det_set_char(char, int, string) = string.
 :- pred det_set_char(char, int, string, string).
@@ -470,9 +437,9 @@
 
     % unsafe_set_char(Char, Index, String0, String):
     %
-    % Same as set_char/4 but does not check if `Index' is in range.
-    % WARNING: behavior is UNDEFINED if `Index' is out of range
-    % (negative, or greater than or equal to the length of `String0').
+    % Same as set_char/4 but does not check if Index is in range.
+    % WARNING: behavior is UNDEFINED if Index is out of range
+    % (negative, or greater than or equal to the length of String0).
     % Use with care!
     %
 :- func unsafe_set_char(char, int, string) = string.
@@ -514,18 +481,23 @@
     % (This matches the number of steps it would take to iterate over the
     % string using string.index_next or string.prev_index.)
     %
-    % NOTE The names of this predicate and several other predicates
-    % may be changed in the future to refer to code_points, not codepoints,
-    % for consistency with predicate names that talk about code_units.
+:- func count_code_points(string) = int.
+:- pred count_code_points(string::in, int::out) is det.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
     %
 :- func count_codepoints(string) = int.
 :- pred count_codepoints(string::in, int::out) is det.
+:- pragma obsolete(func(count_codepoints/1), [count_code_points/1]).
+:- pragma obsolete(pred(count_codepoints/2), [count_code_points/2]).
 
     % count_utf8_code_units(String) = Length:
     %
     % Return the number of code units required to represent a string in
     % UTF-8 encoding (with allowance for ill-formed sequences).
-    % Equivalent to `Length = length(to_utf8_code_unit_list(String))'.
+    % Equivalent to Length = length(to_utf8_code_unit_list(String)).
     %
     % Throws an exception if strings use UTF-16 encoding but the given string
     % contains an unpaired surrogate code point. Surrogate code points cannot
@@ -533,25 +505,39 @@
     %
 :- func count_utf8_code_units(string) = int.
 
-    % codepoint_offset(String, StartOffset, Count, Offset):
+    % code_point_offset(String, StartOffset, Count, Offset):
     %
-    % Let `S' be the substring of `String' from code unit `StartOffset' to the
-    % end of the string. `Offset' is code unit offset after advancing `Count'
-    % steps in `S', where each step skips over either:
+    % Let S be the substring of String from code unit StartOffset to the
+    % end of the string. Offset is code unit offset after advancing Count
+    % steps in S, where each step skips over either:
     %  - one encoding of a Unicode code point, or
     %  - one code unit that is part of an ill-formed sequence.
     %
-    % Fails if `StartOffset' is out of range (negative, or greater than the
-    % length of `String'), or if there are fewer than `Count' steps possible
-    % in `S'.
+    % Fails if StartOffset is out of range (negative, or greater than the
+    % length of String), or if there are fewer than Count steps possible
+    % in S.
+    %
+:- pred code_point_offset(string::in, int::in, int::in, int::out) is semidet.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
     %
 :- pred codepoint_offset(string::in, int::in, int::in, int::out) is semidet.
+:- pragma obsolete(pred(codepoint_offset/4), [code_point_offset/4]).
 
-    % codepoint_offset(String, Count, Offset):
+    % code_point_offset(String, Count, Offset):
     %
-    % Same as `codepoint_offset(String, 0, Count, Offset)'.
+    % Same as `code_point_offset(String, 0, Count, Offset)'.
+    %
+:- pred code_point_offset(string::in, int::in, int::out) is semidet.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
     %
 :- pred codepoint_offset(string::in, int::in, int::out) is semidet.
+:- pragma obsolete(pred(codepoint_offset/3), [code_point_offset/3]).
 
 %---------------------------------------------------------------------------%
 %
@@ -621,6 +607,15 @@
     %
 :- pred all_match(pred(char)::in(pred(in) is semidet), string::in) is semidet.
 
+    % contains_match(TestPred, String):
+    %
+    % True iff String contains at least one code point that satisfies
+    % TestPred. Any ill-formed code unit sequences in String are ignored
+    % as they do not encode code points.
+    %
+:- pred contains_match(pred(char)::in(pred(in) is semidet), string::in)
+    is semidet.
+
     % contains_char(String, Char):
     %
     % Succeed if the code point Char occurs in String.
@@ -632,13 +627,13 @@
     % compare_substrings(Res, X, StartX, Y, StartY, Length):
     %
     % Compare two substrings by code unit order. The two substrings are
-    % the substring of `X' between `StartX' and `StartX + Length', and
-    % the substring of `Y' between `StartY' and `StartY + Length'.
-    % `StartX', `StartY' and `Length' are all in terms of code units.
+    % the substring of X between StartX and StartX + Length, and
+    % the substring of Y between StartY and StartY + Length.
+    % StartX, StartY and Length are all in terms of code units.
     %
-    % Fails if `StartX' or `StartX + Length' are not within [0, length(X)],
-    % or if `StartY' or `StartY + Length' are not within [0, length(Y)],
-    % or if `Length' is negative.
+    % Fails if StartX or StartX + Length are not within [0, length(X)],
+    % or if StartY or StartY + Length are not within [0, length(Y)],
+    % or if Length is negative.
     %
 :- pred compare_substrings(comparison_result::uo, string::in, int::in,
     string::in, int::in, int::in) is semidet.
@@ -646,8 +641,8 @@
     % unsafe_compare_substrings(Res, X, StartX, Y, StartY, Length):
     %
     % Same as compare_between/4 but without range checks.
-    % WARNING: if any of `StartX', `StartY', `StartX + Length' or
-    % `StartY + Length' are out of range, or if `Length' is negative,
+    % WARNING: if any of StartX, StartY, StartX + Length or
+    % StartY + Length are out of range, or if Length is negative,
     % then the behaviour is UNDEFINED. Use with care!
     %
 :- pred unsafe_compare_substrings(comparison_result::uo, string::in, int::in,
@@ -665,34 +660,34 @@
 
     % prefix_length(Pred, String):
     %
-    % The length (in code units) of the maximal prefix of `String' consisting
-    % entirely of code points satisfying `Pred'.
+    % The length (in code units) of the maximal prefix of String consisting
+    % entirely of code points satisfying Pred.
     %
 :- func prefix_length(pred(char)::in(pred(in) is semidet), string::in)
     = (int::out) is det.
 
     % suffix_length(Pred, String):
     %
-    % The length (in code units) of the maximal suffix of `String' consisting
-    % entirely of code points satisfying `Pred'.
+    % The length (in code units) of the maximal suffix of String consisting
+    % entirely of code points satisfying Pred.
     %
 :- func suffix_length(pred(char)::in(pred(in) is semidet), string::in)
     = (int::out) is det.
 
     % sub_string_search(String, SubString, Index):
     %
-    % `Index' is the code unit position in `String' where the first
-    % occurrence of `SubString' begins. Indices start at zero, so if
-    % `SubString' is a prefix of `String', this will return Index = 0.
+    % Index is the code unit position in String where the first
+    % occurrence of SubString begins. Indices start at zero, so if
+    % SubString is a prefix of String, this will return Index = 0.
     %
 :- pred sub_string_search(string::in, string::in, int::out) is semidet.
 
     % sub_string_search_start(String, SubString, BeginAt, Index):
     %
-    % `Index' is the code unit position in `String' where the first
-    % occurrence of `SubString' occurs such that 'Index' is greater than or
-    % equal to `BeginAt'. Indices start at zero.
-    % Fails if either `BeginAt' is negative, or greater than
+    % Index is the code unit position in String where the first
+    % occurrence of SubString occurs such that 'Index' is greater than or
+    % equal to BeginAt. Indices start at zero.
+    % Fails if either BeginAt is negative, or greater than
     % length(String) - length(SubString).
     %
 :- pred sub_string_search_start(string::in, string::in, int::in, int::out)
@@ -700,9 +695,9 @@
 
     % unsafe_sub_string_search_start(String, SubString, BeginAt, Index):
     %
-    % Same as sub_string_search_start/4 but does not check that `BeginAt'
+    % Same as sub_string_search_start/4 but does not check that BeginAt
     % is in range.
-    % WARNING: if `BeginAt' is either negative, or greater than length(String),
+    % WARNING: if BeginAt is either negative, or greater than length(String),
     % then the behaviour is UNDEFINED. Use with care!
     %
 :- pred unsafe_sub_string_search_start(string::in, string::in, int::in,
@@ -726,17 +721,11 @@
     % ill-formed code unit sequence at the start of S2 to produce a valid
     % encoding of a code point in S3.
     %
-    % The append(out, out, in) mode is deprecated because it does not match
-    % the semantics of the forwards modes in the presence of ill-formed code
-    % unit sequences. Use nondet_append/3 instead.
-    %
-:- pragma obsolete_proc(append(out, out, in), [nondet_append/3]).
 :- pred append(string, string, string).
 :- mode append(in, in, in) is semidet.  % implied
 :- mode append(in, uo, in) is semidet.
 :- mode append(in, in, uo) is det.
 :- mode append(uo, in, in) is semidet.
-:- mode append(out, out, in) is multi.
 
     % nondet_append(S1, S2, S3):
     %
@@ -777,16 +766,16 @@
 
     % append_string_pieces(Pieces, String):
     %
-    % Append together the strings and substrings in `Pieces' into a string.
-    % Throws an exception if `Pieces' contains an element
-    % `substring(S, Start, End)' where `Start' or `End' are not within
-    % the range [0, length(S)], or if `Start' > `End'.
+    % Append together the strings and substrings in Pieces into a string.
+    % Throws an exception if Pieces contains an element
+    % `substring(S, Start, End)' where Start or End are not within
+    % the range [0, length(S)], or if Start > End.
     %
 :- pred append_string_pieces(list(string_piece)::in, string::uo) is det.
 
     % Same as append_string_pieces/2 but without range checks.
-    % WARNING: if any piece `substring(S, Start, End)' has `Start' or `End'
-    % outside the range [0, length(S)], or if `Start' > `End',
+    % WARNING: if any piece `substring(S, Start, End)' has Start or End
+    % outside the range [0, length(S)], or if Start > End,
     % then the behaviour is UNDEFINED. Use with care!
     %
 :- pred unsafe_append_string_pieces(list(string_piece)::in, string::uo)
@@ -797,12 +786,12 @@
 % Splitting up strings.
 %
 
-    % first_char(String, Char, Rest) is true iff `String' begins with a
-    % well-formed code unit sequence, `Char' is the code point encoded by
-    % that sequence, and `Rest' is the rest of `String' after that sequence.
+    % first_char(String, Char, Rest) is true iff String begins with a
+    % well-formed code unit sequence, Char is the code point encoded by
+    % that sequence, and Rest is the rest of String after that sequence.
     %
-    % The (uo, in, in) mode throws an exception if `Char' cannot be encoded in
-    % a string, or if `Char' is a surrogate code point (for consistency with
+    % The (uo, in, in) mode throws an exception if Char cannot be encoded in
+    % a string, or if Char is a surrogate code point (for consistency with
     % the other modes).
     %
     % WARNING: first_char makes a copy of Rest because the garbage collector
@@ -821,101 +810,137 @@
 
     % split(String, Index, LeftSubstring, RightSubstring):
     %
-    % Split a string into two substrings at the code unit offset `Index'.
-    % (If `Index' is out of the range [0, length of `String'], it is treated
+    % Split a string into two substrings at the code unit offset Index.
+    % (If Index is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.)
     %
 :- pred split(string::in, int::in, string::out, string::out) is det.
 
-    % split_by_codepoint(String, Count, LeftSubstring, RightSubstring):
+    % split_by_code_point(String, Count, LeftSubstring, RightSubstring):
     %
-    % `LeftSubstring' is the left-most `Count' code points of `String',
-    % and `RightSubstring' is the remainder of `String'.
-    % (If `Count' is out of the range [0, length of `String'], it is treated
+    % LeftSubstring is the left-most Count code points of String,
+    % and RightSubstring is the remainder of String.
+    % (If Count is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.)
+    %
+:- pred split_by_code_point(string::in, int::in, string::out, string::out)
+    is det.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
     %
 :- pred split_by_codepoint(string::in, int::in, string::out, string::out)
     is det.
+:- pragma obsolete(pred(split_by_codepoint/4), [split_by_code_point/4]).
 
     % left(String, Count, LeftSubstring):
     %
-    % `LeftSubstring' is the left-most `Count' code units of `String'.
-    % (If `Count' is out of the range [0, length of `String'], it is treated
+    % LeftSubstring is the left-most Count code units of String.
+    % (If Count is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.)
     %
 :- func left(string::in, int::in) = (string::out) is det.
 :- pred left(string::in, int::in, string::out) is det.
 
-    % left_by_codepoint(String, Count, LeftSubstring):
+    % left_by_code_point(String, Count, LeftSubstring):
     %
-    % `LeftSubstring' is the left-most `Count' code points of `String'.
-    % (If `Count' is out of the range [0, length of `String'], it is treated
+    % LeftSubstring is the left-most Count code points of String.
+    % (If Count is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.)
+    %
+:- func left_by_code_point(string::in, int::in) = (string::out) is det.
+:- pred left_by_code_point(string::in, int::in, string::out) is det.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
     %
 :- func left_by_codepoint(string::in, int::in) = (string::out) is det.
 :- pred left_by_codepoint(string::in, int::in, string::out) is det.
+:- pragma obsolete(func(left_by_codepoint/2), [left_by_codepoint/2]).
+:- pragma obsolete(pred(left_by_codepoint/3), [left_by_codepoint/3]).
 
     % right(String, Count, RightSubstring):
     %
-    % `RightSubstring' is the right-most `Count' code units of `String'.
-    % (If `Count' is out of the range [0, length of `String'], it is treated
+    % RightSubstring is the right-most Count code units of String.
+    % (If Count is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.)
     %
 :- func right(string::in, int::in) = (string::out) is det.
 :- pred right(string::in, int::in, string::out) is det.
 
-    % right_by_codepoint(String, Count, RightSubstring):
+    % right_by_code_point(String, Count, RightSubstring):
     %
-    % `RightSubstring' is the right-most `Count' code points of `String'.
-    % (If `Count' is out of the range [0, length of `String'], it is treated
+    % RightSubstring is the right-most Count code points of String.
+    % (If Count is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.)
+    %
+:- func right_by_code_point(string::in, int::in) = (string::out) is det.
+:- pred right_by_code_point(string::in, int::in, string::out) is det.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
     %
 :- func right_by_codepoint(string::in, int::in) = (string::out) is det.
 :- pred right_by_codepoint(string::in, int::in, string::out) is det.
+:- pragma obsolete(func(right_by_codepoint/2), [right_by_codepoint/2]).
+:- pragma obsolete(pred(right_by_codepoint/3), [right_by_codepoint/3]).
 
     % between(String, Start, End, Substring):
     %
-    % `Substring' consists of the segment of `String' within the half-open
-    % interval [Start, End), where `Start' and `End' are code unit offsets.
-    % (If `Start' is out of the range [0, length of `String'], it is treated
+    % Substring consists of the segment of String within the half-open
+    % interval [Start, End), where Start and End are code unit offsets.
+    % (If Start is out of the range [0, length of String], it is treated
     % as if it were the nearest end-point of that range.
-    % If `End' is out of the range [`Start', length of `String'],
+    % If End is out of the range [Start, length of String],
     % it is treated as if it were the nearest end-point of that range.)
     %
 :- func between(string::in, int::in, int::in) = (string::uo) is det.
 :- pred between(string::in, int::in, int::in, string::uo) is det.
 
-    % between_codepoints(String, Start, End, Substring):
+    % between_code_points(String, Start, End, Substring):
     %
-    % `Substring' is the part of `String' between the code point positions
-    % `Start' and `End'. The result is equivalent to:
+    % Substring is the part of String between the code point positions
+    % Start and End. The result is equivalent to:
     %
     %   between(String, StartOffset, EndOffset, Substring)
     %
     % where:
     %
-    %   StartOffset is from codepoint_offset(String, Start, StartOffset)
-    %     if Start is in [0, count_codepoints(String)],
+    %   StartOffset is from code_point_offset(String, Start, StartOffset)
+    %     if Start is in [0, count_code_points(String)],
     %   StartOffset = 0 if Start < 0,
     %   StartOffset = length(String) otherwise;
     %
-    %   EndOffset is from codepoint_offset(String, End, EndOffset)
-    %     if End is in [0, count_codepoints(String)],
+    %   EndOffset is from code_point_offset(String, End, EndOffset)
+    %     if End is in [0, count_code_points(String)],
     %   EndOffset = 0 if End < 0,
     %   EndOffset = length(String) otherwise.
     %
     % between/4 will enforce StartOffset =< EndOffset.
     %
+:- func between_code_points(string::in, int::in, int::in)
+    = (string::uo) is det.
+:- pred between_code_points(string::in, int::in, int::in, string::uo) is det.
+
+    % NOTE We are changing all occurrences of "codepoint" in the
+    % names of predicates and functions to "code_point", for consistency
+    % with predicate and function names that talk about code_units.
+    %
 :- func between_codepoints(string::in, int::in, int::in)
     = (string::uo) is det.
 :- pred between_codepoints(string::in, int::in, int::in, string::uo) is det.
+:- pragma obsolete(func(between_codepoints/3), [between_code_points/3]).
+:- pragma obsolete(pred(between_codepoints/4), [between_code_points/4]).
 
     % unsafe_between(String, Start, End, Substring):
     %
-    % `Substring' consists of the segment of `String' within the half-open
-    % interval [Start, End), where `Start' and `End' are code unit offsets.
-    % WARNING: if `Start' is out of the range [0, length of `String'] or
-    % `End' is out of the range [`Start', length of `String']
+    % Substring consists of the segment of String within the half-open
+    % interval [Start, End), where Start and End are code unit offsets.
+    % WARNING: if Start is out of the range [0, length of String] or
+    % End is out of the range [Start, length of String]
     % then the behaviour is UNDEFINED. Use with care!
     % This version takes time proportional to the length of the substring,
     % whereas substring may take time proportional to the length
@@ -946,8 +971,8 @@
     % substrings of String (in first to last order) that are delimited
     % by code points matched by SepP. For example,
     %
-    % split_at_separator(char.is_whitespace, " a cat  sat on the  mat")
-    %   = ["", "a", "cat", "", "sat", "on", "the", "", "mat"]
+    % split_at_separator(char.is_whitespace, " the cat  sat on the  mat")
+    %   = ["", "the", "cat", "", "sat", "on", "the", "", "mat"]
     %
     % Note the difference to words_separator.
     %
@@ -962,7 +987,7 @@
     % split_at_string(Separator, String) returns the list of substrings
     % of String that are delimited by Separator. For example,
     %
-    % split_at_string("|||", "|||fld2|||fld3") = ["", "fld2", [fld3"]
+    % split_at_string("|||", "|||fld2|||fld3") = ["", "fld2", "fld3"]
     %
     % Always the first match of Separator is used to break the String, for
     % example: split_at_string("aa", "xaaayaaaz") = ["x", "ay", "az"]
@@ -985,18 +1010,14 @@
     % prefix(String, Prefix) is true iff Prefix is a prefix of String.
     % Same as append(Prefix, _, String).
     %
-:- pragma obsolete_proc(prefix(in, out)).
 :- pred prefix(string, string).
 :- mode prefix(in, in) is semidet.
-:- mode prefix(in, out) is multi.
 
     % suffix(String, Suffix) is true iff Suffix is a suffix of String.
     % Same as append(_, Suffix, String).
     %
-:- pragma obsolete_proc(suffix(in, out)).
 :- pred suffix(string, string).
 :- mode suffix(in, in) is semidet.
-:- mode suffix(in, out) is multi.
 
     % remove_prefix(Prefix, String, Suffix):
     %
@@ -1016,8 +1037,8 @@
     %
 :- pred det_remove_prefix(string::in, string::in, string::out) is det.
 
-    % remove_prefix_if_present(Prefix, String) = Suffix returns `String' minus
-    % `Prefix' if `String' begins with `Prefix', and `String' if it doesn't.
+    % remove_prefix_if_present(Prefix, String) = Suffix returns String minus
+    % Prefix if String begins with Prefix, and String if it doesn't.
     %
 :- func remove_prefix_if_present(string, string) = string.
 
@@ -1039,8 +1060,8 @@
     %
 :- func det_remove_suffix(string, string) = string.
 
-    % remove_suffix_if_present(Suffix, String) returns `String' minus `Suffix'
-    % if `String' ends with `Suffix', and `String' if it doesn't.
+    % remove_suffix_if_present(Suffix, String) returns String minus Suffix
+    % if String ends with Suffix, and String if it doesn't.
     %
     % WARNING: the argument order differs from remove_suffix and
     % det_remove_suffix.
@@ -1111,8 +1132,8 @@
 
     % pad_left(String0, PadChar, Width, String):
     %
-    % Insert `PadChar's at the left of `String0' until it is at least as long
-    % as `Width', giving `String'. Width is currently measured as the number
+    % Insert PadChars at the left of String0 until it is at least as long
+    % as Width, giving String. Width is currently measured as the number
     % of code points.
     %
 :- func pad_left(string, char, int) = string.
@@ -1120,8 +1141,8 @@
 
     % pad_right(String0, PadChar, Width, String):
     %
-    % Insert `PadChar's at the right of `String0' until it is at least as long
-    % as `Width', giving `String'. Width is currently measured as the number
+    % Insert PadChars at the right of String0 until it is at least as long
+    % as Width, giving String. Width is currently measured as the number
     % of code points.
     %
 :- func pad_right(string, char, int) = string.
@@ -1129,43 +1150,43 @@
 
     % chomp(String):
     %
-    % Return `String' minus any single trailing newline character.
+    % Return String minus any single trailing newline character.
     %
 :- func chomp(string) = string.
 
     % strip(String):
     %
-    % Returns `String' minus any initial and trailing ASCII whitespace
-    % characters, i.e. characters satisfying `char.is_whitespace'.
+    % Returns String minus any initial and trailing ASCII whitespace
+    % characters, i.e. characters satisfying char.is_whitespace.
     %
 :- func strip(string) = string.
 
     % lstrip(String):
     %
-    % Return `String' minus any initial ASCII whitespace characters,
-    % i.e. characters satisfying `char.is_whitespace'.
+    % Return String minus any initial ASCII whitespace characters,
+    % i.e. characters satisfying char.is_whitespace.
     %
 :- func lstrip(string) = string.
 
     % rstrip(String):
     %
-    % Returns `String' minus any trailing ASCII whitespace characters,
-    % i.e. characters satisfying `char.is_whitespace'.
+    % Returns String minus any trailing ASCII whitespace characters,
+    % i.e. characters satisfying char.is_whitespace.
     %
 :- func rstrip(string) = string.
 
     % lstrip_pred(Pred, String):
     %
-    % Returns `String' minus the maximal prefix consisting entirely
-    % of code points satisfying `Pred'.
+    % Returns String minus the maximal prefix consisting entirely
+    % of code points satisfying Pred.
     %
 :- func lstrip_pred(pred(char)::in(pred(in) is semidet), string::in)
     = (string::out) is det.
 
     % rstrip_pred(Pred, String):
     %
-    % Returns `String' minus the maximal suffix consisting entirely
-    % of code points satisfying `Pred'.
+    % Returns String minus the maximal suffix consisting entirely
+    % of code points satisfying Pred.
     %
 :- func rstrip_pred(pred(char)::in(pred(in) is semidet), string::in)
     = (string::out) is det.
@@ -1202,7 +1223,7 @@
     % it will be broken over two (or more) lines. Sequences of whitespace
     % characters are replaced by a single space.
     %
-    % See `char.is_whitespace' for the definition of whitespace characters
+    % See char.is_whitespace for the definition of whitespace characters
     % used by this predicate.
     %
 :- func word_wrap(string, int) = string.
@@ -1223,16 +1244,16 @@
 
     % foldl(Closure, String, !Acc):
     %
-    % `Closure' is an accumulator predicate which is to be called for each
-    % code point of the string `String' in turn.
-    % If `String' contains ill-formed sequences, `Closure' is called for each
+    % Closure is an accumulator predicate which is to be called for each
+    % code point of the string String in turn.
+    % If String contains ill-formed sequences, Closure is called for each
     % code unit in an ill-formed sequence. If strings use UTF-8 encoding,
-    % U+FFFD is passed to `Closure' in place of each such code unit.
+    % U+FFFD is passed to Closure in place of each such code unit.
     % If strings use UTF-16 encoding, each code unit in an ill-formed sequence
-    % is an unpaired surrogate code point, which will be passed to `Closure'.
+    % is an unpaired surrogate code point, which will be passed to Closure.
     %
-    % The initial value of the accumulator is `!.Acc' and the final value is
-    % `!:Acc'.
+    % The initial value of the accumulator is !.Acc and the final value is
+    % !:Acc.
     % (foldl(Closure, String, !Acc)  is equivalent to
     %   to_char_list(String, Chars),
     %   list.foldl(Closure, Chars, !Acc)
@@ -1267,7 +1288,7 @@
     % is equivalent to foldl(Closure, SubString, !Acc)
     % where SubString = between(String, Start, End).
     %
-    % `Start' and `End' are in terms of code units.
+    % Start and End are in terms of code units.
     %
 :- func foldl_between(func(char, A) = A, string, int, int, A) = A.
 :- pred foldl_between(pred(char, A, A), string, int, int, A, A).
@@ -1285,7 +1306,7 @@
     % foldl2_between(Closure, String, Start, End, !Acc1, !Acc2)
     % A variant of foldl_between with two accumulators.
     %
-    % `Start' and `End' are in terms of code units.
+    % Start and End are in terms of code units.
     %
 :- pred foldl2_between(pred(char, A, A, B, B),
     string, int, int, A, A, B, B).
@@ -1317,7 +1338,7 @@
     % is equivalent to foldr(Closure, SubString, !Acc)
     % where SubString = between(String, Start, End).
     %
-    % `Start' and `End' are in terms of code units.
+    % Start and End are in terms of code units.
     %
 :- func foldr_between(func(char, T) = T, string, int, int, T) = T.
 :- pred foldr_between(pred(char, T, T), string, int, int, T, T).
@@ -1375,6 +1396,7 @@
     % Convert a string to a pretty_printer.doc for formatting.
     %
 :- func string_to_doc(string) = pretty_printer.doc.
+:- pragma obsolete(func(string_to_doc/1), [pretty_printer.string_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %
@@ -1460,12 +1482,12 @@
     % char_to_string(Char, String):
     %
     % Converts a character to a string, or vice versa.
-    % True if `String' is the well-formed string that encodes the code point
-    % `Char'; or, if strings are UTF-16 encoded, `Char' is a surrogate code
-    % point and `String' is the string that contains only that surrogate code
+    % True if String is the well-formed string that encodes the code point
+    % Char; or, if strings are UTF-16 encoded, Char is a surrogate code
+    % point and String is the string that contains only that surrogate code
     % point. Otherwise, `char_to_string(Char, String)' is false.
     %
-    % Throws an exception if `Char' is the null character or a code point that
+    % Throws an exception if Char is the null character or a code point that
     % cannot be encoded in a string (namely, surrogate code points cannot be
     % encoded in UTF-8 strings).
     %
@@ -1491,8 +1513,8 @@
     % int_to_base_string(Int, Base, String):
     %
     % Convert an integer to a string in a given Base.
-    % `String' will consist of a minus sign (U+002D HYPHEN-MINUS)
-    % if `Int' is negative, followed by one or more decimal digits (0-9)
+    % String will consist of a minus sign (U+002D HYPHEN-MINUS)
+    % if Int is negative, followed by one or more decimal digits (0-9)
     % or uppercase letters (A-Z). There will be no leading zeros.
     %
     % Base must be between 2 and 36, both inclusive; if it is not,
@@ -1602,10 +1624,11 @@
 :- func string(T) = string.
 
     % As above, but using the supplied table of operators.
+    % NOTE_TO_IMPLEMENTORS: XXX The only table we accept is the Mercury table.
     %
 :- func string_ops(ops.table, T) = string.
 
-    % string_ops_noncanon(NonCanon, OpsTable, X, String)
+    % string_ops_noncanon(NonCanon, OpTable, X, String)
     %
     % As above, but the caller specifies what behaviour should occur for
     % non-canonical terms (i.e. terms where multiple representations
@@ -1736,7 +1759,6 @@
 :- import_module require.
 :- import_module string.format.
 :- import_module string.to_string.
-:- import_module term_io.
 :- import_module uint.
 :- import_module uint8.
 
@@ -1790,16 +1812,7 @@
 to_char_list(S) = Cs :-
     to_char_list(S, Cs).
 
-:- pragma promise_equivalent_clauses(pred(to_char_list/2)).
-
-to_char_list(Str::in, CharList::out) :-
-    do_to_char_list(Str, CharList).
-to_char_list(Str::uo, CharList::in) :-
-    from_char_list(CharList, Str).
-
-:- pred do_to_char_list(string::in, list(char)::out) is det.
-
-do_to_char_list(Str, CharList) :-
+to_char_list(Str, CharList) :-
     do_to_char_list_loop(Str, length(Str), [], CharList).
 
 :- pred do_to_char_list_loop(string::in, int::in,
@@ -1818,16 +1831,7 @@ do_to_char_list_loop(Str, Index0, !CharList) :-
 to_rev_char_list(S) = Cs :-
     to_rev_char_list(S, Cs).
 
-:- pragma promise_equivalent_clauses(pred(to_rev_char_list/2)).
-
-to_rev_char_list(Str::in, CharList::out) :-
-    do_to_rev_char_list(Str, CharList).
-to_rev_char_list(Str::uo, CharList::in) :-
-    from_rev_char_list(CharList, Str).
-
-:- pred do_to_rev_char_list(string::in, list(char)::out) is det.
-
-do_to_rev_char_list(Str, RevCharList) :-
+to_rev_char_list(Str, RevCharList) :-
     do_to_rev_char_list_loop(Str, 0, [], RevCharList).
 
 :- pred do_to_rev_char_list_loop(string::in, int::in,
@@ -1850,11 +1854,7 @@ do_to_rev_char_list_loop(Str, Index0, !RevCharList) :-
 from_char_list(Cs) = S :-
     from_char_list(Cs, S).
 
-:- pragma promise_equivalent_clauses(pred(from_char_list/2)).
-
-from_char_list(Chars::out, Str::in) :-
-    to_char_list(Str, Chars).
-from_char_list(Chars::in, Str::uo) :-
+from_char_list(Chars, Str) :-
     ( if semidet_from_char_list(Chars, Str0) then
         Str = Str0
     else
@@ -2084,7 +2084,7 @@ from_rev_char_list(Chars, Str) :-
     Str = new string(arr);
 ").
 
-semidet_from_rev_char_list(Chars::in, Str::uo) :-
+semidet_from_rev_char_list(Chars, Str) :-
     semidet_from_char_list(list.reverse(Chars), Str).
 
 %---------------------%
@@ -2943,27 +2943,33 @@ count_code_units(Str, Length) :-
 
 %---------------------%
 
-count_codepoints(String) = Count :-
-    count_codepoints(String, Count).
+count_code_points(String) = Count :-
+    count_code_points(String, Count).
 
 :- pragma foreign_proc("Java",
-    count_codepoints(String::in, Count::out),
+    count_code_points(String::in, Count::out),
     [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     Count = String.codePointCount(0, String.length());
 ").
 
-count_codepoints(String, Count) :-
-    count_codepoints_loop(String, 0, 0, Count).
+count_code_points(String, Count) :-
+    count_code_points_loop(String, 0, 0, Count).
 
-:- pred count_codepoints_loop(string::in, int::in, int::in, int::out) is det.
+:- pred count_code_points_loop(string::in, int::in, int::in, int::out) is det.
 
-count_codepoints_loop(String, I, Count0, Count) :-
+count_code_points_loop(String, I, Count0, Count) :-
     ( if unsafe_index_next(String, I, J, _) then
-        count_codepoints_loop(String, J, Count0 + 1, Count)
+        count_code_points_loop(String, J, Count0 + 1, Count)
     else
         Count = Count0
     ).
+
+count_codepoints(String) = Count :-
+    count_code_points(String, Count).
+
+count_codepoints(String, Count) :-
+    count_code_points(String, Count).
 
 %---------------------%
 
@@ -2989,7 +2995,7 @@ count_utf16_to_utf8_code_units(Char, !Length) :-
 %---------------------%
 
 :- pragma foreign_proc("Java",
-    codepoint_offset(String::in, StartOffset::in, N::in, Index::out),
+    code_point_offset(String::in, StartOffset::in, N::in, Index::out),
     [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     try {
@@ -3001,27 +3007,33 @@ count_utf16_to_utf8_code_units(Char, !Length) :-
     }
 ").
 
-codepoint_offset(String, StartOffset, N, Index) :-
+code_point_offset(String, StartOffset, N, Index) :-
     StartOffset >= 0,
     Length = length(String),
-    codepoint_offset_loop(String, StartOffset, Length, N, Index).
+    code_point_offset_loop(String, StartOffset, Length, N, Index).
 
-:- pred codepoint_offset_loop(string::in, int::in, int::in, int::in, int::out)
+:- pred code_point_offset_loop(string::in, int::in, int::in, int::in, int::out)
     is semidet.
 
-codepoint_offset_loop(String, Offset, Length, N, Index) :-
+code_point_offset_loop(String, Offset, Length, N, Index) :-
     Offset < Length,
     ( if N = 0 then
         Index = Offset
     else
         unsafe_index_next(String, Offset, NextOffset, _),
-        codepoint_offset_loop(String, NextOffset, Length, N - 1, Index)
+        code_point_offset_loop(String, NextOffset, Length, N - 1, Index)
     ).
+
+codepoint_offset(String, StartOffset, N, Index) :-
+    code_point_offset(String, StartOffset, N, Index).
 
 %---------------------------------------------------------------------------%
 
+code_point_offset(String, N, Index) :-
+    code_point_offset(String, 0, N, Index).
+
 codepoint_offset(String, N, Index) :-
-    codepoint_offset(String, 0, N, Index).
+    code_point_offset(String, 0, N, Index).
 
 %---------------------------------------------------------------------------%
 %
@@ -3370,6 +3382,25 @@ all_match_loop(P, String, Cur) :-
 
 %---------------------%
 
+contains_match(P, String) :-
+    contains_match_loop(P, String, 0).
+
+:- pred contains_match_loop(pred(char)::in(pred(in) is semidet), string::in,
+    int::in) is semidet.
+
+contains_match_loop(P, String, Cur) :-
+    unsafe_index_next_repl(String, Cur, Next, Char, MaybeReplaced),
+    ( if
+        MaybeReplaced = not_replaced,
+        P(Char)
+    then
+        true
+    else
+        contains_match_loop(P, String, Next)
+    ).
+
+%---------------------%
+
 :- pragma foreign_proc("C",
     contains_char(Str::in, Ch::in),
     [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
@@ -3654,8 +3685,6 @@ append(S1::in, S2::in, S3::uo) :-
     append_iio(S1, S2, S3).
 append(S1::uo, S2::in, S3::in) :-
     append_oii(S1, S2, S3).
-append(S1::out, S2::out, S3::in) :-
-    nondet_append(S1, S2, S3).
 
 :- pred append_iii(string::in, string::in, string::in) is semidet.
 
@@ -4171,8 +4200,8 @@ split(Str, Index, Left, Right) :-
         )
     ).
 
-split_by_codepoint(Str, Count, Left, Right) :-
-    ( if codepoint_offset(Str, Count, Offset) then
+split_by_code_point(Str, Count, Left, Right) :-
+    ( if code_point_offset(Str, Count, Offset) then
         split(Str, Offset, Left, Right)
     else if Count =< 0 then
         Left = "",
@@ -4182,6 +4211,9 @@ split_by_codepoint(Str, Count, Left, Right) :-
         Right = ""
     ).
 
+split_by_codepoint(Str, Count, Left, Right) :-
+    split_by_code_point(Str, Count, Left, Right).
+
 %---------------------%
 
 left(S1, N) = S2 :-
@@ -4190,11 +4222,17 @@ left(S1, N) = S2 :-
 left(String, Count, LeftString) :-
     between(String, 0, Count, LeftString).
 
+left_by_code_point(String, Count) = LeftString :-
+    left_by_code_point(String, Count, LeftString).
+
+left_by_code_point(String, Count, LeftString) :-
+    split_by_code_point(String, Count, LeftString, _RightString).
+
 left_by_codepoint(String, Count) = LeftString :-
-    left_by_codepoint(String, Count, LeftString).
+    left_by_code_point(String, Count, LeftString).
 
 left_by_codepoint(String, Count, LeftString) :-
-    split_by_codepoint(String, Count, LeftString, _RightString).
+    split_by_code_point(String, Count, LeftString, _RightString).
 
 right(S1, N) = S2 :-
     right(S1, N, S2).
@@ -4204,13 +4242,19 @@ right(String, RightCount, RightString) :-
     Start = Length - RightCount,
     between(String, Start, Length, RightString).
 
+right_by_code_point(String, RightCount) = RightString :-
+    right_by_code_point(String, RightCount, RightString).
+
+right_by_code_point(String, RightCount, RightString) :-
+    count_code_points(String, TotalCount),
+    LeftCount = TotalCount - RightCount,
+    split_by_code_point(String, LeftCount, _LeftString, RightString).
+
 right_by_codepoint(String, RightCount) = RightString :-
-    right_by_codepoint(String, RightCount, RightString).
+    right_by_code_point(String, RightCount, RightString).
 
 right_by_codepoint(String, RightCount, RightString) :-
-    count_codepoints(String, TotalCount),
-    LeftCount = TotalCount - RightCount,
-    split_by_codepoint(String, LeftCount, _LeftString, RightString).
+    right_by_code_point(String, RightCount, RightString).
 
 %---------------------%
 
@@ -4237,26 +4281,32 @@ between(Str, Start, End, SubStr) :-
 
 %---------------------%
 
-between_codepoints(Str, Start, End) = SubString :-
-    between_codepoints(Str, Start, End, SubString).
+between_code_points(Str, Start, End) = SubString :-
+    between_code_points(Str, Start, End, SubString).
 
-between_codepoints(Str, Start, End, SubString) :-
+between_code_points(Str, Start, End, SubString) :-
     ( if Start < 0 then
         StartOffset = 0
-    else if codepoint_offset(Str, Start, StartOffset0) then
+    else if code_point_offset(Str, Start, StartOffset0) then
         StartOffset = StartOffset0
     else
         StartOffset = length(Str)
     ),
     ( if End < 0 then
         EndOffset = 0
-    else if codepoint_offset(Str, End, EndOffset0) then
+    else if code_point_offset(Str, End, EndOffset0) then
         EndOffset = EndOffset0
     else
         EndOffset = length(Str)
     ),
     % between/4 will enforce StartOffset =< EndOffset.
     between(Str, StartOffset, EndOffset, SubString).
+
+between_codepoints(Str, Start, End) = SubString :-
+    between_code_points(Str, Start, End, SubString).
+
+between_codepoints(Str, Start, End, SubString) :-
+    between_code_points(Str, Start, End, SubString).
 
 %---------------------%
 
@@ -4332,7 +4382,7 @@ skip_to_next_word_start(SepP, String, CurPos, NextWordStartPos) :-
     ).
 
     % Return the smallest NextWordStartPos >= CurPos such that
-    % `SepP(String[NextWordStartPos])'.
+    % SepP(String[NextWordStartPos]).
     %
 :- pred skip_to_word_end(pred(char)::in(pred(in) is semidet),
     string::in, int::in, int::out) is det.
@@ -4455,43 +4505,14 @@ split_into_lines_loop(Str, CurPos, !RevLines) :-
 % Dealing with prefixes and suffixes.
 %
 
-:- pragma promise_equivalent_clauses(pred(prefix/2)).
-
-prefix(String::in, Prefix::in) :-
+prefix(String, Prefix) :-
     compare_substrings((=), String, 0, Prefix, 0, length(Prefix)).
-prefix(String::in, Prefix::out) :-
-    prefix_2_ioi(String, Prefix, 0).
 
-:- pred prefix_2_ioi(string::in, string::out, int::in) is multi.
-
-prefix_2_ioi(String, Prefix, Cur) :-
-    (
-        Prefix = unsafe_between(String, 0, Cur)
-    ;
-        unsafe_index_next(String, Cur, Next, _),
-        prefix_2_ioi(String, Prefix, Next)
-    ).
-
-:- pragma promise_equivalent_clauses(pred(suffix/2)).
-
-suffix(String::in, Suffix::in) :-
+suffix(String, Suffix) :-
     StringLength = length(String),
     SuffixLength = length(Suffix),
     StringStart = StringLength - SuffixLength,
     compare_substrings((=), String, StringStart, Suffix, 0, SuffixLength).
-suffix(String::in, Suffix::out) :-
-    Len = length(String),
-    suffix_2_ioii(String, Suffix, Len, Len).
-
-:- pred suffix_2_ioii(string::in, string::out, int::in, int::in) is multi.
-
-suffix_2_ioii(String, Suffix, Cur, Len) :-
-    (
-        unsafe_between(String, Cur, Len, Suffix)
-    ;
-        unsafe_prev_index(String, Cur, Prev, _),
-        suffix_2_ioii(String, Suffix, Prev, Len)
-    ).
 
 %---------------------%
 
@@ -4756,7 +4777,7 @@ pad_left(S1, C, N) = S2 :-
     pad_left(S1, C, N, S2).
 
 pad_left(String0, PadChar, Width, String) :-
-    count_codepoints(String0, Length),
+    count_code_points(String0, Length),
     ( if Length < Width then
         Count = Width - Length,
         duplicate_char(PadChar, Count, PadString),
@@ -4769,7 +4790,7 @@ pad_right(S1, C, N) = S2 :-
     pad_right(S1, C, N, S2).
 
 pad_right(String0, PadChar, Width, String) :-
-    count_codepoints(String0, Length),
+    count_code_points(String0, Length),
     ( if Length < Width then
         Count = Width - Length,
         duplicate_char(PadChar, Count, PadString),
@@ -4895,7 +4916,7 @@ word_wrap(Str, N) = word_wrap_separator(Str, N, "").
 
 word_wrap_separator(Str, N, WordSep0) = Wrapped :-
     Words = words_separator(char.is_whitespace, Str),
-    SepLen0 = count_codepoints(WordSep0),
+    SepLen0 = count_code_points(WordSep0),
     ( if SepLen0 < N then
         WordSep = WordSep0,
         SepLen = SepLen0
@@ -4934,7 +4955,7 @@ word_wrap_separator(Str, N, WordSep0) = Wrapped :-
 word_wrap_loop([], _, _, _, _, !RevWordsSpacesNls).
 word_wrap_loop([Word | Words], WordSep, SepLen, CurCol, MaxCol,
         !RevWordsSpacesNls) :-
-    WordLen = count_codepoints(Word),
+    WordLen = count_code_points(Word),
     ( if
         % We are on the first column and the length of the word
         % is less than the line length.
@@ -5008,10 +5029,10 @@ word_wrap_loop([Word | Words], WordSep, SepLen, CurCol, MaxCol,
 :- func break_up_string_reverse(string, int, list(string)) = list(string).
 
 break_up_string_reverse(Str, N, Prev) = Strs :-
-    ( if count_codepoints(Str) =< N then
+    ( if count_code_points(Str) =< N then
         Strs = [Str | Prev]
     else
-        split_by_codepoint(Str, N, Left, Right),
+        split_by_code_point(Str, N, Left, Right),
         Strs = break_up_string_reverse(Right, N, [Left | Prev])
     ).
 
@@ -5175,7 +5196,7 @@ format_table(Columns, Separator) = Table :-
 format_table_max(ColumnsLimits, Separator) = Table :-
     MaxWidthsSenses = list.map(find_max_length_with_limit, ColumnsLimits),
     Columns = list.map(project_column_strings, ColumnsLimits),
-    SepLen = count_codepoints(Separator),
+    SepLen = count_code_points(Separator),
     generate_rows(MaxWidthsSenses, Separator, SepLen, Columns, [], RevRows),
     list.reverse(RevRows, Rows),
     Table = join_list("\n", Rows).
@@ -5229,7 +5250,7 @@ pad_row([Justify - MaxWidth | JustifyWidths], [ColumnStr0 | ColumnStrs0],
     NextColumn = CurColumn + MaxWidth + SepLen,
     pad_row(JustifyWidths, ColumnStrs0, Separator, SepLen, NextColumn,
         LineRest),
-    ( if count_codepoints(ColumnStr0) =< MaxWidth then
+    ( if count_code_points(ColumnStr0) =< MaxWidth then
         (
             Justify = just_left,
             ColumnStr = pad_right(ColumnStr0, ' ', MaxWidth)
@@ -5317,7 +5338,7 @@ lpad(Chr, N, Str) = pad_left(Str, Chr, N).
 :- pred max_str_length(string::in, int::in, int::out) is det.
 
 max_str_length(Str, PrevMaxLen, MaxLen) :-
-    Length = count_codepoints(Str),
+    Length = count_code_points(Str),
     ( if Length > PrevMaxLen then
         MaxLen = Length
     else
@@ -5329,7 +5350,7 @@ max_str_length(Str, PrevMaxLen, MaxLen) :-
 % Converting strings to docs.
 %
 
-string_to_doc(S) = docs([str(term_io.quoted_string(S))]).
+string_to_doc(S) = pretty_printer.string_to_doc(S).
 
 %---------------------------------------------------------------------------%
 %
@@ -6253,7 +6274,9 @@ float_to_string(Float, unsafe_promise_unique(String)) :-
 :- func float_to_string_loop(int, float) = (string) is det.
 
 float_to_string_loop(Prec, Float) = String :-
-    format("%#." ++ int_to_string(Prec) ++ "g", [f(Float)], Tmp),
+    disable_warning [unknown_format_calls] (
+        format("%#." ++ int_to_string(Prec) ++ "g", [f(Float)], Tmp)
+    ),
     ( if Prec = max_precision then
         String = Tmp
     else
@@ -6323,11 +6346,11 @@ from_c_pointer(P) = S :-
 string(X) =
     to_string.string_impl(X).
 
-string_ops(OpsTable, X) =
-    to_string.string_ops_impl(OpsTable, X).
+string_ops(OpTable, X) =
+    to_string.string_ops_impl(OpTable, X).
 
-string_ops_noncanon(NonCanon, OpsTable, X, String) :-
-    to_string.string_ops_noncanon_impl(NonCanon, OpsTable, X, String).
+string_ops_noncanon(NonCanon, OpTable, X, String) :-
+    to_string.string_ops_noncanon_impl(NonCanon, OpTable, X, String).
 
 %---------------------------------------------------------------------------%
 %
@@ -6335,7 +6358,9 @@ string_ops_noncanon(NonCanon, OpsTable, X, String) :-
 %
 
 format(S1, PT) = S2 :-
-    format(S1, PT, S2).
+    disable_warning [unknown_format_calls] (
+        format(S1, PT, S2)
+    ).
 
 format(FormatString, PolyList, String) :-
     format.format_impl(FormatString, PolyList, String).

@@ -50,11 +50,11 @@
 :- import_module ll_backend.frameopt.
 :- import_module ll_backend.jumpopt.
 :- import_module ll_backend.labelopt.
-:- import_module ll_backend.stdlabel.
 :- import_module ll_backend.opt_debug.
 :- import_module ll_backend.opt_util.
 :- import_module ll_backend.peephole.
 :- import_module ll_backend.reassign.
+:- import_module ll_backend.stdlabel.
 :- import_module ll_backend.use_local_vars.
 :- import_module ll_backend.wrap_blocks.
 :- import_module mdbcomp.prim_data.
@@ -65,6 +65,7 @@
 :- import_module dir.
 :- import_module int.
 :- import_module io.
+:- import_module io.call_system.
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
@@ -83,7 +84,8 @@ optimize_proc(Globals, ModuleName, GlobalData, CProc0, CProc) :-
     Info = init_llds_opt_info(Globals, ModuleName),
     some [!OptDebugInfo, !LabelNumCounter, !Instrs] (
         CProc0 = c_procedure(Name, Arity, PredProcId, ProcLabel, CodeModel,
-            !:Instrs, !:LabelNumCounter, MayAlterRtti, CGlobalVars),
+            EffTraceLevel, !:Instrs, !:LabelNumCounter,
+            MayAlterRtti, CGlobalVars),
         need_opt_debug_info(Info, Name, Arity, PredProcId, MaybeBaseName),
         (
             MaybeBaseName = no,
@@ -134,7 +136,8 @@ optimize_proc(Globals, ModuleName, GlobalData, CProc0, CProc) :-
             maybe_report_stats(ProgressStream, Statistics, !IO)
         ),
         CProc = c_procedure(Name, Arity, PredProcId, ProcLabel, CodeModel,
-            !.Instrs, !.LabelNumCounter, MayAlterRtti, CGlobalVars)
+            EffTraceLevel, !.Instrs, !.LabelNumCounter,
+            MayAlterRtti, CGlobalVars)
     ).
 
 :- func make_internal_label_for_proc_label(proc_label, int) = label.
@@ -223,7 +226,7 @@ need_opt_debug_info(Info, Name, Arity, PredProcId, MaybeBaseName) :-
     list(instruction)::in, counter::in, io::di, io::uo) is det.
 
 output_first_opt_debug(Info, FileName, ProcLabel, Instrs0, Counter, !IO) :-
-    io.call_system("mkdir -p " ++ opt_subdir_name, MkdirRes, !IO),
+    io.call_system.call_system("mkdir -p " ++ opt_subdir_name, MkdirRes, !IO),
     ( if MkdirRes = ok(0) then
         io.open_output(FileName, Res, !IO),
         (
@@ -309,7 +312,7 @@ maybe_opt_debug(Info, Instrs, Counter, Suffix, Msg, ProcLabel,
                 % of --debug-opt (zs) strongly prefers -u to -c.
                 DiffCommand = "diff -u '" ++ PrevFileName ++ "' '" ++
                     OptFileName ++ "' > '" ++ DiffFileName ++ "'",
-                io.call_system(DiffCommand, _, !IO)
+                io.call_system.call_system(DiffCommand, _, !IO)
             )
         )
     ;

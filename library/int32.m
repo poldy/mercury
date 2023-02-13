@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ts=4 sw=4 et ft=mercury
 %---------------------------------------------------------------------------%
-% Copyright (C) 2017-2022 The Mercury team.
+% Copyright (C) 2017-2023 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -81,7 +81,7 @@
 
     % cast_from_int8(I8) = I32:
     %
-    % Convert an int8 to a int32.
+    % Convert an int8 to an int32.
     % Always succeeds, and yields a result that is mathematically equal to I8.
     %
 :- func cast_from_int8(int8) = int32.
@@ -101,7 +101,7 @@
 
     % cast_from_int16(I16) = I32:
     %
-    % Convert an int16 to a int32.
+    % Convert an int16 to an int32.
     % Always succeeds, and yields a result that is mathematically equal to I16.
     %
 :- func cast_from_int16(int16) = int32.
@@ -121,7 +121,7 @@
 
     % cast_from_int64(I64) = I32:
     %
-    % Convert an int64 to a int32.
+    % Convert an int64 to an int32.
     % Always succeeds, but will yield a result that is mathematically equal
     % to I64 only if I64 is in [-(2^31), 2^31 - 1].
     %
@@ -308,12 +308,14 @@
     % Throws an exception if Y is not in [0, 32).
     %
 :- func (int32::in) << (int::in) = (int32::uo) is det.
+:- func (int32::in) <<u (uint::in) = (int32::uo) is det.
 
     % unchecked_left_shift(X, Y) is the same as X << Y except that the
     % behaviour is undefined if Y is not in [0, 32).
     % It will typically be implemented more efficiently than X << Y.
     %
 :- func unchecked_left_shift(int32::in, int::in) = (int32::uo) is det.
+:- func unchecked_left_ushift(int32::in, uint::in) = (int32::uo) is det.
 
     % Right shift.
     % X >> Y returns X "right shifted" by Y bits.
@@ -321,12 +323,14 @@
     % Throws an exception if Y is not in [0, 32).
     %
 :- func (int32::in) >> (int::in) = (int32::uo) is det.
+:- func (int32::in) >>u (uint::in) = (int32::uo) is det.
 
     % unchecked_right_shift(X, Y) is the same as X >> Y except that the
     % behaviour is undefined if Y is not in [0, bits_per_int32).
     % It will typically be implemented more efficiently than X >> Y.
     %
 :- func unchecked_right_shift(int32::in, int::in) = (int32::uo) is det.
+:- func unchecked_right_ushift(int32::in, uint::in) = (int32::uo) is det.
 
 %---------------------------------------------------------------------------%
 %
@@ -416,6 +420,7 @@
     % Convert an int32 to a pretty_printer.doc for formatting.
     %
 :- func int32_to_doc(int32) = pretty_printer.doc.
+:- pragma obsolete(func(int32_to_doc/1), [pretty_printer.int32_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -425,7 +430,6 @@
 :- import_module exception.
 :- import_module int.
 :- import_module require.
-:- import_module string.
 :- import_module uint.
 :- import_module uint32.
 
@@ -825,7 +829,7 @@ odd(X) :-
 
 %---------------------------------------------------------------------------%
 
-% The operations unchecked_left_shift and unchecked_right_shift are builtins.
+% The unchecked shift operations are builtins.
 
 X << Y = Result :-
     ( if cast_from_int(Y) < 32u then
@@ -835,11 +839,27 @@ X << Y = Result :-
         throw(domain_error(Msg))
     ).
 
+X <<u Y = Result :-
+    ( if Y < 32u then
+        Result = unchecked_left_ushift(X, Y)
+    else
+        Msg = "int32.(<<u): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
 X >> Y = Result :-
     ( if cast_from_int(Y) < 32u then
         Result = unchecked_right_shift(X, Y)
     else
         Msg = "int32.(>>): second operand is out of range",
+        throw(domain_error(Msg))
+    ).
+
+X >>u Y = Result :-
+    ( if Y < 32u then
+        Result = unchecked_right_ushift(X, Y)
+    else
+        Msg = "int32.(>>u): second operand is out of range",
         throw(domain_error(Msg))
     ).
 
@@ -934,7 +954,7 @@ max_int32 = 2_147_483_647_i32.
 
 %---------------------------------------------------------------------------%
 
-int32_to_doc(X) = str(string.int32_to_string(X)).
+int32_to_doc(I) = pretty_printer.int32_to_doc(I).
 
 %---------------------------------------------------------------------------%
 :- end_module int32.

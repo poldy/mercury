@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2006-2007, 2010 The University of Melbourne.
-% Copyright (C) 2014-2020 The Mercury team.
+% Copyright (C) 2014-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -377,7 +377,7 @@
 % Misc. operations on input streams.
 %
 
-    % Discard all the whitespace characters satisfying `char.is_whitespace'
+    % Discard all the whitespace characters satisfying char.is_whitespace
     % from the specified stream.
     %
 :- pred ignore_whitespace(Stream::in, result(Error)::out,

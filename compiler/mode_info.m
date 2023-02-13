@@ -26,12 +26,12 @@
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
 :- import_module hlds.pred_table.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bag.
@@ -56,7 +56,7 @@
                 unify_context,  % original source of the unification
                 side            % LHS or RHS
             )
-    ;       mode_context_uninitialized.
+    ;       mode_context_not_call_or_unify.
 
     % Initialize a mode_context.
     %
@@ -179,8 +179,7 @@
     % Getters of the fields of mode_sub_info.
 :- pred mode_info_get_pred_id(mode_info::in, pred_id::out) is det.
 :- pred mode_info_get_proc_id(mode_info::in, proc_id::out) is det.
-:- pred mode_info_get_varset(mode_info::in, prog_varset::out) is det.
-:- pred mode_info_get_var_types(mode_info::in, vartypes::out) is det.
+:- pred mode_info_get_var_table(mode_info::in, var_table::out) is det.
 :- pred mode_info_get_debug_modes(mode_info::in, maybe(debug_flags)::out)
     is det.
 :- pred mode_info_get_locked_vars(mode_info::in, locked_vars::out) is det.
@@ -238,9 +237,7 @@
     mode_info::in, mode_info::out) is det.
 :- pred mode_info_set_proc_id(proc_id::in,
     mode_info::in, mode_info::out) is det.
-:- pred mode_info_set_varset(prog_varset::in,
-    mode_info::in, mode_info::out) is det.
-:- pred mode_info_set_var_types(vartypes::in,
+:- pred mode_info_set_var_table(var_table::in,
     mode_info::in, mode_info::out) is det.
 % There is no mode_info_set_debug_modes; this field is read-only.
 :- pred mode_info_set_locked_vars(locked_vars::in,
@@ -287,7 +284,7 @@
 :- pred mode_info_get_num_errors(mode_info::in, int::out) is det.
 :- pred mode_info_get_liveness(mode_info::in, set_of_progvar::out) is det.
 
-:- pred mode_info_get_preds(mode_info::in, pred_table::out) is det.
+:- pred mode_info_get_pred_id_table(mode_info::in, pred_id_table::out) is det.
 :- pred mode_info_get_insts(mode_info::in, inst_table::out) is det.
 :- pred mode_info_get_modes(mode_info::in, mode_table::out) is det.
 
@@ -392,7 +389,7 @@
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module getopt.
 :- import_module int.
@@ -429,7 +426,39 @@
                 % The mode errors found.
 /*  4 */        mi_errors                   :: list(mode_error_info),
 
-                % A description of where in the goal the error occurred.
+                % Almost all mode errors are diagnosed when mode analysis
+                % processes a unification or a call. To prepape for
+                % the possibility of an error, before mode analysis
+                % starts processing one side of a unification, it records
+                % the identity of the side and of the unification in the
+                % mode context, and likewise before it starts processing
+                % the Nth argument of a call, we record N and the identity
+                % of the call. If an error occurs, the code in mode_errors.m
+                % that constructs the error message will pick up this context
+                % from here.
+                %
+                % A few kinds of mode errors occur outside both unifications
+                % and calls, and when processing HLDS constructs in which
+                % such errors can occur, this field should contain
+                % "mode_context_not_call_or_unify".
+                %
+                % When not processing a HLDS construct that is guaranteed
+                % not to generate a mode error, the contents of this field
+                % does not matter; it may be anything.
+                %
+                % When an error is discovered by code that is specific
+                % to e.g. unifications, this field should not be needed;
+                % the code should know in which part of which construct
+                % it found the error. On the other hand, some errors
+                % are caught by predicates that help process many kinds
+                % of HLDS goals, and they need their caller to tell them
+                % e.g. where the insts they handle come from.
+                %
+                % XXX The reason this field exists is probably because
+                % Fergus thought that it is easier to stuff this informatio
+                % into the mode_info, which those general-purpose predicates
+                % have already got, than to pass them in separate arguments,
+                % even though the latter would be semantically cleaner.
 /*  5 */        mi_mode_context             :: mode_context,
 
                 % The line number of the subgoal we are currently checking.
@@ -439,7 +468,7 @@
                 % referenced again after deep backtracking TO THE CURRENT
                 % EXECUTION POINT. These are the variables which need to be
                 % made mostly_unique rather than unique when we get to a
-                % nondet disjunction or a nondet call.  We do not include
+                % nondet disjunction or a nondet call. We do not include
                 % variables which may be referenced again after backtracking
                 % to a point EARLIER THAN the current execution point, since
                 % those variables will *already* have been marked as
@@ -457,11 +486,8 @@
                 % The mode which we are checking.
                 msi_proc_id                 :: proc_id,
 
-                % The variables in the current proc.
-                msi_varset                  :: prog_varset,
-
-                % The types of the variables.
-                msi_vartypes                :: vartypes,
+                % The names and types of the variables.
+                msi_var_table               :: var_table,
 
                 % Is mode debugging of this procedure enabled? If yes,
                 % is verbose mode debugging enabled, is minimal mode debugging
@@ -479,6 +505,25 @@
                 % disjunction within the current predicate.)
                 msi_live_vars               :: bag(prog_var),
 
+                % This starts out as the inst_varset taken from the proc_info
+                % of the procedure we are doing mode analysis on. As we make
+                % calls, we add to it the renamed-apart inst variables from
+                % the proc_infos of the procedures we call.
+                %
+                % I (zs) don't know the reason why these additions are needed.
+                %
+                % XXX Actually, we add to it the renamed-apart inst variables
+                % from the proc_infos of every procedure we *have considered*
+                % calling, because if a called predicate has two or more modes,
+                % we add the insts from *all* the inst_varsets of those
+                % procedures. Interestingly, if we throw away the additions
+                % to the inst_varset in the mode_info after we have finished
+                % considering making the call to a particular procedure,
+                % a bootcheck completes with just one test case failure,
+                % and that failure consists of the compiler generating
+                % an error message for invalid/constrained_poly_insts2
+                % that replaces a constrained inst variable with the
+                % constraining inst.
                 msi_instvarset              :: inst_varset,
 
                 % A stack of pairs of sets of variables used to mode-check
@@ -578,7 +623,7 @@
 
 %---------------------------------------------------------------------------%
 
-mode_context_init(mode_context_uninitialized).
+mode_context_init(mode_context_not_call_or_unify).
 
 %---------------------------------------------------------------------------%
 
@@ -611,8 +656,7 @@ mode_info_init(ModuleInfo, PredId, ProcId, Context, LiveVars, HeadInstVars,
     ),
 
     module_info_proc_info(ModuleInfo, PredId, ProcId, ProcInfo),
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     proc_info_get_inst_varset(ProcInfo, InstVarSet),
 
     bag.from_sorted_list(set_of_var.to_sorted_list(LiveVars), LiveVarsBag),
@@ -631,7 +675,7 @@ mode_info_init(ModuleInfo, PredId, ProcId, Context, LiveVars, HeadInstVars,
     InDuplForSwitch = not_in_dupl_for_switch,
     map.init(PredVarMultiModeMap),
 
-    ModeSubInfo = mode_sub_info(PredId, ProcId, VarSet, VarTypes,
+    ModeSubInfo = mode_sub_info(PredId, ProcId, VarTable,
         MaybeDebug, LockedVars, LiveVarsBag, InstVarSet, ParallelVars,
         LastCheckpointInstMap, InstMap0, HeadInstVars, Warnings,
         PredVarMultiModeMap,
@@ -682,10 +726,8 @@ mode_info_get_pred_id(MI, X) :-
     X = MI ^ mi_sub_info ^ msi_pred_id.
 mode_info_get_proc_id(MI, X) :-
     X = MI ^ mi_sub_info ^ msi_proc_id.
-mode_info_get_varset(MI, X) :-
-    X = MI ^ mi_sub_info ^ msi_varset.
-mode_info_get_var_types(MI, X) :-
-    X = MI ^ mi_sub_info ^ msi_vartypes.
+mode_info_get_var_table(MI, X) :-
+    X = MI ^ mi_sub_info ^ msi_var_table.
 mode_info_get_debug_modes(MI, X) :-
     X = MI ^ mi_sub_info ^ msi_debug.
 mode_info_get_locked_vars(MI, X) :-
@@ -768,10 +810,8 @@ mode_info_set_pred_id(X, !MI) :-
     !MI ^ mi_sub_info ^ msi_pred_id := X.
 mode_info_set_proc_id(X, !MI) :-
     !MI ^ mi_sub_info ^ msi_proc_id := X.
-mode_info_set_varset(X, !MI) :-
-    !MI ^ mi_sub_info ^ msi_varset := X.
-mode_info_set_var_types(X, !MI) :-
-    !MI ^ mi_sub_info ^ msi_vartypes := X.
+mode_info_set_var_table(X, !MI) :-
+    !MI ^ mi_sub_info ^ msi_var_table := X.
 mode_info_set_locked_vars(X, !MI) :-
     !MI ^ mi_sub_info ^ msi_locked_vars := X.
 mode_info_set_live_vars(X, !MI) :-
@@ -923,9 +963,9 @@ mode_info_get_liveness(ModeInfo, LiveVars) :-
     bag.to_list_without_duplicates(LiveVarsBag, SortedList),
     set_of_var.sorted_list_to_set(SortedList, LiveVars).
 
-mode_info_get_preds(ModeInfo, Preds) :-
+mode_info_get_pred_id_table(ModeInfo, PredIdTable) :-
     mode_info_get_module_info(ModeInfo, ModuleInfo),
-    module_info_get_preds(ModuleInfo, Preds).
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable).
 
 mode_info_get_insts(ModeInfo, Insts) :-
     mode_info_get_module_info(ModeInfo, ModuleInfo),
@@ -936,8 +976,8 @@ mode_info_get_modes(ModeInfo, Modes) :-
     module_info_get_mode_table(ModuleInfo, Modes).
 
 mode_info_get_types_of_vars(ModeInfo, Vars, TypesOfVars) :-
-    mode_info_get_var_types(ModeInfo, VarTypes),
-    lookup_var_types(VarTypes, Vars, TypesOfVars).
+    mode_info_get_var_table(ModeInfo, VarTable),
+    lookup_var_types(VarTable, Vars, TypesOfVars).
 
 %---------------------------------------------------------------------------%
 
@@ -978,7 +1018,7 @@ mode_info_set_call_context(CallContext, !MI) :-
     ).
 
 mode_info_unset_call_context(!MI) :-
-    mode_info_set_mode_context(mode_context_uninitialized, !MI).
+    mode_info_set_mode_context(mode_context_not_call_or_unify, !MI).
 
 mode_info_set_call_arg_context(ArgNum, !ModeInfo) :-
     mode_info_get_mode_context(!.ModeInfo, ModeContext0),
@@ -992,8 +1032,8 @@ mode_info_set_call_arg_context(ArgNum, !ModeInfo) :-
         % for polymorphic complicated unifications are ground.
         % For that case, we don't care about the ArgNum.
     ;
-        ModeContext0 = mode_context_uninitialized,
-        unexpected($pred, "uninitialized")
+        ModeContext0 = mode_context_not_call_or_unify,
+        unexpected($pred, "not_call_or_unify")
     ).
 
 mode_info_need_to_requantify(!ModeInfo) :-

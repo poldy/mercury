@@ -1,10 +1,10 @@
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % Copyright (C) 2005-2007, 2009-2012 The University of Melbourne.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % File rbmm.points_to_info.m.
 % Main author: Quan Phan.
@@ -13,7 +13,7 @@
 % rpta_info_table maps a procedure to its corresponding rpt information
 % (i.e., the rpt graph and the alpha mappings (at the call sites in it)).
 %
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- module transform_hlds.rbmm.points_to_info.
 :- interface.
@@ -25,7 +25,7 @@
 
 :- import_module map.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- type rpta_info_table == map(pred_proc_id, rpta_info).
 
@@ -48,7 +48,7 @@
 
 :- pred rpta_info_equal(rpta_info::in, rpta_info::in) is semidet.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
     % This type represents the alpha mapping of all call sites in a procedure.
     % For documentation of alpha mappings, see Chapter 4 in Quan's thesis;
@@ -61,14 +61,14 @@
     %
 :- type rpt_call_alpha_mapping == map(rptg_node, rptg_node).
 
-%-----------------------------------------------------------------------------%
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- implementation.
 
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module int.
@@ -76,7 +76,7 @@
 :- import_module set.
 :- import_module string.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 rpta_info_table_init = map.init.
 
@@ -87,18 +87,18 @@ rpta_info_table_set_rpta_info(PredProcId, RptaInfo, !Table) :-
     !Table ^ elem(PredProcId) := RptaInfo.
 
 rpta_info_init(ProcInfo) = RptaInfo :-
-    proc_info_get_vartypes(ProcInfo, VarTypes),
-    vartypes_vars(VarTypes, Vars),
-    list.foldl2(add_node_from_var(VarTypes), Vars, 1, _Reg,
+    proc_info_get_var_table(ProcInfo, VarTable),
+    var_table_vars(VarTable, Vars),
+    list.foldl2(add_node_from_var(VarTable), Vars, 1, _Reg,
         rpt_graph_init, Graph),
     map.init(AlphaMapping),
     RptaInfo = rpta_info(Graph, AlphaMapping).
 
-:- pred add_node_from_var(vartypes::in, prog_var::in, int::in,
+:- pred add_node_from_var(var_table::in, prog_var::in, int::in,
     int::out, rpt_graph::in, rpt_graph::out) is det.
 
-add_node_from_var(VarTypes, Var, Reg0, Reg, !Graph) :-
-    lookup_var_type(VarTypes, Var, NodeType),
+add_node_from_var(VarTable, Var, Reg0, Reg, !Graph) :-
+    lookup_var_type(VarTable, Var, NodeType),
     set.init(Varset0),
     set.insert(Var, Varset0, Varset),
     Reg = Reg0 + 1,
@@ -112,7 +112,7 @@ rpta_info_equal(RptaInfoA, RptaInfoB):-
     rptg_equal(GraphA, GraphB),
     rpt_alpha_mapping_equal(AlphaA, AlphaB).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % Alpha mapping at call sites
 %
@@ -161,6 +161,6 @@ rpt_alpha_mapping_at_call_site_equal_2([N | Ns], AMAtCallSiteA,
     NPrimeA = NPrimeB,
     rpt_alpha_mapping_at_call_site_equal_2(Ns, AMAtCallSiteA, AMAtCallSiteB).
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 :- end_module transform_hlds.rbmm.points_to_info.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%

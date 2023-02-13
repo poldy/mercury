@@ -31,7 +31,7 @@
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_item.
 
@@ -369,7 +369,7 @@ add_pragma_foreign_export_enum(ItemForeignExportEnum, !ModuleInfo,
         Specs = !.Specs ++ Specs0
     ).
 
-:- pred build_export_enum_name_map(list(format_component)::in,
+:- pred build_export_enum_name_map(list(format_piece)::in,
     prog_context::in, foreign_language::in, string::in,
     uppercase_export_enum::in, map(string, string)::in,
     list(constructor_repn)::in, map(string, string)::out,
@@ -405,7 +405,8 @@ build_export_enum_name_map(ContextPieces, Context, Lang, Prefix, MakeUpperCase,
         MakeBFNPieces = (func(BadForeignName) = [quote(BadForeignName)]),
         BadForeignPiecesList = list.map(MakeBFNPieces, BadForeignNames),
         BadForeignPieces =
-            component_list_to_line_pieces(BadForeignPiecesList, [suffix(".")]),
+            component_list_to_line_pieces(BadForeignPiecesList,
+                [suffix("."), nl]),
         VerbosePieces = [words("The problematic"),
             words(choose_number(BadForeignNames,
                 "foreign name is:", "foreign names are:")),
@@ -459,7 +460,7 @@ add_ctor_to_name_map(_Lang, Prefix, MakeUpperCase, OverrideMap, CtorRepn,
 %
 
 :- pred build_mercury_foreign_map(module_name::in, sym_name::in, arity::in,
-    for_fe_or_fee::in, prog_context::in, list(format_component)::in,
+    for_fe_or_fee::in, prog_context::in, list(format_piece)::in,
     list(constructor)::in,
     assoc_list(sym_name, string)::in, bimap(string, string)::out,
     list(error_spec)::in, list(error_spec)::out) is det.
@@ -528,7 +529,7 @@ maybe_add_duplicate_foreign_enum_error(TypeSymame, TypeArity, Lang,
 
 %---------------------------------------------------------------------------%
 
-:- pred report_if_builtin_type(prog_context::in, list(format_component)::in,
+:- pred report_if_builtin_type(prog_context::in, list(format_piece)::in,
     sym_name::in, arity::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
@@ -566,7 +567,7 @@ report_if_builtin_type(Context, ContextPieces, TypeSymame, TypeArity,
     ;       hlds_solver_type(ground)
     ;       hlds_abstract_type(ground).
 
-:- pred report_not_du_type(prog_context::in, list(format_component)::in,
+:- pred report_not_du_type(prog_context::in, list(format_piece)::in,
     sym_name::in, arity::in, hlds_type_body::in(non_du_type_body),
     list(error_spec)::in, list(error_spec)::out) is det.
 
@@ -588,7 +589,7 @@ report_not_du_type(Context, ContextPieces, TypeSymName, TypeArity, TypeBody,
     report_not_enum_type(Context, ContextPieces, TypeSymName, TypeArity,
         not_enum_non_du(TypeKindDesc), !Specs).
 
-:- pred report_not_enum_type(prog_context::in, list(format_component)::in,
+:- pred report_not_enum_type(prog_context::in, list(format_piece)::in,
     sym_name::in, arity::in, not_enum_info::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 

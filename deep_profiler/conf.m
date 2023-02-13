@@ -44,6 +44,9 @@
 
 :- implementation.
 
+:- import_module io.call_system.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module list.
 :- import_module maybe.
 :- import_module require.
@@ -73,7 +76,7 @@ server_name_port(Machine, !IO) :-
 :- pred server_name(string::out, io::di, io::uo) is det.
 
 server_name(ServerName, !IO) :-
-    io.get_environment_var("SERVER_NAME", MaybeServerName, !IO),
+    io.environment.get_environment_var("SERVER_NAME", MaybeServerName, !IO),
     (
         MaybeServerName = yes(ServerName)
     ;
@@ -84,13 +87,13 @@ server_name(ServerName, !IO) :-
 :- pred server_name_2(string::out, io::di, io::uo) is det.
 
 server_name_2(ServerName, !IO) :-
-    io.make_temp_file(TmpFileResult, !IO),
+    io.file.make_temp_file(TmpFileResult, !IO),
     (
         TmpFileResult = ok(TmpFile),
         hostname_cmd(HostnameCmd),
         ServerRedirectCmd =
             string.format("%s > %s", [s(HostnameCmd), s(TmpFile)]),
-        io.call_system(ServerRedirectCmd, Res1, !IO),
+        io.call_system.call_system(ServerRedirectCmd, Res1, !IO),
         (
             Res1 = ok(ResCode),
             ( if ResCode = 0 then
@@ -118,7 +121,7 @@ server_name_2(ServerName, !IO) :-
                     unexpected($pred,
                         "cannot open file to find the server's name")
                 ),
-                io.remove_file(TmpFile, _, !IO)
+                io.file.remove_file(TmpFile, _, !IO)
             else
                 unexpected($pred,
                     "cannot execute cmd to find the server's name")
@@ -136,10 +139,10 @@ server_name_2(ServerName, !IO) :-
 :- pred maybe_server_port(maybe(string)::out, io::di, io::uo) is det.
 
 maybe_server_port(MaybeServerPort, !IO) :-
-    io.get_environment_var("SERVER_PORT", MaybeServerPort, !IO).
+    io.environment.get_environment_var("SERVER_PORT", MaybeServerPort, !IO).
 
 script_name(ScriptName, !IO) :-
-    io.get_environment_var("SCRIPT_NAME", MaybeScriptName, !IO),
+    io.environment.get_environment_var("SCRIPT_NAME", MaybeScriptName, !IO),
     (
         MaybeScriptName = yes(ScriptName)
     ;

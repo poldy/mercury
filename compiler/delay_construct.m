@@ -32,10 +32,12 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 
+:- import_module io.
+
 %-----------------------------------------------------------------------------%
 
-:- pred delay_construct_proc(module_info::in, pred_proc_id::in,
-    proc_info::in, proc_info::out) is det.
+:- pred delay_construct_proc(io.text_output_stream::in, module_info::in,
+    pred_proc_id::in, proc_info::in, proc_info::out) is det.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -48,10 +50,10 @@
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.instmap.
 :- import_module hlds.passes_aux.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module list.
@@ -60,19 +62,20 @@
 
 %-----------------------------------------------------------------------------%
 
-delay_construct_proc(ModuleInfo, proc(PredId, ProcId), !ProcInfo) :-
+delay_construct_proc(ProgressStream, ModuleInfo, PredProcId, !ProcInfo) :-
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
-            "Delaying construction unifications in", PredId, ProcId, !IO)
+        maybe_write_proc_progress_message(ProgressStream, ModuleInfo,
+            "Delaying construction unifications in", PredProcId, !IO)
     ),
-    module_info_get_globals(ModuleInfo, Globals),
+    PredProcId = proc(PredId, _ProcId),
     module_info_pred_info(ModuleInfo, PredId, PredInfo),
+    module_info_get_globals(ModuleInfo, Globals),
     body_should_use_typeinfo_liveness(PredInfo, Globals, BodyTypeinfoLiveness),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes),
+    proc_info_get_var_table(!.ProcInfo, VarTable),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps),
     proc_info_get_initial_instmap(ModuleInfo, !.ProcInfo, InstMap0),
     DelayInfo = delay_construct_info(ModuleInfo, BodyTypeinfoLiveness,
-        VarTypes, RttiVarMaps),
+        VarTable, RttiVarMaps),
     proc_info_get_goal(!.ProcInfo, Goal0),
     delay_construct_in_goal(Goal0, InstMap0, DelayInfo, Goal),
     proc_info_set_goal(Goal, !ProcInfo).
@@ -81,7 +84,7 @@ delay_construct_proc(ModuleInfo, proc(PredId, ProcId), !ProcInfo) :-
     --->    delay_construct_info(
                 dci_module_info             :: module_info,
                 dci_body_typeinfo_liveness  :: bool,
-                dci_vartypes                :: vartypes,
+                dci_var_table               :: var_table,
                 dci_rtti_varmaps            :: rtti_varmaps
             ).
 
@@ -229,10 +232,10 @@ delay_construct_in_conj([Goal0 | Goals0], InstMap0, DelayInfo,
         Goal0 = hlds_goal(GoalExpr0, GoalInfo0),
         delay_construct_skippable(GoalExpr0, GoalInfo0),
         NonLocals = goal_info_get_nonlocals(GoalInfo0),
-        maybe_complete_with_typeinfo_vars(NonLocals,
+        maybe_complete_with_typeinfo_vars(DelayInfo ^ dci_var_table,
+            DelayInfo ^ dci_rtti_varmaps,
             DelayInfo ^ dci_body_typeinfo_liveness,
-            DelayInfo ^ dci_vartypes,
-            DelayInfo ^ dci_rtti_varmaps, CompletedNonLocals),
+            NonLocals, CompletedNonLocals),
         set_of_var.intersect(CompletedNonLocals,
             set_to_bitset(ConstructedVars0), Intersection),
         set_of_var.is_empty(Intersection),

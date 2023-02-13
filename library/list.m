@@ -23,10 +23,10 @@
 
 %---------------------------------------------------------------------------%
 
-    % The definition of the type `list(T)'.
+    % The definition of the type list(T).
     % A list is either an empty list, denoted `[]',
-    % or an element `Head' of type `T' followed by a tail `Tail'
-    % of type `list(T)', denoted `[Head | Tail]'.
+    % or an element Head of type T followed by a tail Tail
+    % of type list(T), denoted `[Head | Tail]'.
     %
 :- type list(T)
     --->    []
@@ -57,21 +57,33 @@
 
 :- pred is_not_empty(list(T)::in) is semidet.
 
+:- pred is_singleton(list(T)::in, T::out) is semidet.
+
 %---------------------------------------------------------------------------%
 
+    % head(List) returns the head of List (i.e. its first element),
+    % failing if List is empty.
+    %
 :- func head(list(T)) = T is semidet.
+:- pred head(list(T)::in, T::out) is semidet.
 
     % det_head(List) returns the first element of List,
     % calling error/1 if List is empty.
     %
 :- func det_head(list(T)) = T.
+:- pred det_head(list(T)::in, T::out) is det.
 
+    % tail(List) returns the tail of List (i.e. all its elements
+    % except the first), failing if List is empty.
+    %
 :- func tail(list(T)) = list(T) is semidet.
+:- pred tail(list(T)::in, list(T)::out) is semidet.
 
     % det_tail(List) returns the tail of List,
     % calling error/1 if List is empty.
     %
 :- func det_tail(list(T)) = list(T).
+:- pred det_tail(list(T)::in, list(T)::out) is det.
 
     % det_head_tail(List, Head, Tail) returns the head and the tail of List,
     % calling error/1 if List is empty.
@@ -87,7 +99,7 @@
 
     % Standard append predicate:
     % append(Start, End, List) is true iff
-    % `List' is the result of concatenating `Start' and `End'.
+    % List is the result of concatenating Start and End.
     %
 :- pred append(list(T), list(T), list(T)).
 :- mode append(di, di, uo) is det.
@@ -133,8 +145,8 @@
     % length(List) = Length:
     % length(List, Length):
     %
-    % True iff `Length' is the length of `List', i.e. if `List' contains
-    % `Length' elements.
+    % True iff Length is the length of List, i.e. if List contains
+    % Length elements.
     %
 :- func length(list(T)) = int.
 
@@ -145,7 +157,7 @@
 
     % same_length(ListA, ListB):
     %
-    % True iff `ListA' and `ListB' have the same length,
+    % True iff ListA and ListB have the same length,
     % i.e. iff they both contain the same number of elements.
     %
     % Does not traverse *either* list further than the length
@@ -174,7 +186,7 @@
 
     % member(Elem, List):
     %
-    % True iff `List' contains `Elem'.
+    % True iff List contains Elem.
     %
 :- pred member(T, list(T)).
 :- mode member(in, in) is semidet.
@@ -182,15 +194,15 @@
 
     % member(Elem, List, SubList):
     %
-    % True iff `List' contains `Elem', and `SubList' is a suffix of `List'
-    % beginning with `Elem'.
+    % True iff List contains Elem, and SubList is a suffix of List
+    % beginning with Elem.
     % Same as `SubList = [Elem | _], append(_, SubList, List)'.
     %
 :- pred member(T::out, list(T)::in, list(T)::out) is nondet.
 
     % member_index0(Elem, List, Index):
     %
-    % True iff `List' contains `Elem' at the zero-based index `Index'.
+    % True iff List contains Elem at the zero-based index Index.
     %
 :- pred member_index0(T, list(T), int).
 :- mode member_index0(in, in, in) is semidet.
@@ -199,8 +211,8 @@
 
     % member_indexes0(Elem, List, Indexes):
     %
-    % True iff `List' contains `Elem' at the zero-based indexes `Indexes'.
-    % `Indexes' will be sorted.
+    % True iff List contains Elem at the zero-based indexes Indexes.
+    % Indexes will be sorted.
     %
 :- pred member_indexes0(T::in, list(T)::in, list(int)::out) is det.
 
@@ -266,7 +278,7 @@
 
     % reverse(List, Reverse):
     %
-    % `Reverse' is a list containing the same elements as `List'
+    % Reverse is a list containing the same elements as List
     % but in reverse order.
     %
 :- pred reverse(list(T), list(T)).
@@ -286,7 +298,7 @@
 
     % insert(Elem, List0, List):
     %
-    % `List' is the result of inserting `Elem' somewhere in `List0'.
+    % List is the result of inserting Elem somewhere in List0.
     % Same as `delete(List, Elem, List0)'.
     %
 :- pred insert(T, list(T), list(T)).
@@ -297,8 +309,8 @@
 
     % delete(List, Elem, Remainder):
     %
-    % True iff `Elem' occurs in `List', and `Remainder' is the result of
-    % deleting one occurrence of `Elem' from `List'.
+    % True iff Elem occurs in List, and Remainder is the result of
+    % deleting one occurrence of Elem from List.
     %
 :- pred delete(list(T), T, list(T)).
 :- mode delete(in, in, in) is semidet.
@@ -520,8 +532,8 @@
 
     % split_list(N, List, Start, End):
     %
-    % Splits `List' into a prefix `Start' of length `N', and a remainder
-    % `End'. Fails if `N' is not in `0 .. length(List)'.
+    % Splits List into a prefix Start of length N, and a remainder End.
+    % Fails if N is not in `0 .. length(List)'.
     % See also: take, drop and split_upto.
     %
 :- pred split_list(int::in, list(T)::in, list(T)::out, list(T)::out)
@@ -530,15 +542,15 @@
     % det_split_list(N, List, Start, End):
     %
     % A deterministic version of split_list, which throws an exception
-    % instead of failing if `N' is not in 0 .. length(List).
+    % instead of failing if N is not in 0 .. length(List).
     %
 :- pred det_split_list(int::in, list(T)::in, list(T)::out, list(T)::out)
     is det.
 
     % split_upto(N, List, Start, End):
     %
-    % Splits `List' into a prefix `Start' of length `min(N, length(List))',
-    % and a remainder `End'. Throws an exception if `N' < 0.
+    % Splits List into a prefix Start of length `min(N, length(List))',
+    % and a remainder End. Throws an exception if N < 0.
     % See also: split_list, take, drop.
     %
 :- pred split_upto(int::in, list(T)::in, list(T)::out, list(T)::out) is det.
@@ -573,12 +585,46 @@
     %
 :- pred det_split_last(list(T)::in, list(T)::out, T::out) is det.
 
+    % intersperse(Sep, List, ListWithSep):
+    %
+    % Insert Sep between each pair of elements in List, and return
+    % the result as ListWithSep.
+    %
+    % For example, intersperse("and", ["jan", "feb", "mar"], ListWithSep)
+    % will bind ListWithSep to ["jan", "and", "feb", "and", "mar"].
+    %
+:- pred intersperse(T::in, list(T)::in, list(T)::out) is det.
+
+    % intersperse_list(Seps, List, ListWithSeps):
+    %
+    % Insert Seps between each pair of elements in List, and return
+    % the result as ListWithSeps.
+    %
+    % For example, intersperse_list(["and", "then"], ["jan", "feb", "mar"],
+    % ListWithSeps) will bind ListWithSeps to
+    % ["jan", "and", "then", "feb", "and", "then", "mar"].
+    %
+:- pred intersperse_list(list(T)::in, list(T)::in, list(T)::out) is det.
+
+    % intersperse_list_last(NonLastSeps, LastSeps, List, ListWithSeps):
+    %
+    % Insert NonLastSeps between each pair of elements in List except
+    % the last pair, insert LastSeps between the last pair of elements,
+    % and return the result as ListWithSeps.
+    %
+    % For example, intersperse_list_last(["and", "then"], ["and", "finally"],
+    % ["jan", "feb", "mar"], ListWithSeps) will bind ListWithSeps to
+    % ["jan", "and", "then", "feb", "and", "finally", "mar"].
+    %
+:- pred intersperse_list_last(list(T)::in, list(T)::in, list(T)::in,
+    list(T)::out) is det.
+
 %---------------------%
 
     % take(N, List, Start):
     %
-    % `Start' is the first `Len' elements of `List'.
-    % Fails if `N' is not in `0 .. length(List)'.
+    % Start is the first Len elements of List.
+    % Fails if N is not in `0 .. length(List)'.
     %
 :- pred take(int::in, list(T)::in, list(T)::out) is semidet.
 
@@ -590,8 +636,8 @@
 
     % take_upto(Len, List) = Start:
     %
-    % `Start' is the first `Len' elements of `List'. If `List' has less than
-    % `Len' elements, return the entire list. Throws an exception if `N' < 0.
+    % Start is the first Len elements of List. If List has less than
+    % Len elements, return the entire list. Throws an exception if N < 0.
     %
 :- func take_upto(int, list(T)) = list(T).
 :- pred take_upto(int::in, list(T)::in, list(T)::out) is det.
@@ -600,16 +646,16 @@
 
     % drop(N, List, End):
     %
-    % `End' is the remainder of `List' after removing the first `N' elements.
-    % Fails if `N' is not in `0 .. length(List)'.
+    % End is the remainder of List after removing the first N elements.
+    % Fails if N is not in `0 .. length(List)'.
     % See also: split_list.
     %
 :- pred drop(int::in, list(T)::in, list(T)::out) is semidet.
 
     % det_drop(N, List, End):
     %
-    % `End' is the remainder of `List' after removing the first `N' elements.
-    % Throws an exception if `N' is not in `0 .. length(List)'.
+    % End is the remainder of List after removing the first N elements.
+    % Throws an exception if N is not in `0 .. length(List)'.
     % See also: split_list.
     %
 :- pred det_drop(int::in, list(T)::in, list(T)::out) is det.
@@ -624,15 +670,34 @@
 :- pred take_while(pred(T)::in(pred(in) is semidet), list(T)::in,
     list(T)::out, list(T)::out) is det.
 
+    % take_while_not(Pred, List, Start, End)
+    %
+    % List = Start ++ End. Start is the longest prefix of List where Pred
+    % fails for every element in Start. End is the remainder of the list.
+    %
+:- pred take_while_not(pred(T)::in(pred(in) is semidet), list(T)::in,
+    list(T)::out, list(T)::out) is det.
+
     % take_while(Pred, List) = Start :-
     %     take_while(Pred, List, Start, _End)
     %
     % Start is the longest prefix of List where Pred succeeds for every element
     % in Start.
     %
-:- func take_while(pred(T), list(T)) = list(T).
-:- mode take_while(pred(in) is semidet, in) = out is det.
+:- func take_while(pred(T)::in(pred(in) is semidet), list(T)::in) =
+    (list(T)::out) is det.
 :- pred take_while(pred(T)::in(pred(in) is semidet), list(T)::in,
+    list(T)::out) is det.
+
+    % take_while(Pred, List) = Start :-
+    %     take_while(Pred, List, Start, _End)
+    %
+    % Start is the longest prefix of List where Pred fails for every element
+    % in Start.
+    %
+:- func take_while_not(pred(T)::in(pred(in) is semidet), list(T)::in) =
+    (list(T)::out) is det.
+:- pred take_while_not(pred(T)::in(pred(in) is semidet), list(T)::in,
     list(T)::out) is det.
 
 %---------------------%
@@ -667,18 +732,18 @@
 
     % condense(ListOfLists) = List:
     %
-    % `List' is the result of concatenating all the elements of `ListOfLists'.
+    % List is the result of concatenating all the elements of ListOfLists.
     %
 :- func condense(list(list(T))) = list(T).
 :- pred condense(list(list(T))::in, list(T)::out) is det.
 
     % chunk(List, ChunkSize) = Chunks:
     %
-    % Takes a list `List' and breaks it into a list of lists `Chunks',
-    % such that the length of each list in `Chunks' is at most `ChunkSize.
-    % (More precisely, the length of each list in `Chunks' other than the
-    % last one is exactly `ChunkSize', while the length of the last list in
-    % `Chunks' may vary between one and `ChunkSize'.)
+    % Takes a list List and breaks it into a list of lists Chunks,
+    % such that the length of each list in Chunks is at most ChunkSize.
+    % (More precisely, the length of each list in Chunks other than the
+    % last one is exactly ChunkSize, while the length of the last list in
+    % Chunks may vary between one and ChunkSize.)
     %
 :- func chunk(list(T), int) = list(list(T)).
 :- pred chunk(list(T)::in, int::in, list(list(T))::out) is det.
@@ -700,7 +765,7 @@
 
     % perm(List0, List):
     %
-    % True iff `List' is a permutation of `List0'.
+    % True iff List is a permutation of List0.
     %
 :- pred perm(list(T)::in, list(T)::out) is multi.
 
@@ -711,6 +776,7 @@
     % Convert a list to a pretty_printer.doc for formatting.
     %
 :- func list_to_doc(list(T)) = pretty_printer.doc.
+:- pragma obsolete(func(list_to_doc/1), [pretty_printer.list_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %
@@ -880,10 +946,10 @@
 
 %---------------------------------------------------------------------------%
 
-    % map(T, L) = M:
-    % map(T, L, M):
+    % map(F, L) = M:
+    % map(P, L, M):
     %
-    % Apply the closure T to transform the elements of L
+    % Apply the function F or the predicate P to transform the elements of L
     % into the elements of M.
     %
 :- func map(func(X) = Y, list(X)) = list(Y).
@@ -895,8 +961,10 @@
 :- mode map(pred(in, out) is nondet, in, out) is nondet.
 :- mode map(pred(in, in) is semidet, in, in) is semidet.
 
-    % map2(T, L, M1, M2) uses the closure T
-    % to transform the elements of L into the elements of M1 and M2.
+    % map2(P, L, M1, M2):
+    %
+    % Apply the predicate P to transform the elements of L
+    % into the elements of M1 and M2.
     %
 :- pred map2(pred(A, B, C), list(A), list(B), list(C)).
 :- mode map2(pred(in, out, out) is det, in, out, out) is det.
@@ -1071,17 +1139,16 @@
 
 %---------------------------------------------------------------------------%
 
-
     % foldl(Func, List, Start) = End:
     % foldl(Pred, List, Start, End):
     %
-    % Calls Pred on each element of List, working left-to-right.
-    % Each call to Pred will have a pair of arguments that represent
+    % Calls Func or Pred on each element of List, working left-to-right.
+    % Each call to Func or Pred will have a pair of arguments that represent
     % respectively the current and the next value of a piece of state.
     % (Such current-next argument pairs are usually called an accumulator,
-    % because the usual use case is that the successive calls to Pred
+    % because the usual use case is that the successive calls to Func or Pred
     % accumulate pieces of information.) The initial value of the accumulator
-    % is Start, each call to Pred updates it to the next value, and
+    % is Start, each call to Func or Pred updates it to the next value, and
     % foldl returns its final value as End.
     %
 :- func foldl(func(L, A) = A, list(L), A) = A.
@@ -1368,16 +1435,115 @@
 
 %---------------------%
 
-    % foldr(Func, List, Start) = End:
-    % foldr(Func, List, Start, End):
+    % gap_foldl(ProcessPred, GapPred, List, !Acc):
     %
-    % Calls Pred on each element of List, working right-to-left.
-    % Each call to Pred will have a pair of arguments that represent
+    % Invoke ProcessPred on every element of List,
+    % and invoke GapPred on every gap *between* elements in List.
+    % The intended use case is printing a list, using ProcessPred to print
+    % each element, and using GapPred to print e.g. commas between
+    % the elements.
+    %
+:- pred gap_foldl(pred(L, A, A), pred(A, A), list(L), A, A).
+:- mode gap_foldl(pred(in, di, uo) is det, pred(di, uo) is det,
+    in, di, uo) is det.
+:- mode gap_foldl(pred(in, in, out) is det, pred(in, out) is det,
+    in, in, out) is det.
+
+    % last_gap_foldl(ProcessPred, GapPred, LastGapPred, List, !Acc):
+    %
+    % Invoke ProcessPred on every element of List,
+    % invoke GapPred on every gap between elements in List except the last,
+    % and invoke LastGapPred on the last gap between elements.
+    % The intended use case is printing a list, using ProcessPred to print
+    % each element, and using GapPred to print e.g. commas between
+    % the elements, and using LastGapPred to print something else,
+    % such as "and".
+    %
+:- pred last_gap_foldl(pred(L, A, A), pred(A, A), pred(A, A), list(L), A, A).
+:- mode last_gap_foldl(pred(in, di, uo) is det, pred(di, uo) is det,
+    pred(di, uo) is det, in, di, uo) is det.
+:- mode last_gap_foldl(pred(in, in, out) is det, pred(in, out) is det,
+    pred(in, out) is det, in, in, out) is det.
+
+%---------------------%
+
+    % chunk_foldl(ChunkSize, Pred, List, !Acc):
+    %
+    % Does the same job as foldl(Pred, List, !Acc), but using
+    % two nested loops, not one.
+    %
+    % In most grades, the implementation of foldl can handle lists
+    % of arbitrary length, the reason being that tail recursion optimization
+    % allows it to do its work using only one stack frame. However, in some
+    % grades (including debugging and some profiling grades) tail recursion
+    % optimization is not available, which means that foldl will need
+    % a separate stack frame for processing each element. With long lists,
+    % this can exhaust the stack.
+    %
+    % chunk_foldl addresses this issue by replacing foldl's single loop
+    % with an outer and an inner loop. Each invocation of the inner loop
+    % processes one chunk of the list (whose length is given by ChunkSize),
+    % and when it is done with that chunk, the inner loop returns, which
+    % means that it frees up all the stack frames that it used. The outer loop
+    % then continues to invoke the inner loop until all elements of List
+    % have been processed.
+    %
+    % With this arrangement, the maximum number of stack frames needed
+    % to process a list of length N is N/ChunkSize + ChunkSize, the former
+    % being the number of frames used by the outer loop, and the latter
+    % being the max number of frames used by the inner loop. This means that
+    % the optimal ChunkSize for a list of length N is the square root of N,
+    % but usually optimality is not required, and any reasonable chunk size
+    % will work.
+    %
+:- pred chunk_foldl(int, pred(L, A, A), list(L), A, A).
+:- mode chunk_foldl(in, pred(in, di, uo) is det, in, di, uo) is det.
+:- mode chunk_foldl(in, pred(in, in, out) is det, in, in, out) is det.
+
+    % Does the same job of chunk_foldl, but with two accumulators.
+    %
+:- pred chunk_foldl2(int, pred(L, A, A, B, B), list(L), A, A, B, B).
+:- mode chunk_foldl2(in, pred(in, di, uo, di, uo) is det,
+    in, di, uo, di, uo) is det.
+:- mode chunk_foldl2(in, pred(in, in, out, di, uo) is det,
+    in, in, out, di, uo) is det.
+:- mode chunk_foldl2(in, pred(in, in, out, in, out) is det,
+    in, in, out, in, out) is det.
+
+    % Does the same job of chunk_foldl, but with three accumulators.
+    %
+:- pred chunk_foldl3(int, pred(L, A, A, B, B, C, C),
+    list(L), A, A, B, B, C, C).
+:- mode chunk_foldl3(in, pred(in, in, out, di, uo, di, uo) is det,
+    in, in, out, di, uo, di, uo) is det.
+:- mode chunk_foldl3(in, pred(in, in, out, in, out, di, uo) is det,
+    in, in, out, in, out, di, uo) is det.
+:- mode chunk_foldl3(in, pred(in, in, out, in, out, in, out) is det,
+    in, in, out, in, out, in, out) is det.
+
+    % Does the same job of chunk_foldl, but with four accumulators.
+    %
+:- pred chunk_foldl4(int, pred(L, A, A, B, B, C, C, D, D),
+    list(L), A, A, B, B, C, C, D, D).
+:- mode chunk_foldl4(in, pred(in, in, out, in, out, di, uo, di, uo) is det,
+    in, in, out, in, out, di, uo, di, uo) is det.
+:- mode chunk_foldl4(in, pred(in, in, out, in, out, in, out, di, uo) is det,
+    in, in, out, in, out, in, out, di, uo) is det.
+:- mode chunk_foldl4(in, pred(in, in, out, in, out, in, out, in, out) is det,
+    in, in, out, in, out, in, out, in, out) is det.
+
+%---------------------%
+
+    % foldr(Func, List, Start) = End:
+    % foldr(Pred, List, Start, End):
+    %
+    % Calls Func or Pred on each element of List, working right-to-left.
+    % Each call to Func or Pred will have a pair of arguments that represent
     % respectively the current and the next value of a piece of state.
     % (Such current-next argument pairs are usually called an accumulator,
-    % because the usual use case is that the successive calls to Pred
+    % because the usual use case is that the successive calls to Func or Pred
     % accumulate pieces of information.) The initial value of the accumulator
-    % is Start, each call to Pred updates it to the next value, and
+    % is Start, each call to Func or Pred updates it to the next value, and
     % foldl returns its final value as End.
     %
 :- func foldr(func(L, A) = A, list(L), A) = A.
@@ -2132,6 +2298,10 @@
     list(T)::in(list_skel(I =< ground))) =
     (list(T)::out(list_skel(I =< ground))) is det.
 
+:- func inst_preserving_condense(
+    list(list(T))::in(list_skel(list_skel(I =< ground)))) =
+    (list(T)::out(list_skel(I =< ground))) is det.
+
     % This is the same as the usual forward mode of reverse, but preserves
     % any extra information available in the input argument.
     %
@@ -2171,19 +2341,33 @@ is_empty([]).
 
 is_not_empty([_ | _]).
 
+is_singleton([X], X).
+
 %---------------------------------------------------------------------------%
 
 head([H | _]) = H.
+
+head([H | _], H).
 
 det_head([]) = _ :-
     unexpected($pred, "empty list").
 det_head([H | _]) = H.
 
+det_head([], _) :-
+    unexpected($pred, "empty list").
+det_head([H | _], H).
+
 tail([_ | T]) = T.
+
+tail([_ | T], T).
 
 det_tail([]) = _ :-
     unexpected($pred, "empty list").
 det_tail([_ | T]) = T.
+
+det_tail([], _) :-
+    unexpected($pred, "empty list").
+det_tail([_ | T], T).
 
 det_head_tail([], _, _) :-
     unexpected($pred, "empty list").
@@ -2310,32 +2494,32 @@ nth_member_lookup(Xs, SearchX, N) :-
 
 %---------------------------------------------------------------------------%
 
-index0_of_first_occurrence(Xs, SearchX, N) :-
-    list.index0_of_first_occurrence_2(Xs, SearchX, 0, N).
+index0_of_first_occurrence(Xs, SearchX, Index) :-
+    list.index0_of_first_occurrence_loop(Xs, SearchX, 0, Index).
 
-:- pred index0_of_first_occurrence_2(list(T)::in, T::in,
+:- pred index0_of_first_occurrence_loop(list(T)::in, T::in,
     int::in, int::out) is semidet.
 
-index0_of_first_occurrence_2([X | Xs], SearchX, Cur, N) :-
+index0_of_first_occurrence_loop([X | Xs], SearchX, CurIndex, Index) :-
     ( if X = SearchX then
-        N = Cur
+        Index = CurIndex
     else
-        list.index0_of_first_occurrence_2(Xs, SearchX, Cur + 1, N)
+        list.index0_of_first_occurrence_loop(Xs, SearchX, CurIndex + 1, Index)
     ).
 
-index1_of_first_occurrence(Xs, SearchX, N + 1) :-
-    list.index0_of_first_occurrence(Xs, SearchX, N).
+index1_of_first_occurrence(Xs, SearchX, Index0 + 1) :-
+    list.index0_of_first_occurrence(Xs, SearchX, Index0).
 
-det_index0_of_first_occurrence(Xs, SearchX) = N :-
-    ( if list.index0_of_first_occurrence(Xs, SearchX, N0) then
-        N = N0
+det_index0_of_first_occurrence(Xs, SearchX) = Index :-
+    ( if list.index0_of_first_occurrence(Xs, SearchX, Index0) then
+        Index = Index0
     else
         unexpected($pred, "item not found")
     ).
 
-det_index1_of_first_occurrence(Xs, SearchX) = N :-
-    ( if list.index1_of_first_occurrence(Xs, SearchX, N0) then
-        N = N0
+det_index1_of_first_occurrence(Xs, SearchX) = Index :-
+    ( if list.index1_of_first_occurrence(Xs, SearchX, Index0) then
+        Index = Index0
     else
         unexpected($pred, "item not found")
     ).
@@ -2881,6 +3065,62 @@ det_split_last_loop(H, T, AllButLast, Last) :-
         AllButLast = [H | AllButLastTail]
     ).
 
+intersperse(_Sep, [], []).
+intersperse(Sep, [Head | Tail], ListWithSep) :-
+    intersperse_loop(Sep, Head, Tail, ListWithSep).
+
+:- pred intersperse_loop(T::in, T::in, list(T)::in, list(T)::out) is det.
+
+intersperse_loop(Sep, Head, Tail, ListWithSep) :-
+    (
+        Tail = [],
+        ListWithSep = [Head]
+    ;
+        Tail = [HeadTail | TailTail],
+        intersperse_loop(Sep, HeadTail, TailTail, TailListWithSep),
+        ListWithSep = [Head, Sep | TailListWithSep]
+    ).
+
+intersperse_list(_Seps, [], []).
+intersperse_list(Seps, [Head | Tail], ListWithSeps) :-
+    intersperse_list_loop(Seps, Head, Tail, ListWithSeps).
+
+:- pred intersperse_list_loop(list(T)::in, T::in, list(T)::in, list(T)::out)
+    is det.
+
+intersperse_list_loop(Seps, Head, Tail, ListWithSeps) :-
+    (
+        Tail = [],
+        ListWithSeps = [Head]
+    ;
+        Tail = [HeadTail | TailTail],
+        intersperse_list_loop(Seps, HeadTail, TailTail, TailListWithSeps),
+        ListWithSeps = [Head | Seps] ++ TailListWithSeps
+    ).
+
+intersperse_list_last(_NonLastSeps, _LastSeps, [], []).
+intersperse_list_last(_NonLastSeps, _LastSeps, [Elt1], ListWithSeps) :-
+    ListWithSeps = [Elt1].
+intersperse_list_last(NonLastSeps, LastSeps, [Elt1, Elt2 | Elt3plus],
+        ListWithSeps) :-
+    intersperse_list_last_loop(NonLastSeps, LastSeps, Elt1, Elt2, Elt3plus,
+        ListWithSeps).
+
+:- pred intersperse_list_last_loop(list(T)::in, list(T)::in,
+    T::in, T::in, list(T)::in, list(T)::out) is det.
+
+intersperse_list_last_loop(NonLastSeps, LastSeps, Elt1, Elt2, Elt3plus,
+        ListWithSeps) :-
+    (
+        Elt3plus = [],
+        ListWithSeps = [Elt1 | LastSeps] ++ [Elt2]
+    ;
+        Elt3plus = [Elt3 | Elt4plus],
+        intersperse_list_last_loop(NonLastSeps, LastSeps, Elt2, Elt3, Elt4plus,
+            TailListWithSeps),
+        ListWithSeps = [Elt1 | NonLastSeps] ++ TailListWithSeps
+    ).
+
 %---------------------------------------------------------------------------%
 
 take(N, Xs, InitialXs) :-
@@ -2940,25 +3180,47 @@ det_drop(N, Xs, FinalXs) :-
 %---------------------------------------------------------------------------%
 
 take_while(_, [], [], []).
-take_while(P, [X | Xs], Ins, Outs) :-
+take_while(P, AllXs @ [X | Xs], Ins, Outs) :-
     ( if P(X) then
-        Ins = [X | Ins0],
-        take_while(P, Xs, Ins0, Outs)
+        take_while(P, Xs, Ins0, Outs),
+        Ins = [X | Ins0]
     else
         Ins = [],
-        Outs = [X | Xs]
+        Outs = AllXs
     ).
 
-take_while(P, Xs) = Start :-
-    take_while(P, Xs, Start).
+take_while_not(_, [], [], []).
+take_while_not(P, AllXs @ [X | Xs], Ins, Outs) :-
+    ( if P(X) then
+        Ins = [],
+        Outs = AllXs
+    else
+        take_while_not(P, Xs, Ins0, Outs),
+        Ins = [X | Ins0]
+    ).
+
+take_while(P, Xs) = In :-
+    take_while(P, Xs, In).
 
 take_while(_, [], []).
-take_while(P, [X | Xs], Start) :-
+take_while(P, [X | Xs], In) :-
     ( if P(X) then
-        take_while(P, Xs, Start0),
-        Start = [X | Start0]
+        take_while(P, Xs, In0),
+        In = [X | In0]
     else
-        Start = []
+        In = []
+    ).
+
+take_while_not(P, Xs) = In :-
+    take_while_not(P, Xs, In).
+
+take_while_not(_, [], []).
+take_while_not(P, [X | Xs], In) :-
+    ( if P(X) then
+        In = []
+    else
+        take_while_not(P, Xs, In0),
+        In = [X | In0]
     ).
 
 %---------------------------------------------------------------------------%
@@ -3070,23 +3332,7 @@ perm([X | Xs], Ys) :-
 
 %---------------------------------------------------------------------------%
 
-list_to_doc(Xs) = indent(" ", [str("["), list_to_doc_2(Xs), str("]")]).
-
-:- func list_to_doc_2(list(T)) = doc.
-
-list_to_doc_2([]) = str("").
-list_to_doc_2([X | Xs]) = Doc :-
-    (
-        Xs = [],
-        Doc = format_arg(format(X))
-    ;
-        Xs = [_ | _],
-        Doc = docs([
-            format_arg(format(X)),
-            group([str(", "), nl]),
-            format_susp((func) = list_to_doc_2(Xs))
-        ])
-    ).
+list_to_doc(L) = pretty_printer.list_to_doc(L).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -3398,9 +3644,10 @@ filter_map_corresponding3(P, As, Bs, Cs, Rs) :-
 
 %---------------------------------------------------------------------------%
 
-foldl(F, Xs, A) = B :-
-    P = ( pred(X::in, Y::in, Z::out) is det :- Z = F(X, Y) ),
-    list.foldl(P, Xs, A, B).
+foldl(_, [], !.A) = !:A.
+foldl(F, [H | T], !.A) = !:A :-
+    !:A = F(H, !.A),
+    !:A = list.foldl(F, T, !.A).
 
 foldl(_, [], !A).
 foldl(P, [H | T], !A) :-
@@ -3444,9 +3691,165 @@ foldl8(P, [H | T], !A, !B, !C, !D, !E, !F, !G, !H) :-
 
 %---------------------------------------------------------------------------%
 
-foldr(F, Xs, A) = B :-
-    P = ( pred(X::in, Y::in, Z::out) is det :- Z = F(X, Y) ),
-    list.foldr(P, Xs, A, B).
+gap_foldl(_ProcessPred, _GapPred, [], !A).
+gap_foldl(ProcessPred, GapPred, [H | T], !A) :-
+    gap_foldl_lag(ProcessPred, GapPred, H, T, !A).
+
+:- pred gap_foldl_lag(pred(L, A, A), pred(A, A), L, list(L), A, A).
+:- mode gap_foldl_lag(pred(in, di, uo) is det, pred(di, uo) is det,
+    in, in, di, uo) is det.
+:- mode gap_foldl_lag(pred(in, in, out) is det, pred(in, out) is det,
+    in, in, in, out) is det.
+
+gap_foldl_lag(ProcessPred, GapPred, H, T, !A) :-
+    ProcessPred(H, !A),
+    (
+        T = []
+    ;
+        T = [HT | TT],
+        GapPred(!A),
+        gap_foldl_lag(ProcessPred, GapPred, HT, TT, !A)
+    ).
+
+last_gap_foldl(ProcessPred, GapPred, LastGapPred, List, !A) :-
+    (
+        List = []
+    ;
+        List = [E1],
+        ProcessPred(E1, !A)
+    ;
+        List = [E1, E2 | E3plus],
+        last_gap_foldl_lag(ProcessPred, GapPred, LastGapPred,
+            E1, E2, E3plus, !A)
+    ).
+
+:- pred last_gap_foldl_lag(pred(L, A, A), pred(A, A), pred(A, A),
+    L, L, list(L), A, A).
+:- mode last_gap_foldl_lag(pred(in, di, uo) is det, pred(di, uo) is det,
+    pred(di, uo) is det, in, in, in, di, uo) is det.
+:- mode last_gap_foldl_lag(pred(in, in, out) is det, pred(in, out) is det,
+    pred(in, out) is det, in, in, in, in, out) is det.
+
+last_gap_foldl_lag(ProcessPred, GapPred, LastGapPred, E1, E2, E3plus, !A) :-
+    ProcessPred(E1, !A),
+    (
+        E3plus = [],
+        LastGapPred(!A),
+        ProcessPred(E2, !A)
+    ;
+        E3plus = [E3 | E4plus],
+        GapPred(!A),
+        last_gap_foldl_lag(ProcessPred, GapPred, LastGapPred,
+            E2, E3, E4plus, !A)
+    ).
+
+%---------------------------------------------------------------------------%
+
+chunk_foldl(_, _, [], !A).
+chunk_foldl(ChunkSize, P, List @ [_H | _T], !A) :-
+    chunk_foldl_inner(ChunkSize, P, List, LeftOver, !A),
+    chunk_foldl(ChunkSize, P, LeftOver, !A).
+
+:- pred chunk_foldl_inner(int, pred(L, A, A), list(L), list(L), A, A).
+:- mode chunk_foldl_inner(in, pred(in, di, uo) is det,
+    in, out, di, uo) is det.
+:- mode chunk_foldl_inner(in, pred(in, in, out) is det,
+    in, out, in, out) is det.
+
+chunk_foldl_inner(_, _, [], [], !A).
+chunk_foldl_inner(Left, P, List @ [H | T], LeftOver, !A) :-
+    ( if Left > 0 then
+        P(H, !A),
+        chunk_foldl_inner(Left - 1, P, T, LeftOver, !A)
+    else
+        LeftOver = List
+    ).
+
+%---------------------%
+
+chunk_foldl2(_, _, [], !A, !B).
+chunk_foldl2(ChunkSize, P, List @ [_H | _T], !A, !B) :-
+    chunk_foldl2_inner(ChunkSize, P, List, LeftOver, !A, !B),
+    chunk_foldl2(ChunkSize, P, LeftOver, !A, !B).
+
+:- pred chunk_foldl2_inner(int, pred(L, A, A, B, B),
+    list(L), list(L), A, A, B, B).
+:- mode chunk_foldl2_inner(in, pred(in, di, uo, di, uo) is det,
+    in, out, di, uo, di, uo) is det.
+:- mode chunk_foldl2_inner(in, pred(in, in, out, di, uo) is det,
+    in, out, in, out, di, uo) is det.
+:- mode chunk_foldl2_inner(in, pred(in, in, out, in, out) is det,
+    in, out, in, out, in, out) is det.
+
+chunk_foldl2_inner(_, _, [], [], !A, !B).
+chunk_foldl2_inner(Left, P, List @ [H | T], LeftOver, !A, !B) :-
+    ( if Left > 0 then
+        P(H, !A, !B),
+        chunk_foldl2_inner(Left - 1, P, T, LeftOver, !A, !B)
+    else
+        LeftOver = List
+    ).
+
+%---------------------%
+
+chunk_foldl3(_, _, [], !A, !B, !C).
+chunk_foldl3(ChunkSize, P, List @ [_H | _T], !A, !B, !C) :-
+    chunk_foldl3_inner(ChunkSize, P, List, LeftOver, !A, !B, !C),
+    chunk_foldl3(ChunkSize, P, LeftOver, !A, !B, !C).
+
+:- pred chunk_foldl3_inner(int, pred(L, A, A, B, B, C, C),
+    list(L), list(L), A, A, B, B, C, C).
+:- mode chunk_foldl3_inner(in, pred(in, in, out, di, uo, di, uo) is det,
+    in, out, in, out, di, uo, di, uo) is det.
+:- mode chunk_foldl3_inner(in, pred(in, in, out, in, out, di, uo) is det,
+    in, out, in, out, in, out, di, uo) is det.
+:- mode chunk_foldl3_inner(in, pred(in, in, out, in, out, in, out) is det,
+    in, out, in, out, in, out, in, out) is det.
+
+chunk_foldl3_inner(_, _, [], [], !A, !B, !C).
+chunk_foldl3_inner(Left, P, List @ [H | T], LeftOver, !A, !B, !C) :-
+    ( if Left > 0 then
+        P(H, !A, !B, !C),
+        chunk_foldl3_inner(Left - 1, P, T, LeftOver, !A, !B, !C)
+    else
+        LeftOver = List
+    ).
+
+%---------------------%
+
+chunk_foldl4(_, _, [], !A, !B, !C, !D).
+chunk_foldl4(ChunkSize, P, List @ [_H | _T], !A, !B, !C, !D) :-
+    chunk_foldl4_inner(ChunkSize, P, List, LeftOver, !A, !B, !C, !D),
+    chunk_foldl4(ChunkSize, P, LeftOver, !A, !B, !C, !D).
+
+:- pred chunk_foldl4_inner(int,
+    pred(L, A, A, B, B, C, C, D, D),
+    list(L), list(L), A, A, B, B, C, C, D, D).
+:- mode chunk_foldl4_inner(in,
+    pred(in, in, out, in, out, di, uo, di, uo) is det,
+    in, out, in, out, in, out, di, uo, di, uo) is det.
+:- mode chunk_foldl4_inner(in,
+    pred(in, in, out, in, out, in, out, di, uo) is det,
+    in, out, in, out, in, out, in, out, di, uo) is det.
+:- mode chunk_foldl4_inner(in,
+    pred(in, in, out, in, out, in, out, in, out) is det,
+    in, out, in, out, in, out, in, out, in, out) is det.
+
+chunk_foldl4_inner(_, _, [], [], !A, !B, !C, !D).
+chunk_foldl4_inner(Left, P, List @ [H | T], LeftOver, !A, !B, !C, !D) :-
+    ( if Left > 0 then
+        P(H, !A, !B, !C, !D),
+        chunk_foldl4_inner(Left - 1, P, T, LeftOver, !A, !B, !C, !D)
+    else
+        LeftOver = List
+    ).
+
+%---------------------------------------------------------------------------%
+
+foldr(_, [], !.A) = !:A .
+foldr(F, [H | T], !.A) = !:A :-
+    !:A = list.foldr(F, T, !.A),
+    !:A = F(H, !.A).
 
 foldr(_, [], !A).
 foldr(P, [H | T], !A) :-
@@ -3717,6 +4120,20 @@ filter_map_foldl(P, [X | Xs], True, !A) :-
 inst_preserving_append([], L) = L.
 inst_preserving_append([H | T], L) = [H | NT] :-
     inst_preserving_append(T, L) = NT.
+
+inst_preserving_condense(Xss) = Ys :-
+    RevXss = inst_preserving_reverse(Xss),
+    inst_preserving_condense_acc(RevXss, [], Ys).
+
+:- pred inst_preserving_condense_acc(
+    list(list(T))::in(list_skel(list_skel(I =< ground))),
+    list(T)::in(list_skel(I =< ground)), list(T)::out(list_skel(I =< ground)))
+    is det.
+
+inst_preserving_condense_acc([], Ys, Ys).
+inst_preserving_condense_acc([L | Ls], Ys0, Ys) :-
+    Ys1 = inst_preserving_append(L, Ys0),
+    inst_preserving_condense_acc(Ls, Ys1, Ys).
 
 inst_preserving_reverse(Xs) = Ys :-
     inst_preserving_reverse_prepend(Xs, [], Ys).

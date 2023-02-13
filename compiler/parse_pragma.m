@@ -43,7 +43,7 @@
 :- import_module libs.compiler_util.
 :- import_module libs.globals.
 :- import_module mdbcomp.prim_data.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_pragma_analysis.
 :- import_module parse_tree.parse_pragma_foreign.
 :- import_module parse_tree.parse_pragma_tabling.
@@ -54,14 +54,16 @@
 :- import_module parse_tree.parse_util.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_item.
-:- import_module parse_tree.prog_util.
 
 :- import_module cord.
+:- import_module counter.
 :- import_module int.
 :- import_module maybe.
+:- import_module one_or_more.
 :- import_module pair.
 :- import_module set.
 :- import_module string.
+:- import_module term_int.
 
 %---------------------------------------------------------------------------%
 
@@ -148,6 +150,10 @@ parse_pragma_type(ModuleName, VarSet, ErrorTerm, PragmaName, PragmaTerms,
     ;
         PragmaName = "obsolete_proc",
         parse_pragma_obsolete_proc(ModuleName, PragmaTerms, ErrorTerm, VarSet,
+            Context, SeqNum, MaybeIOM)
+    ;
+        PragmaName = "format_call",
+        parse_pragma_format_call(ModuleName, PragmaTerms, ErrorTerm, VarSet,
             Context, SeqNum, MaybeIOM)
     ;
         (
@@ -472,13 +478,13 @@ parse_pragma_external(ModuleName, VarSet, ErrorTerm, PragmaName, PragmaTerms,
         MaybeIOM = error1([Spec])
     ).
 
-:- pred parse_symname_arity(varset::in, term::in, cord(format_component)::in,
+:- pred parse_symname_arity(varset::in, term::in, cord(format_piece)::in,
     maybe2(sym_name, arity)::out) is det.
 
 parse_symname_arity(VarSet, PredTerm, ContextPieces, MaybeSymNameArity) :-
     ( if PredTerm = term.functor(term.atom("/"), [NameTerm, ArityTerm], _) then
         parse_symbol_name(VarSet, NameTerm, MaybeSymName),
-        ( if decimal_term_to_int(ArityTerm, ArityPrime) then
+        ( if term_int.decimal_term_to_int(ArityTerm, ArityPrime) then
             MaybeArity = ok1(ArityPrime)
         else
             ArityPieces = [words("Error: in")] ++ cord.list(ContextPieces) ++
@@ -507,7 +513,7 @@ parse_symname_arity(VarSet, PredTerm, ContextPieces, MaybeSymNameArity) :-
     ).
 
 :- pred parse_pragma_external_options(varset::in, maybe(term)::in,
-    cord(format_component)::in, maybe1(maybe(backend))::out) is det.
+    cord(format_piece)::in, maybe1(maybe(backend))::out) is det.
 
 parse_pragma_external_options(VarSet, MaybeOptionsTerm, ContextPieces,
         MaybeMaybeBackend) :-
@@ -672,7 +678,7 @@ parse_pragma_obsolete_in_favour_of(Term, VarSet, MaybeObsoleteInFavourOf) :-
 parse_pragma_obsolete_in_favour_of_snas(_ArgNum, [], _VarSet, ok1([])).
 parse_pragma_obsolete_in_favour_of_snas(ArgNum, [Term | Terms], VarSet,
         MaybeSNAs) :-
-    ( if parse_unqualified_name_and_arity(Term, SymName, Arity) then
+    ( if parse_sym_name_and_arity(Term, SymName, Arity) then
         MaybeHeadSNA = ok1(sym_name_arity(SymName, Arity))
     else
         Pieces = [words("In the"), nth_fixed(ArgNum),
@@ -697,6 +703,231 @@ parse_pragma_obsolete_in_favour_of_snas(ArgNum, [Term | Terms], VarSet,
             get_any_errors1(MaybeTailSNAs),
         MaybeSNAs = error1(Specs)
     ).
+
+%---------------------------------------------------------------------------%
+%
+% Parse format_call pragmas.
+%
+
+:- pred parse_pragma_format_call(module_name::in, list(term)::in, term::in,
+    varset::in, prog_context::in, item_seq_num::in,
+    maybe1(item_or_marker)::out) is det.
+
+parse_pragma_format_call(ModuleName, PragmaTerms, ErrorTerm, VarSet,
+        Context, SeqNum, MaybeIOM) :-
+    (
+        PragmaTerms = [PredSpecTerm, FormatCallTerm],
+        parse_pred_pf_name_arity(ModuleName, "format_call",
+            VarSet, PredSpecTerm, MaybePredSpec),
+        ( if
+            maybe_parse_format_string_values(FormatCallTerm,
+                MaybeFormatCallPrime)
+        then
+            MaybeFormatCall = MaybeFormatCallPrime
+        else if
+            list_term_to_term_list(FormatCallTerm, FormatCallTerms),
+            FormatCallTerms = [HeadFormatCallTerm | TailFormatCallTerms]
+        then
+            parse_format_string_values_terms(VarSet, 1, HeadFormatCallTerm,
+                TailFormatCallTerms, MaybeFormatCall)
+        else
+            FormatCallPieces = [words("Error: the second argument of a"),
+                pragma_decl("format_call"), words("declaration"),
+                words("either must be a term of the form"),
+                quote("format_string_values(N, M)"),
+                words("where N and M are strictly positive integers"),
+                words("or a nonempty list of such terms."), nl],
+            FormatCallSpec = simplest_spec($pred, severity_error,
+                phase_term_to_parse_tree, get_term_context(FormatCallTerm),
+                FormatCallPieces),
+            MaybeFormatCall = error1([FormatCallSpec])
+        ),
+        ( if
+            MaybePredSpec = ok1(PredSpec),
+            MaybeFormatCall = ok1(FormatCall)
+        then
+            FormatCallPragma = pragma_info_format_call(PredSpec, FormatCall),
+            Pragma = decl_pragma_format_call(FormatCallPragma),
+            ItemPragma = item_pragma_info(Pragma, Context, SeqNum),
+            Item = item_decl_pragma(ItemPragma),
+            MaybeIOM = ok1(iom_item(Item))
+        else
+            IOMSpecs =
+                get_any_errors1(MaybePredSpec) ++
+                get_any_errors1(MaybeFormatCall),
+            MaybeIOM = error1(IOMSpecs)
+        )
+    ;
+        ( PragmaTerms = []
+        ; PragmaTerms = [_]
+        ; PragmaTerms = [_, _, _ | _]
+        ),
+        Pieces = [words("Error: a"), pragma_decl("format_call"),
+            words("declaration must have two arguments."), nl],
+        Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
+            get_term_context(ErrorTerm), Pieces),
+        MaybeIOM = error1([Spec])
+   ).
+
+:- pred maybe_parse_format_string_values(term::in,
+    maybe1(one_or_more(format_string_values))::out) is semidet.
+
+maybe_parse_format_string_values(Term, MaybeOoMFormatStringValues) :-
+    Term = term.functor(Functor, ArgTerms, _Context),
+    Functor = term.atom("format_string_values"),
+    require_det (
+        parse_format_string_values_args(no, Term, ArgTerms,
+            MaybeFormatStringValues),
+        (
+            MaybeFormatStringValues = ok1(FormatStringValues),
+            MaybeOoMFormatStringValues =
+                ok1(one_or_more(FormatStringValues, []))
+        ;
+            MaybeFormatStringValues = error1(Specs),
+            MaybeOoMFormatStringValues = error1(Specs)
+        )
+    ).
+
+:- pred parse_format_string_values_terms(varset::in, int::in,
+    term::in, list(term)::in,
+    maybe1(one_or_more(format_string_values))::out) is det.
+
+parse_format_string_values_terms(VarSet, ListPos, HeadTerm, TailTerms,
+        MaybeOoMFormatStringValues) :-
+    (
+        TailTerms = [],
+        TailFormatStringValues = [],
+        TailSpecs = []
+    ;
+        TailTerms = [HeadTailTerm | TailTailTerms],
+        parse_format_string_values_terms(VarSet, ListPos + 1,
+            HeadTailTerm, TailTailTerms, MaybeOoMTailFormatStringValues),
+        (
+            MaybeOoMTailFormatStringValues = ok1(OoMTailFormatStringValues),
+            TailFormatStringValues =
+                one_or_more_to_list(OoMTailFormatStringValues),
+            TailSpecs = []
+        ;
+            MaybeOoMTailFormatStringValues = error1(TailSpecs),
+            TailFormatStringValues = []
+        )
+    ),
+    ( if
+        HeadTerm = term.functor(HeadFunctor, HeadArgTerms, _Context),
+        HeadFunctor = term.atom("format_string_values")
+    then
+        parse_format_string_values_args(yes(ListPos), HeadTerm, HeadArgTerms,
+            MaybeHeadFormatStringValues),
+        ( if
+            MaybeHeadFormatStringValues = ok1(HeadFormatStringValues),
+            TailSpecs = []
+        then
+            OoMFormatStringValues =
+                one_or_more(HeadFormatStringValues, TailFormatStringValues),
+            MaybeOoMFormatStringValues = ok1(OoMFormatStringValues)
+        else
+            Specs = get_any_errors1(MaybeHeadFormatStringValues) ++ TailSpecs,
+            MaybeOoMFormatStringValues = error1(Specs)
+        )
+    else
+        ErrorTermStr = describe_error_term(VarSet, HeadTerm),
+        HeadPieces = format_string_values_context(yes(ListPos)) ++
+            [words("expected a term of the form"),
+            quote("format_string_values(N, M)"),
+            words("where N and M are strictly positive integers,"),
+            words("got"), quote(ErrorTermStr), suffix("."), nl],
+        HeadSpec = simplest_spec($pred, severity_error,
+            phase_term_to_parse_tree, get_term_context(HeadTerm), HeadPieces),
+        Specs = [HeadSpec | TailSpecs],
+        MaybeOoMFormatStringValues = error1(Specs)
+    ).
+
+:- pred parse_format_string_values_args(maybe(int)::in, term::in,
+    list(term)::in, maybe1(format_string_values)::out) is det.
+
+parse_format_string_values_args(MaybeListPos, ErrorTerm, ArgTerms,
+        MaybeFormatStringValues) :-
+    (
+        ArgTerms = [TermFS, TermVL],
+        parse_arg_num(MaybeListPos, fs, TermFS, MaybeArgNumFS),
+        parse_arg_num(MaybeListPos, vl, TermVL, MaybeArgNumVL),
+        ( if
+            MaybeArgNumFS = ok1(ArgNumFS),
+            MaybeArgNumVL = ok1(ArgNumVL)
+        then
+            FormatStringValues = format_string_values(ArgNumFS, ArgNumVL,
+                ArgNumFS, ArgNumVL),
+            MaybeFormatStringValues = ok1(FormatStringValues)
+        else
+            Specs =
+                get_any_errors1(MaybeArgNumFS) ++
+                get_any_errors1(MaybeArgNumVL),
+            MaybeFormatStringValues = error1(Specs)
+        )
+    ;
+        ( ArgTerms = []
+        ; ArgTerms = [_]
+        ; ArgTerms = [_, _, _ | _]
+        ),
+        Pieces = format_string_values_context(MaybeListPos) ++
+            [words("format_string_values must have two arguments."), nl],
+        Spec = simplest_spec($pred, severity_error,
+            phase_term_to_parse_tree, get_term_context(ErrorTerm), Pieces),
+        MaybeFormatStringValues = error1([Spec])
+    ).
+
+:- pred parse_arg_num(maybe(int)::in, fs_vl::in, term::in,
+    maybe1(int)::out) is det.
+
+parse_arg_num(MaybeListPos, FS_VL, Term, MaybeArgNum) :-
+    % The wording of the error messages is a bit strained,
+    % because we are talking at an *argument* of the format_string_values
+    % function symbol that is itself an *argument number*.
+    ( if term_int.decimal_term_to_int(Term, Int) then
+        % We could check that Int > 0 here, but we won't know the upper bound
+        % we want to check against until later. It is simpler to have code
+        % in check_pragma_format_call_preds.m to check the argument number
+        % against both the lower and upper bounds.
+        MaybeArgNum = ok1(Int)
+    else
+        Pieces = arg_num_context(MaybeListPos, FS_VL) ++
+            [words("the argument number must be an integer."), nl],
+        Spec = simplest_spec($pred, severity_error,
+            phase_term_to_parse_tree, get_term_context(Term), Pieces),
+        MaybeArgNum = error1([Spec])
+    ).
+
+:- func format_string_values_context(maybe(int)) = list(format_piece).
+
+format_string_values_context(MaybeListPos) = Pieces :-
+    Pieces0 = [words("Error: in the second argument of a"),
+        pragma_decl("format_call"), words("declaration:")],
+    (
+        MaybeListPos = no,
+        Pieces = Pieces0
+    ;
+        MaybeListPos = yes(ListPos),
+        Pieces = [words("in the"), nth_fixed(ListPos),
+            words("element of the list:") | Pieces0]
+    ).
+
+:- type fs_vl
+    --->    fs  % The format string argument of format_string_values.
+    ;       vl. % The value list argument of format_string_values.
+
+:- func arg_num_context(maybe(int), fs_vl) = list(format_piece).
+
+arg_num_context(MaybeListPos, FS_VL) = Pieces :-
+    Pieces0 = format_string_values_context(MaybeListPos),
+    (
+        FS_VL = fs,
+        FS_VL_Str = "first"
+    ;
+        FS_VL = vl,
+        FS_VL_Str = "second"
+    ),
+    Pieces = [words("in the"), words(FS_VL_Str), words("argument"),
+        words("of format_string_values:") | Pieces0].
 
 %---------------------------------------------------------------------------%
 %
@@ -936,11 +1167,16 @@ parse_oisu_pragma(ModuleName, VarSet, ErrorTerm, PragmaTerms, Context, SeqNum,
             OtherTerms = [DestructorsTerm],
             MaybeDestructorsTerm = yes(DestructorsTerm)
         ),
-        ( if
-            parse_implicitly_qualified_name_and_arity(ModuleName, TypeCtorTerm,
-                Name, Arity)
-        then
-            MaybeTypeCtor = ok1(type_ctor(Name, Arity))
+        ( if parse_sym_name_and_arity(TypeCtorTerm, SymName0, Arity) then
+            implicitly_qualify_sym_name(ModuleName, TypeCtorTerm,
+                SymName0, MaybeSymName),
+            (
+                MaybeSymName = ok1(SymName),
+                MaybeTypeCtor = ok1(type_ctor(SymName, Arity))
+            ;
+                MaybeSymName = error1(SymNameSpecs),
+                MaybeTypeCtor = error1(SymNameSpecs)
+            )
         else
             TypeCtorTermStr = describe_error_term(VarSet, TypeCtorTerm),
             Pieces = [words("In the first argument of"),
@@ -1029,65 +1265,54 @@ parse_oisu_preds_term(ModuleName, VarSet, ArgNum, ExpectedFunctor, Term,
     list(term)::in, prog_context::in, item_seq_num::in,
     maybe1(item_or_marker)::out) is det.
 
-parse_pragma_type_spec(ModuleName, VarSet, ErrorTerm, PragmaTerms,
+parse_pragma_type_spec(ModuleName, VarSet0, ErrorTerm, PragmaTerms,
         Context, SeqNum, MaybeIOM) :-
     ( if
-        (
-            PragmaTerms = [PredAndModesTerm, TypeSubnTerm],
-            MaybeSpecName = no
-        ;
-            PragmaTerms = [PredAndModesTerm, TypeSubnTerm, SpecNameTerm],
-
-            % This form of the pragma should not appear in source files.
-            SpecNameTerm = term.functor(_, _, SpecContext),
-            term.context_file(SpecContext, FileName),
-            not string.remove_suffix(FileName, ".m", _),
-
-            try_parse_implicitly_qualified_sym_name_and_no_args(ModuleName,
-                SpecNameTerm, SpecializedName),
-            MaybeSpecName = yes(SpecializedName)
+        ( PragmaTerms = [PredAndModesTerm, TypeSubnTerm]
+        ; PragmaTerms = [PredAndModesTerm, TypeSubnTerm, _]
         )
     then
         ArityOrModesContextPieces = cord.from_list(
             [words("In the first argument"), pragma_decl("type_spec"),
             words("declaration:"), nl]),
         parse_pred_pfu_name_arity_maybe_modes(ModuleName,
-            ArityOrModesContextPieces, VarSet, PredAndModesTerm,
+            ArityOrModesContextPieces, VarSet0, PredAndModesTerm,
             MaybePredOrProcSpec),
         (
             MaybePredOrProcSpec = ok1(PredOrProcSpec),
             PredOrProcSpec = pred_or_proc_pfumm_name(PFUMM, PredName),
-            conjunction_to_list(TypeSubnTerm, TypeSubnTerms),
 
-            % The varset is actually a tvarset.
-            varset.coerce(VarSet, TVarSet),
-            ( if list.map(parse_type_spec_pair, TypeSubnTerms, TypeSubns) then
-                (
-                    MaybeSpecName = yes(SpecName)
-                ;
-                    MaybeSpecName = no,
-                    UnqualName = unqualify_name(PredName),
-                    pfumm_to_maybe_pf_arity_maybe_modes(PFUMM, MaybePredOrFunc,
-                        _Arity, _MaybeModes),
-                    make_pred_name(ModuleName, "TypeSpecOf", MaybePredOrFunc,
-                        UnqualName, newpred_type_subst(TVarSet, TypeSubns),
-                        SpecName)
-                ),
+            % Give any anonymous variables in TypeSubnTerm names that
+            % do not conflict with the names of any named variables,
+            % nor, due to the use of sequence numbers, with each other.
+            acc_var_names_in_term(VarSet0, TypeSubnTerm,
+                set.init, NamedVarNames),
+            name_unnamed_vars_in_term(NamedVarNames, TypeSubnTerm,
+                counter.init(1), _, VarSet0, VarSet),
+            conjunction_to_one_or_more(TypeSubnTerm, TypeSubnTerms),
+            TypeSubnTerms = one_or_more(HeadSubnTerm, TailSubnTerms),
+            ( if
+                parse_type_spec_pair(HeadSubnTerm, HeadTypeSubn),
+                list.map(parse_type_spec_pair, TailSubnTerms, TailTypeSubns)
+            then
+                % The varset is actually a tvarset.
+                varset.coerce(VarSet, TVarSet),
+                TypeSubns = one_or_more(HeadTypeSubn, TailTypeSubns),
                 TypeSpecInfo = pragma_info_type_spec(PFUMM, PredName,
-                    SpecName, TypeSubns, TVarSet, set.init),
+                    ModuleName, TypeSubns, TVarSet, set.init),
                 Pragma = decl_pragma_type_spec(TypeSpecInfo),
                 ItemPragma = item_pragma_info(Pragma, Context, SeqNum),
                 Item = item_decl_pragma(ItemPragma),
                 MaybeIOM = ok1(iom_item(Item))
             else
-                TypeSubnTermStr = describe_error_term(VarSet, TypeSubnTerm),
+                TypeSubnTermStr = describe_error_term(VarSet0, TypeSubnTerm),
                 Pieces = [words("In the second argument of"),
                     pragma_decl("type_spec"), words("declaration:"), nl,
                     words("error: expected a type substitution, got"),
                     quote(TypeSubnTermStr), suffix("."), nl],
+                TypeSubnContext = get_term_context(TypeSubnTerm),
                 Spec = simplest_spec($pred, severity_error,
-                    phase_term_to_parse_tree,
-                    get_term_context(TypeSubnTerm), Pieces),
+                    phase_term_to_parse_tree, TypeSubnContext, Pieces),
                 MaybeIOM = error1([Spec])
             )
         ;
@@ -1095,8 +1320,9 @@ parse_pragma_type_spec(ModuleName, VarSet, ErrorTerm, PragmaTerms,
             MaybeIOM = error1(Specs)
         )
     else
+        % XXX We allow three as a bootstrapping measure.
         Pieces = [words("Error: a"), pragma_decl("type_spec"),
-            words("declaration must have two or three arguments."), nl],
+            words("declaration must have two arguments."), nl],
         Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
             get_term_context(ErrorTerm), Pieces),
         MaybeIOM = error1([Spec])
@@ -1105,13 +1331,78 @@ parse_pragma_type_spec(ModuleName, VarSet, ErrorTerm, PragmaTerms,
 :- pred parse_type_spec_pair(term::in, pair(tvar, mer_type)::out) is semidet.
 
 parse_type_spec_pair(Term, TypeSpec) :-
-    Term = term.functor(term.atom("="), [TypeVarTerm, SpecTypeTerm0], _),
+    Term = term.functor(term.atom("="), [TypeVarTerm, SpecTypeTerm], _),
     TypeVarTerm = term.variable(TypeVar0, _),
     term.coerce_var(TypeVar0, TypeVar),
     % XXX We should call parse_type instead.
     maybe_parse_type(no_allow_ho_inst_info(wnhii_pragma_type_spec),
-        SpecTypeTerm0, SpecType),
+        SpecTypeTerm, SpecType),
     TypeSpec = TypeVar - SpecType.
+
+%---------------------%
+
+:- pred acc_var_names_in_term(varset::in, term::in,
+    set(string)::in, set(string)::out) is det.
+
+acc_var_names_in_term(VarSet, Term, !VarNames) :-
+    (
+        Term = term.variable(Var, _Context),
+        ( if varset.search_name(VarSet, Var, VarName) then
+            set.insert(VarName, !VarNames)
+        else
+            true
+        )
+    ;
+        Term = term.functor(_Functor, ArgTerms, _Context),
+        acc_var_names_in_terms(VarSet, ArgTerms, !VarNames)
+    ).
+
+:- pred acc_var_names_in_terms(varset::in, list(term)::in,
+    set(string)::in, set(string)::out) is det.
+
+acc_var_names_in_terms(_, [], !VarNames).
+acc_var_names_in_terms(VarSet, [Term | Terms], !VarNames) :-
+    acc_var_names_in_term(VarSet, Term, !VarNames),
+    acc_var_names_in_terms(VarSet, Terms, !VarNames).
+
+%---------------------%
+
+:- pred name_unnamed_vars_in_term(set(string)::in, term::in,
+    counter::in, counter::out, varset::in, varset::out) is det.
+
+name_unnamed_vars_in_term(NamedVarNames, Term, !Counter, !VarSet) :-
+    (
+        Term = term.variable(Var, _Context),
+        ( if varset.search_name(!.VarSet, Var, _VarName) then
+            true
+        else
+            name_anonymous_variable(NamedVarNames, Var, !Counter, !VarSet)
+        )
+    ;
+        Term = term.functor(_Functor, ArgTerms, _Context),
+        name_unnamed_vars_in_terms(NamedVarNames, ArgTerms, !Counter, !VarSet)
+    ).
+
+:- pred name_unnamed_vars_in_terms(set(string)::in, list(term)::in,
+    counter::in, counter::out, varset::in, varset::out) is det.
+
+name_unnamed_vars_in_terms(_, [], !Counter, !VarSet).
+name_unnamed_vars_in_terms(NamedVarNames, [Term | Terms], !Counter, !VarSet) :-
+    name_unnamed_vars_in_term(NamedVarNames, Term, !Counter, !VarSet),
+    name_unnamed_vars_in_terms(NamedVarNames, Terms, !Counter, !VarSet).
+
+:- pred name_anonymous_variable(set(string)::in, var::in,
+    counter::in, counter::out, varset::in, varset::out) is det.
+
+name_anonymous_variable(NamedVarNames, AnonVar, !Counter, !VarSet) :-
+    counter.allocate(SeqNum, !Counter),
+    VarName = "Anon" ++ int_to_string(SeqNum),
+    ( if set.contains(NamedVarNames, VarName) then
+        % VarName is in use; try again with the updated counter.
+        name_anonymous_variable(NamedVarNames, AnonVar, !Counter, !VarSet)
+    else
+        varset.name_var(AnonVar, VarName, !VarSet)
+    ).
 
 %---------------------------------------------------------------------------%
 %
@@ -1196,7 +1487,7 @@ parse_pragma_require_feature_set(VarSet, ErrorTerm, PragmaTerms,
                 ConflictSpecs = [],
                 (
                     FeatureList = [],
-                    MaybeIOM = ok1(iom_handled([]))
+                    MaybeIOM = ok1(iom_handled_no_error)
                 ;
                     FeatureList = [_ | _],
                     FeatureSet = set.list_to_set(FeatureList),

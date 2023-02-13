@@ -162,14 +162,14 @@ reduce_type_assign_context(ClassTable, InstanceTable, !.TypeAssign,
     then
         !:TypeAssignCord = cord.snoc(!.TypeAssignCord, !.TypeAssign)
     else
-        type_assign_get_external_type_params(!.TypeAssign, ExternalTypeParams),
+        type_assign_get_existq_tvars(!.TypeAssign, ExistQTVars),
         type_assign_get_typevarset(!.TypeAssign, TVarSet0),
         type_assign_get_type_bindings(!.TypeAssign, Bindings0),
         type_assign_get_constraint_proof_map(!.TypeAssign, ProofMap0),
         type_assign_get_constraint_map(!.TypeAssign, ConstraintMap0),
 
         reduce_context_by_rule_application(ClassTable, InstanceTable,
-            ExternalTypeParams, Bindings0, Bindings, TVarSet0, TVarSet,
+            ExistQTVars, Bindings0, Bindings, TVarSet0, TVarSet,
             ProofMap0, ProofMap, ConstraintMap0, ConstraintMap,
             Constraints0, Constraints),
 
@@ -177,7 +177,7 @@ reduce_type_assign_context(ClassTable, InstanceTable, !.TypeAssign,
             ProofMap, ConstraintMap, !TypeAssign),
 
         Unproven = Constraints ^ hcs_unproven,
-        ( if all_constraints_are_satisfiable(Unproven, ExternalTypeParams) then
+        ( if all_constraints_are_satisfiable(Unproven, ExistQTVars) then
             !:TypeAssignCord = cord.snoc(!.TypeAssignCord, !.TypeAssign)
         else
             % Remember the unsatisfiable type_assign_set so we can produce more
@@ -186,7 +186,7 @@ reduce_type_assign_context(ClassTable, InstanceTable, !.TypeAssign,
         )
     ).
 
-    % all_constraints_are_satisfiable(Constraints, ExternalTypeParams):
+    % all_constraints_are_satisfiable(Constraints, ExistQTVars):
     %
     % Check that all of the constraints are satisfiable. Fail if any are
     % definitely not satisfiable.
@@ -215,23 +215,21 @@ reduce_type_assign_context(ClassTable, InstanceTable, !.TypeAssign,
     % type variable that is not in the head type params.
     %
 :- pred all_constraints_are_satisfiable(list(hlds_constraint)::in,
-    external_type_params::in) is semidet.
+    list(tvar)::in) is semidet.
 
 all_constraints_are_satisfiable([], _).
-all_constraints_are_satisfiable([Constraint | Constraints],
-        ExternalTypeParams) :-
+all_constraints_are_satisfiable([Constraint | Constraints], ExistQTVars) :-
     Constraint = hlds_constraint(_Ids, _ClassName, ArgTypes),
     some [TVar] (
         type_list_contains_var(ArgTypes, TVar),
-        not list.member(TVar, ExternalTypeParams)
+        not list.member(TVar, ExistQTVars)
     ),
-    all_constraints_are_satisfiable(Constraints, ExternalTypeParams).
+    all_constraints_are_satisfiable(Constraints, ExistQTVars).
 
-reduce_context_by_rule_application(ClassTable, InstanceTable,
-        ExternalTypeParams, !Bindings, !TVarSet, !ProofMap,
-        !ConstraintMap, !Constraints) :-
+reduce_context_by_rule_application(ClassTable, InstanceTable, ExistQTVars,
+        !Bindings, !TVarSet, !ProofMap, !ConstraintMap, !Constraints) :-
     reduce_context_by_rule_application_2(ClassTable, InstanceTable,
-        ExternalTypeParams, !Bindings, !TVarSet, !ProofMap, !ConstraintMap,
+        ExistQTVars, !Bindings, !TVarSet, !ProofMap, !ConstraintMap,
         !Constraints, !.Constraints ^ hcs_unproven, _).
 
 :- pred reduce_context_by_rule_application_2(class_table::in,
@@ -242,11 +240,10 @@ reduce_context_by_rule_application(ClassTable, InstanceTable,
     hlds_constraints::in, hlds_constraints::out,
     list(hlds_constraint)::in, list(hlds_constraint)::out) is det.
 
-reduce_context_by_rule_application_2(ClassTable, InstanceTable,
-        ExternalTypeParams, !Bindings, !TVarSet, !ProofMap,
-        !ConstraintMap, !Constraints, !Seen) :-
+reduce_context_by_rule_application_2(ClassTable, InstanceTable, ExistQTVars,
+        !Bindings, !TVarSet, !ProofMap, !ConstraintMap, !Constraints, !Seen) :-
     apply_rec_subst_to_constraints(!.Bindings, !Constraints),
-    apply_improvement_rules(ClassTable, InstanceTable, ExternalTypeParams,
+    apply_improvement_rules(ClassTable, InstanceTable, ExistQTVars,
         !.Constraints, !TVarSet, !Bindings, AppliedImprovementRule),
 
     % We want to make sure that any changes to the bindings are reflected
@@ -278,7 +275,7 @@ reduce_context_by_rule_application_2(ClassTable, InstanceTable,
     else
         disable_warning [suspicious_recursion] (
             reduce_context_by_rule_application_2(ClassTable, InstanceTable,
-                ExternalTypeParams, !Bindings, !TVarSet, !ProofMap,
+                ExistQTVars, !Bindings, !TVarSet, !ProofMap,
                 !ConstraintMap, !Constraints, !Seen)
         )
     ).
@@ -560,7 +557,7 @@ unify_on_elements(Elements, TypesA, TypesB, ExternalTypeParams, !Bindings) :-
 subsumes_on_elements(Elements, TypesA, TypesB, Subst) :-
     RTypesA = restrict_list_elements(Elements, TypesA),
     RTypesB = restrict_list_elements(Elements, TypesB),
-    type_vars_list(RTypesB, RTypesBVars),
+    type_vars_in_types(RTypesB, RTypesBVars),
     map.init(Subst0),
     type_unify_list(RTypesA, RTypesB, RTypesBVars, Subst0, Subst).
 
@@ -691,8 +688,8 @@ find_matching_instance_rule(Instances, Constraint, !TVarSet, !ProofMap,
     constraint_proof_map::in, constraint_proof_map::out,
     list(hlds_constraint)::out) is semidet.
 
-find_matching_instance_rule_2([Instance | Instances], InstanceNum0, Constraint,
-        !TVarSet, !ProofMap, NewConstraints) :-
+find_matching_instance_rule_2([Instance | Instances], CurInstanceNum,
+        Constraint, !TVarSet, !ProofMap, NewConstraints) :-
     Constraint = hlds_constraint(_Ids, _ClassName, ArgTypes),
     ProgConstraints0 = Instance ^ instdefn_constraints,
     InstanceTypes0 = Instance ^ instdefn_types,
@@ -708,12 +705,11 @@ find_matching_instance_rule_2([Instance | Instances], InstanceNum0, Constraint,
             ProgConstraints1, ProgConstraints),
         init_hlds_constraint_list(ProgConstraints, NewConstraints),
 
-        NewProof = apply_instance(InstanceNum0),
+        NewProof = apply_instance(instance_id(CurInstanceNum)),
         retrieve_prog_constraint(Constraint, ProgConstraint),
         map.set(ProgConstraint, NewProof, !ProofMap)
     else
-        InstanceNum = InstanceNum0 + 1,
-        find_matching_instance_rule_2(Instances, InstanceNum,
+        find_matching_instance_rule_2(Instances, CurInstanceNum + 1,
             Constraint, !TVarSet, !ProofMap, NewConstraints)
     ).
 

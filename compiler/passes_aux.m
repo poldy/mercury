@@ -20,7 +20,7 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module io.
 :- import_module list.
@@ -145,13 +145,15 @@
 
 %---------------------------------------------------------------------------%
 
-:- pred write_pred_progress_message(module_info::in, string::in,
-    pred_id::in, io::di, io::uo) is det.
+:- pred maybe_write_pred_progress_message(
+    module_info::in, string::in, pred_id::in, io::di, io::uo) is det.
+:- pred maybe_write_pred_progress_message(io.text_output_stream::in,
+    module_info::in, string::in, pred_id::in, io::di, io::uo) is det.
 
-:- pred write_proc_progress_message(module_info::in, string::in,
-    pred_proc_id::in, io::di, io::uo) is det.
-:- pred write_proc_progress_message(module_info::in, string::in,
-    pred_id::in, proc_id::in, io::di, io::uo) is det.
+:- pred maybe_write_proc_progress_message(
+    module_info::in, string::in, pred_proc_id::in, io::di, io::uo) is det.
+:- pred maybe_write_proc_progress_message(io.text_output_stream::in,
+    module_info::in, string::in, pred_proc_id::in, io::di, io::uo) is det.
 
 :- pred maybe_report_sizes(module_info::in, io::di, io::uo) is det.
 
@@ -178,13 +180,14 @@
     --->    no_prev_dump
     ;       prev_dumped_hlds(string, module_info).
 
-    % maybe_dump_hlds(HLDS, StageNum, StageName, !DumpInfo, !IO):
+    % maybe_dump_hlds(ProgressStream, HLDS, StageNum, StageName,
+    %   !DumpInfo, !IO):
     %
     % If the options in HLDS call for it, dump the (selected parts of)
     % the HLDS, unless they would be the same as the previous dump.
     %
-:- pred maybe_dump_hlds(module_info::in, int::in, string::in,
-    dump_info::in, dump_info::out, io::di, io::uo) is det.
+:- pred maybe_dump_hlds(io.text_output_stream::in, module_info::in,
+    int::in, string::in, dump_info::in, dump_info::out, io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -205,6 +208,7 @@
 :- import_module benchmarking.
 :- import_module bool.
 :- import_module int.
+:- import_module io.file.
 :- import_module map.
 :- import_module maybe.
 :- import_module pair.
@@ -260,12 +264,12 @@ process_valid_nonimported_procs_update(!Task, !ModuleInfo) :-
         ; !.Task = update_proc_ids_pred(_)
         ),
         ValidPredIdSet = set_tree234.list_to_set(ValidPredIds),
-        module_info_get_preds(!.ModuleInfo, PredMap0),
-        map.to_assoc_list(PredMap0, PredIdsInfos0),
+        module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+        map.to_assoc_list(PredIdTable0, PredIdsInfos0),
         par_process_valid_nonimported_procs_in_preds(!.ModuleInfo, !.Task,
             ValidPredIdSet, PredIdsInfos0, PredIdsInfos),
-        map.from_sorted_assoc_list(PredIdsInfos, PredMap),
-        module_info_set_preds(PredMap, !ModuleInfo)
+        map.from_sorted_assoc_list(PredIdsInfos, PredIdTable),
+        module_info_set_pred_id_table(PredIdTable, !ModuleInfo)
     ;
         ( !.Task = update_module(_)
         ; !.Task = update_module_pred(_)
@@ -341,8 +345,7 @@ par_process_valid_nonimported_procs(ModuleInfo, Task, PredId,
 seq_process_valid_nonimported_procs_in_preds([], !Task, !ModuleInfo).
 seq_process_valid_nonimported_procs_in_preds([PredId | PredIds], !Task,
         !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable),
-    map.lookup(PredTable, PredId, PredInfo),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
     ProcIds = pred_info_valid_non_imported_procids(PredInfo),
     seq_process_valid_nonimported_procs(PredId, ProcIds, !Task, !ModuleInfo),
     seq_process_valid_nonimported_procs_in_preds(PredIds, !Task, !ModuleInfo).
@@ -354,71 +357,90 @@ seq_process_valid_nonimported_procs_in_preds([PredId | PredIds], !Task,
 seq_process_valid_nonimported_procs(_PredId, [], !Task, !ModuleInfo).
 seq_process_valid_nonimported_procs(PredId, [ProcId | ProcIds], !Task,
         !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, Preds0),
-    map.lookup(Preds0, PredId, Pred0),
-    pred_info_get_proc_table(Pred0, Procs0),
-    map.lookup(Procs0, ProcId, Proc0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    pred_info_proc_info(PredInfo0, ProcId, ProcInfo0),
 
     PredProcId = proc(PredId, ProcId),
     (
         !.Task = update_module(Closure),
-        Closure(PredProcId, Proc0, Proc, !ModuleInfo)
+        Closure(PredProcId, ProcInfo0, ProcInfo, !ModuleInfo)
     ;
         !.Task = update_module_pred(Closure),
-        Closure(PredProcId, Pred0, Proc0, Proc, !ModuleInfo)
+        Closure(PredProcId, PredInfo0, ProcInfo0, ProcInfo, !ModuleInfo)
     ;
         !.Task = update_module_cookie(Closure, Cookie0),
-        Closure(PredProcId, Proc0, Proc, !ModuleInfo, Cookie0, Cookie),
+        Closure(PredProcId, ProcInfo0, ProcInfo, !ModuleInfo, Cookie0, Cookie),
         !:Task = update_module_cookie(Closure, Cookie)
     ;
         !.Task = update_module_pred_cookie(Closure, Cookie0),
-        Closure(PredProcId, Pred0, Proc0, Proc, !ModuleInfo, Cookie0, Cookie),
+        Closure(PredProcId, PredInfo0, ProcInfo0, ProcInfo, !ModuleInfo,
+            Cookie0, Cookie),
         !:Task = update_module_pred_cookie(Closure, Cookie)
     ),
 
     % If the pass changed the module_info, it may have changed the pred table
     % or the proc table for this pred_id. Do not take any chances.
 
-    module_info_get_preds(!.ModuleInfo, Preds8),
-    map.lookup(Preds8, PredId, Pred8),
-    pred_info_get_proc_table(Pred8, Procs8),
-
-    map.det_update(ProcId, Proc, Procs8, Procs),
-    pred_info_set_proc_table(Procs, Pred8, Pred),
-    map.det_update(PredId, Pred, Preds8, Preds),
-    module_info_set_preds(Preds, !ModuleInfo),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo8),
+    pred_info_set_proc_info(ProcId, ProcInfo, PredInfo8, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo),
 
     seq_process_valid_nonimported_procs(PredId, ProcIds, !Task, !ModuleInfo).
 
 %---------------------------------------------------------------------------%
 
-write_pred_progress_message(ModuleInfo, Message, PredId, !IO) :-
+maybe_write_pred_progress_message(ModuleInfo, Message, PredId, !IO) :-
     module_info_get_globals(ModuleInfo, Globals),
     globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
     (
         VeryVerbose = yes,
         module_info_get_name(ModuleInfo, ModuleName),
-        globals.get_progress_output_stream(Globals, ModuleName, Stream, !IO),
-        PredStr = pred_id_to_string(ModuleInfo, PredId),
-        io.format(Stream, "%% %s %s\n", [s(Message), s(PredStr)], !IO),
-        io.flush_output(Stream, !IO)
+        globals.get_progress_output_stream(Globals, ModuleName,
+            ProgressStream, !IO),
+        PredStr = pred_id_to_user_string(ModuleInfo, PredId),
+        io.format(ProgressStream, "%% %s %s\n", [s(Message), s(PredStr)], !IO),
+        io.flush_output(ProgressStream, !IO)
     ;
         VeryVerbose = no
     ).
 
-write_proc_progress_message(ModuleInfo, Message, proc(PredId, ProcId), !IO) :-
-    write_proc_progress_message(ModuleInfo, Message, PredId, ProcId, !IO).
+maybe_write_pred_progress_message(ProgressStream, ModuleInfo, Message, PredId,
+        !IO) :-
+    module_info_get_globals(ModuleInfo, Globals),
+    globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
+    (
+        VeryVerbose = yes,
+        PredStr = pred_id_to_user_string(ModuleInfo, PredId),
+        io.format(ProgressStream, "%% %s %s\n", [s(Message), s(PredStr)], !IO),
+        io.flush_output(ProgressStream, !IO)
+    ;
+        VeryVerbose = no
+    ).
 
-write_proc_progress_message(ModuleInfo, Message, PredId, ProcId, !IO) :-
+maybe_write_proc_progress_message(ModuleInfo, Message, PredProcId, !IO) :-
     module_info_get_globals(ModuleInfo, Globals),
     globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
     (
         VeryVerbose = yes,
         module_info_get_name(ModuleInfo, ModuleName),
-        globals.get_progress_output_stream(Globals, ModuleName, Stream, !IO),
-        ProcStr = pred_proc_id_pair_to_string(ModuleInfo, PredId, ProcId),
-        io.format(Stream, "%% %s %s\n", [s(Message), s(ProcStr)], !IO),
-        io.flush_output(Stream, !IO)
+        globals.get_progress_output_stream(Globals, ModuleName,
+            ProgressStream, !IO),
+        ProcStr = pred_proc_id_to_user_string(ModuleInfo, PredProcId),
+        io.format(ProgressStream, "%% %s %s\n", [s(Message), s(ProcStr)], !IO),
+        io.flush_output(ProgressStream, !IO)
+    ;
+        VeryVerbose = no
+    ).
+
+maybe_write_proc_progress_message(ProgressStream, ModuleInfo, Message,
+        PredProcId, !IO) :-
+    module_info_get_globals(ModuleInfo, Globals),
+    globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
+    (
+        VeryVerbose = yes,
+        ProcStr = pred_proc_id_to_user_string(ModuleInfo, PredProcId),
+        io.format(ProgressStream, "%% %s %s\n", [s(Message), s(ProcStr)], !IO),
+        io.flush_output(ProgressStream, !IO)
     ;
         VeryVerbose = no
     ).
@@ -440,9 +462,9 @@ maybe_report_sizes(HLDS, !IO) :-
 report_sizes(ModuleInfo, !IO) :-
     get_debug_output_stream(ModuleInfo, Stream, !IO),
 
-    module_info_get_preds(ModuleInfo, PredTable),
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
     io.format(Stream, "Pred table size = %d\n",
-        [i(map.count(PredTable))], !IO),
+        [i(map.count(PredIdTable))], !IO),
 
     module_info_get_type_table(ModuleInfo, TypeTable),
     get_all_type_ctor_defns(TypeTable, TypeCtorDefns),
@@ -497,7 +519,7 @@ should_dump_stage(StageNum, StageNumStr, StageName, DumpStages) :-
 
 stage_num_str(StageNum) = string.format("%03d", [i(StageNum)]).
 
-maybe_dump_hlds(HLDS, StageNum, StageName, !DumpInfo, !IO) :-
+maybe_dump_hlds(ProgressStream, HLDS, StageNum, StageName, !DumpInfo, !IO) :-
     module_info_get_globals(HLDS, Globals),
     globals.lookup_bool_option(Globals, verbose, Verbose),
     globals.lookup_accumulating_option(Globals, dump_hlds, DumpHLDSStages),
@@ -517,7 +539,6 @@ maybe_dump_hlds(HLDS, StageNum, StageName, !DumpInfo, !IO) :-
             HLDS = PrevHLDS
         then
             globals.lookup_bool_option(Globals, dump_same_hlds, DumpSameHLDS),
-            get_progress_output_stream(HLDS, ProgressStream, !IO),
             (
                 DumpSameHLDS = no,
                 % Don't create a dump file for this stage, and keep the records
@@ -535,7 +556,7 @@ maybe_dump_hlds(HLDS, StageNum, StageName, !DumpInfo, !IO) :-
                 % If a previous dump exists with this name, leaving it around
                 % would be quite misleading. However, there is nothing useful
                 % we can do if the removal fails.
-                io.remove_file(DumpFileName, _Result, !IO)
+                io.file.remove_file(DumpFileName, _Result, !IO)
             ;
                 DumpSameHLDS = yes,
                 CurDumpFileName = PrevDumpFileName,
@@ -570,7 +591,6 @@ maybe_dump_hlds(HLDS, StageNum, StageName, !DumpInfo, !IO) :-
             ".trace_counts." ++ StageNumStr ++ "-" ++ StageName ++
             UserFileSuffix,
         write_out_trace_counts(DumpFileName, MaybeTraceCountsError, !IO),
-        get_progress_output_stream(HLDS, ProgressStream, !IO),
         (
             MaybeTraceCountsError = no,
             (

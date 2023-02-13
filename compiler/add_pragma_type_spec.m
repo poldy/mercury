@@ -11,7 +11,7 @@
 
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_item.
 
 :- import_module list.
@@ -29,8 +29,8 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.make_hlds_error.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.optimization_options.
 :- import_module libs.options.
@@ -41,14 +41,16 @@
 :- import_module parse_tree.prog_type_subst.
 :- import_module parse_tree.prog_util.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
+:- import_module parse_tree.vartypes.
 :- import_module recompilation.
 
 :- import_module assoc_list.
 :- import_module map.
 :- import_module maybe.
 :- import_module multi_map.
+:- import_module one_or_more.
 :- import_module pair.
-:- import_module require.
 :- import_module set.
 :- import_module varset.
 
@@ -68,80 +70,67 @@ add_pragma_type_spec(TSInfo, Context, !ModuleInfo, !QualInfo, !Specs) :-
         MaybePredOrFunc = yes(PredOrFunc),
         (
             ModesOrArity = moa_modes(Modes),
-            list.length(Modes, PredArityInt),
-            user_arity_pred_form_arity(PredOrFunc, UserArity, 
-                pred_form_arity(PredArityInt)),
-            MaybeModes = yes(Modes)
+            PredFormArity = arg_list_arity(Modes),
+            user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity)
         ;
             ModesOrArity = moa_arity(UserArity),
-            user_arity_pred_form_arity(PredOrFunc, UserArity, 
-                pred_form_arity(PredArityInt)),
-            MaybeModes = no
+            user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity)
         ),
         predicate_table_lookup_pf_sym_arity(PredTable, is_fully_qualified,
-            PredOrFunc, SymName, PredArityInt, PredIds),
+            PredOrFunc, SymName, PredFormArity, PredIds),
         predicate_table_lookup_pf_sym(PredTable, is_fully_qualified,
-            PredOrFunc, SymName, AllArityPredIds),
-        UserArity = user_arity(UserArityInt)
+            PredOrFunc, SymName, AllArityPredIds)
     ;
         PFUMM = pfumm_unknown(UserArity),
         maybe_warn_about_pfumm_unknown(!.ModuleInfo, "type_spec",
             PFUMM, SymName, Context, !Specs),
-        UserArity = user_arity(UserArityInt),
         MaybePredOrFunc = no,
-        MaybeModes = no,
         predicate_table_lookup_sym_arity(PredTable, is_fully_qualified,
-            SymName, UserArityInt, PredIds),
+            SymName, UserArity, PredIds),
         predicate_table_lookup_sym(PredTable, is_fully_qualified,
             SymName, AllArityPredIds)
     ),
     (
         PredIds = [],
-        module_info_get_preds(!.ModuleInfo, Preds),
-        find_user_arities_other_than(Preds, AllArityPredIds, UserArity,
+        module_info_get_pred_id_table(!.ModuleInfo, PredIdTable),
+        find_user_arities_other_than(PredIdTable, AllArityPredIds, UserArity,
             OtherUserArities),
-        OtherUserArityInts =
-            list.map(project_user_arity_int, OtherUserArities),
         report_undefined_pred_or_func_error(MaybePredOrFunc, SymName,
-            UserArityInt, OtherUserArityInts, Context,
+            UserArity, OtherUserArities, Context,
             [pragma_decl("type_spec"), words("declaration")], !Specs)
     ;
         PredIds = [_ | _],
         list.foldl3(
-            add_pragma_type_spec_for_pred(TSInfo, UserArity, MaybeModes,
-                Context),
+            add_pragma_type_spec_for_pred(TSInfo, Context),
             PredIds, !ModuleInfo, !QualInfo, !Specs)
     ).
 
 :- pred add_pragma_type_spec_for_pred(pragma_info_type_spec::in,
-    user_arity::in, maybe(list(mer_mode))::in, prog_context::in, pred_id::in,
+    prog_context::in, pred_id::in,
     module_info::in, module_info::out, qual_info::in, qual_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-add_pragma_type_spec_for_pred(TSInfo0, UserArity, MaybeModes, Context, PredId,
+add_pragma_type_spec_for_pred(TSInfo0, Context, PredId,
         !ModuleInfo, !QualInfo, !Specs) :-
-    TSInfo0 = pragma_info_type_spec(_PFUMM, SymName, SpecName, Subst,
-        TVarSet0, ExpandedItems),
+    TSInfo0 = pragma_info_type_spec(PFUMM0, SymName, _SpecModuleName, Subst,
+        TVarSet0, _ExpandedItems),
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
-    handle_pragma_type_spec_subst(Context, Subst, PredInfo0,
-        TVarSet0, TVarSet, Types, ExistQVars, ClassContext, SubstOk,
-        !ModuleInfo, !Specs),
+    handle_pragma_type_spec_subst(PredInfo0, TVarSet0, Subst, Context,
+        MaybeSubstResult),
     (
-        SubstOk = yes(RenamedSubst),
-        pred_info_get_proc_table(PredInfo0, Procs0),
-        handle_pragma_type_spec_modes(SymName, UserArity, Context, MaybeModes,
-            MaybeProcIds, Procs0, Procs1, !ModuleInfo, !Specs),
-        % Remove any imported structure sharing and reuse information for the
-        % original procedure as they won't be (directly) applicable.
-        map.map_values_only(reset_imported_structure_sharing_reuse,
-            Procs1, Procs),
+        MaybeSubstResult = ok5(TVarSet, Types, ExistQVars, ClassContext,
+            RenamedSubst),
+        pred_info_get_proc_table(PredInfo0, ProcTable0),
+        handle_pragma_type_spec_modes(!.ModuleInfo, PredId, PredInfo0,
+            ProcTable0, TVarSet0, Context, PFUMM0, MaybeSpecProcs),
         module_info_get_globals(!.ModuleInfo, Globals),
         globals.get_opt_tuple(Globals, OptTuple),
         DoTypeSpec = OptTuple ^ ot_spec_types_user_guided,
         globals.lookup_bool_option(Globals, smart_recompilation, Smart),
         % XXX Should check whether smart recompilation has been disabled?
         ( if
-            MaybeProcIds = yes(ProcIds),
+            MaybeSpecProcs = ok5(SpecProcTable0, SpecProcIds,
+                UserArity, PredFormArity, PFUMM),
             % Even if we aren't doing type specialization, we need to create
             % the interface procedures for local predicates to check the
             % type-class correctness of the requested specializations.
@@ -156,138 +145,173 @@ add_pragma_type_spec_for_pred(TSInfo0, UserArity, MaybeModes, Context, PredId,
             ; Smart = yes
             )
         then
-            % Build a clause to call the old predicate with the specified types
-            % to force the specialization. For imported predicates this forces
-            % the creation of the proper interface.
-            %
+            add_type_spec_version_of_pred(PredId, PredInfo0, PredFormArity,
+                TSInfo0, TVarSet, Types, ExistQVars, ClassContext,
+                SpecProcTable0, SpecProcIds, Context,
+                SpecPredId, SpecPredStatus, !ModuleInfo),
+            record_type_specialization(TSInfo0, PredId, SpecPredId,
+                SpecPredStatus, SpecProcIds, RenamedSubst, TVarSet, PFUMM,
+                !ModuleInfo),
             PredOrFunc = pred_info_is_pred_or_func(PredInfo0),
-            varset.init(ArgVarSet0),
-            user_arity_pred_form_arity(PredOrFunc, UserArity,
-                pred_form_arity(PredArityInt)),
-            make_n_fresh_vars("HeadVar__", PredArityInt, Args,
-                ArgVarSet0, ArgVarSet),
-            % XXX We could use explicit type qualifications here for the
-            % argument types, but explicit type qualification doesn't work
-            % correctly with type inference due to a bug somewhere in
-            % typecheck.m -- the explicitly declared types are not kept in
-            % sync with the predicate's tvarset after the first pass of
-            % type checking.
-            % map.from_corresponding_lists(Args, Types, VarTypes0)
-            init_vartypes(VarTypes0),
-            goal_info_init(GoalInfo0),
-            set_of_var.list_to_set(Args, NonLocals),
-            goal_info_set_nonlocals(NonLocals, GoalInfo0, GoalInfo1),
-            goal_info_set_context(Context, GoalInfo1, GoalInfo),
-
-            % We don't record the called predicate as used -- it is only used
-            % if there is some other call. This call is only used to make
-            % higher_order.m generate the interface for the type specialized
-            % procedure, and will be removed by higher_order.m after that
-            % is done.
-            do_construct_pred_or_func_call(PredId, PredOrFunc,
-                SymName, Args, GoalInfo, Goal),
-            Clause = clause(selected_modes(ProcIds), Goal, impl_lang_mercury,
-                Context, []),
-            map.init(TVarNameMap),
-            ArgsVec = proc_arg_vector_init(PredOrFunc, Args),
-            set_clause_list([Clause], ClausesRep),
-            ItemNumbers = init_clause_item_numbers_comp_gen,
-            rtti_varmaps_init(RttiVarMaps),
-            Clauses = clauses_info(ArgVarSet, TVarNameMap,
-                VarTypes0, VarTypes0, ArgsVec, ClausesRep, ItemNumbers,
-                RttiVarMaps, no_foreign_lang_clauses, no_clause_syntax_errors),
-            pred_info_get_markers(PredInfo0, Markers0),
-            add_marker(marker_calls_are_fully_qualified, Markers0, Markers),
-            map.init(Proofs),
-            map.init(ConstraintMap),
-
-            ( if pred_info_is_imported(PredInfo0) then
-                PredStatus = pred_status(status_opt_imported)
-            else
-                pred_info_get_status(PredInfo0, PredStatus)
-            ),
-
-            ModuleName = pred_info_module(PredInfo0),
-            pred_info_get_origin(PredInfo0, OrigOrigin),
-            SubstDesc = list.map(subst_desc, Subst),
-            Origin = origin_transformed(
-                transform_type_specialization(SubstDesc), OrigOrigin, PredId),
-            MaybeCurUserDecl = maybe.no,
-            GoalType = goal_not_for_promise(np_goal_type_none),
-            pred_info_get_var_name_remap(PredInfo0, VarNameRemap),
-            pred_info_init(ModuleName, SpecName, PredArityInt, PredOrFunc,
-                Context, Origin, PredStatus, MaybeCurUserDecl, GoalType,
-                Markers, Types, TVarSet, ExistQVars, ClassContext, Proofs,
-                ConstraintMap, Clauses, VarNameRemap, NewPredInfo0),
-            pred_info_set_proc_table(Procs, NewPredInfo0, NewPredInfo),
-            module_info_get_predicate_table(!.ModuleInfo, PredTable0),
-            predicate_table_insert(NewPredInfo, NewPredId,
-                PredTable0, PredTable),
-            module_info_set_predicate_table(PredTable, !ModuleInfo),
-
-            % Record the type specialisation in the module_info.
-            module_info_get_type_spec_info(!.ModuleInfo, TypeSpecInfo0),
-            TypeSpecInfo0 = type_spec_info(ProcsToSpec0,
-                ForceVersions0, SpecMap0, PragmaMap0),
-            list.map(
-                ( pred(ProcId::in, PredProcId::out) is det :-
-                    PredProcId = proc(PredId, ProcId)
-                ), ProcIds, PredProcIds),
-            set.insert_list(PredProcIds, ProcsToSpec0, ProcsToSpec),
-            set.insert(NewPredId, ForceVersions0, ForceVersions),
-
-            ( if PredStatus = pred_status(status_opt_imported) then
-                % For imported predicates dead_proc_elim.m needs to know that
-                % if the original predicate is used, the predicate to force
-                % the production of the specialised interface is also used.
-                multi_map.set(PredId, NewPredId, SpecMap0, SpecMap)
-            else
-                SpecMap = SpecMap0
-            ),
-            (
-                MaybeModes = no,
-                ModesOrArity = moa_arity(UserArity)
-            ;
-                MaybeModes = yes(Modes),
-                ModesOrArity = moa_modes(Modes)
-            ),
-            (
-                PredOrFunc = pf_predicate,
-                PFUMM = pfumm_predicate(ModesOrArity)
-            ;
-                PredOrFunc = pf_function,
-                PFUMM = pfumm_function(ModesOrArity)
-            ),
-            TSInfo = pragma_info_type_spec(PFUMM, SymName, SpecName,
-                map.to_assoc_list(RenamedSubst), TVarSet, ExpandedItems),
-            multi_map.set(PredId, TSInfo, PragmaMap0, PragmaMap),
-            TypeSpecInfo = type_spec_info(ProcsToSpec, ForceVersions, SpecMap,
-                PragmaMap),
-            module_info_set_type_spec_info(TypeSpecInfo, !ModuleInfo),
-
-            IsImported = pred_status_is_imported(PredStatus),
-            (
-                IsImported = yes,
-                ItemType = pred_or_func_to_item_type(PredOrFunc),
-                UserArity = user_arity(UserArityInt),
-                apply_to_recompilation_info(
-                    recompilation.record_expanded_items(
-                        item_id(ItemType, item_name(SymName, UserArityInt)),
-                        ExpandedItems),
-                    !QualInfo)
-            ;
-                IsImported = no
-            )
+            maybe_record_type_spec_in_qual_info(PredOrFunc, SymName, UserArity,
+                SpecPredStatus, TSInfo0, !QualInfo)
         else
-            true
+            !:Specs = get_any_errors5(MaybeSpecProcs) ++ !.Specs
         )
     ;
-        SubstOk = no
+        MaybeSubstResult = error5(SubstSpecs),
+        !:Specs = SubstSpecs ++ !.Specs
     ).
 
 :- func subst_desc(pair(tvar, mer_type)) = pair(int, mer_type).
 
 subst_desc(TVar - Type) = var_to_int(TVar) - Type.
+
+:- pred add_type_spec_version_of_pred(pred_id::in, pred_info::in,
+    pred_form_arity::in, pragma_info_type_spec::in,
+    tvarset::in, list(mer_type)::in, existq_tvars::in, prog_constraints::in,
+    proc_table::in, list(proc_id)::in, prog_context::in,
+    pred_id::out, pred_status::out, module_info::in, module_info::out) is det.
+
+add_type_spec_version_of_pred(PredId, PredInfo0, PredFormArity, TSInfo0,
+        TVarSet, Types, ExistQVars, ClassContext, SpecProcTable0, SpecProcIds,
+        Context, SpecPredId, SpecPredStatus, !ModuleInfo) :-
+    TSInfo0 = pragma_info_type_spec(PFUMM0, SymName, SpecModuleName, Subst,
+        TVarSet0, _ExpandedItems),
+
+    % Remove any imported structure sharing and reuse information
+    % for the original procedure as they won't be (directly)
+    % applicable to the specialized versions.
+    map.map_values_only(reset_imported_structure_sharing_reuse,
+        SpecProcTable0, SpecProcTable),
+
+    % Build a clause to call the old predicate with the specified types
+    % to force the specialization. For imported predicates this forces
+    % the creation of the proper interface.
+    varset.init(ArgVarSet0),
+    PredFormArity = pred_form_arity(PredFormArityInt),
+    make_n_fresh_vars("HeadVar__", PredFormArityInt, ArgVars,
+        ArgVarSet0, ArgVarSet),
+
+    goal_info_init(GoalInfo0),
+    set_of_var.list_to_set(ArgVars, NonLocals),
+    goal_info_set_nonlocals(NonLocals, GoalInfo0, GoalInfo1),
+    goal_info_set_context(Context, GoalInfo1, GoalInfo),
+
+    % We don't record the called predicate as used -- it is only used
+    % if there is some other call. This call is only used to make
+    % higher_order.m generate the interface for the type specialized
+    % procedure, and will be removed by higher_order.m after that
+    % is done.
+    PredOrFunc = pred_info_is_pred_or_func(PredInfo0),
+    construct_pred_or_func_call(PredId, PredOrFunc, SymName, ArgVars,
+        GoalInfo, Goal),
+    Clause = clause(selected_modes(SpecProcIds), Goal,
+        impl_lang_mercury, Context, []),
+    % XXX We could use explicit type qualifications here for the
+    % argument types, but explicit type qualification doesn't work
+    % correctly with type inference due to a bug somewhere in
+    % typecheck.m -- the explicitly declared types are not kept in
+    % sync with the predicate's tvarset after the first pass of
+    % type checking.
+    % map.from_corresponding_lists(ArgVars, Types, ExplicitVarTypes0)
+    init_vartypes(ExplicitVarTypes),
+    init_var_table(VarTable),
+    rtti_varmaps_init(RttiVarMaps),
+    map.init(TVarNameMap),
+    ArgsVec = proc_arg_vector_init(PredOrFunc, ArgVars),
+    set_clause_list([Clause], ClausesRep),
+    ItemNumbers = init_clause_item_numbers_comp_gen,
+    Clauses = clauses_info(ArgVarSet, ExplicitVarTypes,
+        VarTable, RttiVarMaps, TVarNameMap, ArgsVec, ClausesRep,
+        ItemNumbers, no_foreign_lang_clauses, no_clause_syntax_errors),
+    pred_info_get_markers(PredInfo0, Markers0),
+    add_marker(marker_calls_are_fully_qualified, Markers0, Markers),
+    map.init(Proofs),
+    map.init(ConstraintMap),
+
+    ( if pred_info_is_imported(PredInfo0) then
+        SpecPredStatus = pred_status(status_opt_imported)
+    else
+        pred_info_get_status(PredInfo0, SpecPredStatus)
+    ),
+
+    pfumm_to_maybe_pf_arity_maybe_modes(PFUMM0, MaybePredOrFunc0,
+        _Arity, _MaybeModes),
+    UnqualName = unqualify_name(SymName),
+    Transform = tn_pragma_type_spec(MaybePredOrFunc0, TVarSet0, Subst),
+    make_transformed_pred_name(UnqualName, Transform, SpecName),
+    pred_info_get_origin(PredInfo0, OrigOrigin),
+    SubstDesc = one_or_more.map(subst_desc, Subst),
+    PredTransform = pred_transform_pragma_type_spec(SubstDesc),
+    Origin = origin_pred_transform(PredTransform, OrigOrigin, PredId),
+    MaybeCurUserDecl = maybe.no,
+    GoalType = goal_not_for_promise(np_goal_type_none),
+    pred_info_get_var_name_remap(PredInfo0, VarNameRemap),
+    pred_info_init(PredOrFunc, SpecModuleName, SpecName, PredFormArity,
+        Context, Origin, SpecPredStatus, MaybeCurUserDecl, GoalType,
+        Markers, Types, TVarSet, ExistQVars, ClassContext, Proofs,
+        ConstraintMap, Clauses, VarNameRemap, SpecPredInfo0),
+    pred_info_set_proc_table(SpecProcTable, SpecPredInfo0, SpecPredInfo),
+    module_info_get_predicate_table(!.ModuleInfo, PredTable0),
+    predicate_table_insert(SpecPredInfo, SpecPredId, PredTable0, PredTable),
+    module_info_set_predicate_table(PredTable, !ModuleInfo).
+
+:- pred record_type_specialization(pragma_info_type_spec::in,
+    pred_id::in, pred_id::in, pred_status::in, list(proc_id)::in,
+    type_subst::in, tvarset::in, pred_func_or_unknown_maybe_modes::in,
+    module_info::in, module_info::out) is det.
+
+record_type_specialization(TSInfo0, PredId, SpecPredId, SpecPredStatus,
+        SpecProcIds, RenamedSubst, TVarSet, PFUMM, !ModuleInfo) :-
+    % Record the type specialisation in the module_info.
+    module_info_get_type_spec_info(!.ModuleInfo, TypeSpecInfo0),
+    TypeSpecInfo0 = type_spec_info(ProcsToSpec0, ForceVersions0,
+        SpecMap0, PragmaMap0),
+    list.map(
+        ( pred(ProcId::in, PredProcId::out) is det :-
+            PredProcId = proc(PredId, ProcId)
+        ), SpecProcIds, SpecPredProcIds),
+    set.insert_list(SpecPredProcIds, ProcsToSpec0, ProcsToSpec),
+    set.insert(SpecPredId, ForceVersions0, ForceVersions),
+
+    ( if SpecPredStatus = pred_status(status_opt_imported) then
+        % For imported predicates dead_proc_elim.m needs to know that
+        % if the original predicate is used, the predicate to force
+        % the production of the specialised interface is also used.
+        multi_map.set(PredId, SpecPredId, SpecMap0, SpecMap)
+    else
+        SpecMap = SpecMap0
+    ),
+    TSInfo = (((TSInfo0
+        ^ tspec_pfumm := PFUMM)
+        ^ tspec_tsubst := RenamedSubst)
+        ^ tspec_tvarset := TVarSet),
+    multi_map.set(PredId, TSInfo, PragmaMap0, PragmaMap),
+    TypeSpecInfo = type_spec_info(ProcsToSpec, ForceVersions, SpecMap,
+        PragmaMap),
+    module_info_set_type_spec_info(TypeSpecInfo, !ModuleInfo).
+
+:- pred maybe_record_type_spec_in_qual_info(pred_or_func::in, sym_name::in,
+    user_arity::in, pred_status::in, pragma_info_type_spec::in,
+    qual_info::in, qual_info::out) is det.
+
+maybe_record_type_spec_in_qual_info(PredOrFunc, SymName, UserArity, PredStatus,
+        TSInfo, !QualInfo) :-
+    IsImported = pred_status_is_imported(PredStatus),
+    (
+        IsImported = yes,
+        ItemType = pred_or_func_to_recomp_item_type(PredOrFunc),
+        UserArity = user_arity(UserArityInt),
+        ItemName = recomp_item_name(SymName, UserArityInt),
+        ItemId = recomp_item_id(ItemType, ItemName),
+        ExpandedItems = TSInfo ^ tspec_items,
+        apply_to_recompilation_info(
+            recompilation.record_expanded_items(ItemId, ExpandedItems),
+            !QualInfo)
+    ;
+        IsImported = no
+    ).
 
     % Check that the type substitution for a `:- pragma type_spec'
     % declaration is valid.
@@ -298,123 +322,95 @@ subst_desc(TVar - Type) = var_to_int(TVar) - Type.
     % not ground, however this is a (hopefully temporary) limitation
     % of the current implementation, so it only results in a warning.
     %
-:- pred handle_pragma_type_spec_subst(prog_context::in,
-    assoc_list(tvar, mer_type)::in, pred_info::in, tvarset::in, tvarset::out,
-    list(mer_type)::out, existq_tvars::out, prog_constraints::out,
-    maybe(tsubst)::out, module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
+:- pred handle_pragma_type_spec_subst(pred_info::in, tvarset::in,
+    type_subst::in, prog_context::in,
+    maybe5(tvarset, list(mer_type), existq_tvars, prog_constraints,
+        type_subst)::out) is det.
 
-handle_pragma_type_spec_subst(Context, Subst, PredInfo0, TVarSet0, TVarSet,
-        Types, ExistQVars, ClassContext, SubstOk, !ModuleInfo, !Specs) :-
-    assoc_list.keys(Subst, VarsToSub),
+handle_pragma_type_spec_subst(PredInfo0, TVarSet0, Subst, Context,
+        MaybeSubstResult) :-
+    SubstList = one_or_more_to_list(Subst),
+    assoc_list.keys(SubstList, VarsToSub),
+    find_duplicate_list_elements(VarsToSub, MultiSubstVars0),
     (
-        Subst = [],
-        unexpected($pred, "empty substitution")
+        MultiSubstVars0 = [_ | _],
+        list.sort_and_remove_dups(MultiSubstVars0, MultiSubstVars),
+        report_multiple_subst_vars(PredInfo0, Context, TVarSet0,
+            MultiSubstVars, Spec),
+        MaybeSubstResult = error5([Spec])
     ;
-        Subst = [_ | _],
-        find_duplicate_list_elements(VarsToSub, MultiSubstVars0),
+        MultiSubstVars0 = [],
+        pred_info_get_typevarset(PredInfo0, CalledTVarSet),
+        varset.create_name_var_map(CalledTVarSet, NameVarIndex0),
+        list.filter(
+            ( pred(Var::in) is semidet :-
+                varset.lookup_name(TVarSet0, Var, VarName),
+                not map.contains(NameVarIndex0, VarName)
+            ), VarsToSub, UnknownVarsToSub),
         (
-            MultiSubstVars0 = [_ | _],
-            list.sort_and_remove_dups(MultiSubstVars0, MultiSubstVars),
-            report_multiple_subst_vars(PredInfo0, Context, TVarSet0,
-                MultiSubstVars, !Specs),
-            ExistQVars = [],
-            Types = [],
-            ClassContext = constraints([], []),
-            varset.init(TVarSet),
-            SubstOk = no
-        ;
-            MultiSubstVars0 = [],
-            pred_info_get_typevarset(PredInfo0, CalledTVarSet),
-            varset.create_name_var_map(CalledTVarSet, NameVarIndex0),
-            list.filter(
-                ( pred(Var::in) is semidet :-
-                    varset.lookup_name(TVarSet0, Var, VarName),
-                    not map.contains(NameVarIndex0, VarName)
-                ), VarsToSub, UnknownVarsToSub),
+            UnknownVarsToSub = [],
+            % Check that the substitution is not recursive.
+            set.list_to_set(VarsToSub, VarsToSubSet),
+
+            assoc_list.values(SubstList, SubstTypes0),
+            type_vars_in_types(SubstTypes0, TVarsInSubstTypes0),
+            set.list_to_set(TVarsInSubstTypes0, TVarsInSubstTypes),
+
+            set.intersect(TVarsInSubstTypes, VarsToSubSet, RecSubstTVars0),
+            set.to_sorted_list(RecSubstTVars0, RecSubstTVars),
+
             (
-                UnknownVarsToSub = [],
-                % Check that the substitution is not recursive.
-                set.list_to_set(VarsToSub, VarsToSubSet),
+                RecSubstTVars = [],
+                map.init(TVarRenaming0),
+                list.append(VarsToSub, TVarsInSubstTypes0, VarsToReplace),
 
-                assoc_list.values(Subst, SubstTypes0),
-                type_vars_list(SubstTypes0, TVarsInSubstTypes0),
-                set.list_to_set(TVarsInSubstTypes0, TVarsInSubstTypes),
+                get_new_tvars(VarsToReplace, TVarSet0, CalledTVarSet,
+                    TVarSet, NameVarIndex0, _, TVarRenaming0, TVarRenaming),
 
-                set.intersect(TVarsInSubstTypes, VarsToSubSet, RecSubstTVars0),
-                set.to_sorted_list(RecSubstTVars0, RecSubstTVars),
-
+                % Check that none of the existentially quantified variables
+                % were substituted.
+                map.apply_to_list(VarsToSub, TVarRenaming, RenamedVarsToSub),
+                pred_info_get_exist_quant_tvars(PredInfo0, ExistQVars),
+                list.filter(
+                    ( pred(RenamedVar::in) is semidet :-
+                        list.member(RenamedVar, ExistQVars)
+                    ), RenamedVarsToSub, SubExistQVars),
                 (
-                    RecSubstTVars = [],
-                    map.init(TVarRenaming0),
-                    list.append(VarsToSub, TVarsInSubstTypes0, VarsToReplace),
+                    SubExistQVars = [],
+                    apply_variable_renaming_to_type_list(TVarRenaming,
+                        SubstTypes0, SubstTypes),
+                    assoc_list.from_corresponding_lists(RenamedVarsToSub,
+                        SubstTypes, SubAL),
+                    map.from_assoc_list(SubAL, TypeSubst),
 
-                    get_new_tvars(VarsToReplace, TVarSet0, CalledTVarSet,
-                        TVarSet, NameVarIndex0, _,
-                        TVarRenaming0, TVarRenaming),
-
-                    % Check that none of the existentially quantified variables
-                    % were substituted.
-                    map.apply_to_list(VarsToSub, TVarRenaming,
-                        RenamedVarsToSub),
-                    pred_info_get_exist_quant_tvars(PredInfo0, ExistQVars),
-                    list.filter(
-                        ( pred(RenamedVar::in) is semidet :-
-                            list.member(RenamedVar, ExistQVars)
-                        ), RenamedVarsToSub, SubExistQVars),
-                    (
-                        SubExistQVars = [],
-                        map.init(TypeSubst0),
-                        apply_variable_renaming_to_type_list(TVarRenaming,
-                            SubstTypes0, SubstTypes),
-                        assoc_list.from_corresponding_lists(RenamedVarsToSub,
-                            SubstTypes, SubAL),
-                        list.foldl(map_set_from_pair, SubAL,
-                            TypeSubst0, TypeSubst),
-
-                        % Apply the substitution.
-                        pred_info_get_arg_types(PredInfo0, Types0),
-                        pred_info_get_class_context(PredInfo0, ClassContext0),
-                        apply_rec_subst_to_type_list(TypeSubst, Types0, Types),
-                        apply_rec_subst_to_prog_constraints(TypeSubst,
-                            ClassContext0, ClassContext),
-                        SubstOk = yes(TypeSubst)
-                    ;
-                        SubExistQVars = [_ | _],
-                        report_subst_existq_tvars(PredInfo0, Context,
-                            SubExistQVars, !Specs),
-                        Types = [],
-                        ClassContext = constraints([], []),
-                        SubstOk = no
-                    )
+                    % Apply the substitution.
+                    pred_info_get_arg_types(PredInfo0, Types0),
+                    pred_info_get_class_context(PredInfo0, ClassContext0),
+                    apply_rec_subst_to_type_list(TypeSubst, Types0, Types),
+                    apply_rec_subst_to_prog_constraints(TypeSubst,
+                        ClassContext0, ClassContext),
+                    det_list_to_one_or_more(SubAL, RenamedSubst),
+                    MaybeSubstResult = ok5(TVarSet, Types, ExistQVars,
+                        ClassContext, RenamedSubst)
                 ;
-                    RecSubstTVars = [_ | _],
-                    report_recursive_subst(PredInfo0, Context, TVarSet0,
-                        RecSubstTVars, !Specs),
-                    ExistQVars = [],
-                    Types = [],
-                    ClassContext = constraints([], []),
-                    varset.init(TVarSet),
-                    SubstOk = no
+                    SubExistQVars = [_ | _],
+                    report_subst_existq_tvars(PredInfo0, Context,
+                        SubExistQVars, Spec),
+                    MaybeSubstResult = error5([Spec])
                 )
             ;
-                UnknownVarsToSub = [_ | _],
-                report_unknown_vars_to_subst(PredInfo0, Context, TVarSet0,
-                    UnknownVarsToSub, !Specs),
-                ExistQVars = [],
-                Types = [],
-                ClassContext = constraints([], []),
-                varset.init(TVarSet),
-                SubstOk = no
+                RecSubstTVars = [_ | _],
+                report_recursive_subst(PredInfo0, Context, TVarSet0,
+                    RecSubstTVars, Spec),
+                MaybeSubstResult = error5([Spec])
             )
+        ;
+            UnknownVarsToSub = [_ | _],
+            report_unknown_vars_to_subst(PredInfo0, Context, TVarSet0,
+                UnknownVarsToSub, Spec),
+            MaybeSubstResult = error5([Spec])
         )
     ).
-
-:- pred map_set_from_pair(pair(K, V)::in, map(K, V)::in, map(K, V)::out)
-    is det.
-
-map_set_from_pair(K - V, !Map) :-
-    map.set(K, V, !Map).
 
 :- pred find_duplicate_list_elements(list(T)::in, list(T)::out) is det.
 
@@ -428,50 +424,43 @@ find_duplicate_list_elements([H | T], DupVars) :-
     ).
 
 :- pred report_subst_existq_tvars(pred_info::in, prog_context::in,
-    list(tvar)::in, list(error_spec)::in, list(error_spec)::out) is det.
+    list(tvar)::in, error_spec::out) is det.
 
-report_subst_existq_tvars(PredInfo, Context, SubExistQVars, !Specs) :-
+report_subst_existq_tvars(PredInfo, Context, SubExistQVars, Spec) :-
     pred_info_get_typevarset(PredInfo, TVarSet),
     Pieces = pragma_type_spec_to_pieces(PredInfo) ++
         [words("error: the substitution includes"),
         words("the existentially quantified type")] ++
         report_variables(SubExistQVars, TVarSet) ++ [suffix(".")],
     Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
+        Context, Pieces).
 
 :- pred report_recursive_subst(pred_info::in, prog_context::in, tvarset::in,
-    list(tvar)::in, list(error_spec)::in, list(error_spec)::out) is det.
+    list(tvar)::in, error_spec::out) is det.
 
-report_recursive_subst(PredInfo, Context, TVarSet, RecursiveVars, !Specs) :-
+report_recursive_subst(PredInfo, Context, TVarSet, RecursiveVars, Spec) :-
     Pieces = pragma_type_spec_to_pieces(PredInfo) ++
         [words("error:")] ++ report_variables(RecursiveVars, TVarSet) ++
         [words(choose_number(RecursiveVars, "occurs", "occur")),
         words("on both sides of the substitution.")],
     Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
+        Context, Pieces).
 
 :- pred report_multiple_subst_vars(pred_info::in, prog_context::in,
-    tvarset::in, list(tvar)::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
+    tvarset::in, list(tvar)::in, error_spec::out) is det.
 
-report_multiple_subst_vars(PredInfo, Context, TVarSet, MultiSubstVars,
-        !Specs) :-
+report_multiple_subst_vars(PredInfo, Context, TVarSet, MultiSubstVars, Spec) :-
     Pieces = pragma_type_spec_to_pieces(PredInfo) ++
         [words("error:")] ++ report_variables(MultiSubstVars, TVarSet) ++
         [words(choose_number(MultiSubstVars, "has", "have")),
         words("multiple replacement types.")],
     Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
+        Context, Pieces).
 
 :- pred report_unknown_vars_to_subst(pred_info::in, prog_context::in,
-    tvarset::in, list(tvar)::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
+    tvarset::in, list(tvar)::in, error_spec::out) is det.
 
-report_unknown_vars_to_subst(PredInfo, Context, TVarSet, UnknownVars,
-        !Specs) :-
+report_unknown_vars_to_subst(PredInfo, Context, TVarSet, UnknownVars, Spec) :-
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
     (
         PredOrFunc = pf_predicate,
@@ -485,60 +474,93 @@ report_unknown_vars_to_subst(PredInfo, Context, TVarSet, UnknownVars,
         [words(choose_number(UnknownVars, "does not", "do not")),
         words("occur in the"), decl(Decl), words("declaration.")],
     Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
+        Context, Pieces).
 
-:- func pragma_type_spec_to_pieces(pred_info) = list(format_component).
+:- func pragma_type_spec_to_pieces(pred_info) = list(format_piece).
 
 pragma_type_spec_to_pieces(PredInfo) = Pieces :-
     Module = pred_info_module(PredInfo),
     Name = pred_info_name(PredInfo),
-    Arity = pred_info_orig_arity(PredInfo),
+    PredFormArity = pred_info_pred_form_arity(PredInfo),
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
     PFSymNameArity =
-        pf_sym_name_arity(PredOrFunc, qualified(Module, Name), Arity),
+        pf_sym_name_arity(PredOrFunc, qualified(Module, Name), PredFormArity),
     Pieces = [words("In"), pragma_decl("type_spec"),
-        words("declaration for"), qual_pf_sym_name_orig_arity(PFSymNameArity),
-        suffix(":"), nl].
+        words("declaration for"),
+        qual_pf_sym_name_pred_form_arity(PFSymNameArity), suffix(":"), nl].
 
-:- func report_variables(list(tvar), tvarset) = list(format_component).
+:- func report_variables(list(tvar), tvarset) = list(format_piece).
 
 report_variables(SubExistQVars, VarSet) =
     [words(choose_number(SubExistQVars, "variable", "variables")),
-    quote(mercury_vars_to_name_only(VarSet, SubExistQVars))].
+    quote(mercury_vars_to_name_only_vs(VarSet, SubExistQVars))].
 
     % Check that the mode list for a `:- pragma type_spec' declaration
     % specifies a known procedure.
     %
-:- pred handle_pragma_type_spec_modes(sym_name::in, user_arity::in,
-    prog_context::in, maybe(list(mer_mode))::in,
-    maybe(list(proc_id))::out, proc_table::in, proc_table::out,
-    module_info::in, module_info::out,
-    list(error_spec)::in, list(error_spec)::out) is det.
+:- pred handle_pragma_type_spec_modes(module_info::in,
+    pred_id::in, pred_info::in, proc_table::in, tvarset::in, prog_context::in,
+    pred_func_or_unknown_maybe_modes::in,
+    maybe5(proc_table, list(proc_id), user_arity, pred_form_arity,
+        pred_func_or_unknown_maybe_modes)::out)
+    is det.
 
-handle_pragma_type_spec_modes(SymName, UserArity, Context, MaybeModes,
-        MaybeProcIds, !Procs, !ModuleInfo, !Specs) :-
+handle_pragma_type_spec_modes(ModuleInfo, PredId, PredInfo, ProcTable, TVarSet,
+        Context, PFUMM0, MaybeSpecProcs) :-
     (
-        MaybeModes = yes(Modes),
-        map.to_assoc_list(!.Procs, ExistingProcs),
-        ( if
-            get_procedure_matching_argmodes(ExistingProcs, Modes,
-                !.ModuleInfo, ProcId)
-        then
-            map.lookup(!.Procs, ProcId, ProcInfo),
-            !:Procs = map.singleton(ProcId, ProcInfo),
-            ProcIds = [ProcId],
-            MaybeProcIds = yes(ProcIds)
-        else
-            UserArity = user_arity(UserArityInt),
-            report_undefined_mode_error(SymName, UserArityInt, Context,
-                [pragma_decl("type_spec"), words("declaration")], !Specs),
-            MaybeProcIds = no
+        (
+            PFUMM0 = pfumm_predicate(ModesOrArity),
+            PredOrFunc = pf_predicate
+        ;
+            PFUMM0 = pfumm_function(ModesOrArity),
+            PredOrFunc = pf_function
+        ),
+        PFUMM = PFUMM0,
+        (
+            ModesOrArity = moa_modes(ArgModes),
+            PredFormArity = arg_list_arity(ArgModes),
+            ( if
+                get_procedure_matching_argmodes(ModuleInfo, ProcTable,
+                    ArgModes, ProcId, ProcInfo)
+            then
+                % Only this procedure in the original predicate
+                % is to be type specialized.
+                SpecProcTable = map.singleton(ProcId, ProcInfo),
+                user_arity_pred_form_arity(PredOrFunc,
+                    UserArity, PredFormArity),
+                MaybeSpecProcs = ok5(SpecProcTable, [ProcId],
+                    UserArity, PredFormArity, PFUMM)
+            else
+                varset.coerce(TVarSet, VarSet),
+                DescPieces = [pragma_decl("type_spec"), words("declaration")],
+                report_undeclared_mode_error(ModuleInfo, PredId, PredInfo,
+                    VarSet, ArgModes, DescPieces, Context, [], Specs),
+                MaybeSpecProcs = error5(Specs)
+            )
+        ;
+            ModesOrArity = moa_arity(UserArity),
+            % Every procedure in the original predicate
+            % is to be type specialized.
+            map.keys(ProcTable, ProcIds),
+            user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+            MaybeSpecProcs = ok5(ProcTable, ProcIds, UserArity, PredFormArity,
+                PFUMM)
         )
     ;
-        MaybeModes = no,
-        map.keys(!.Procs, ProcIds),
-        MaybeProcIds = yes(ProcIds)
+        PFUMM0 = pfumm_unknown(UserArity),
+        % Every procedure in the original predicate is to be type specialized.
+        map.keys(ProcTable, ProcIds),
+        PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+        (
+            PredOrFunc = pf_predicate,
+            PFUMM = pfumm_predicate(moa_arity(UserArity))
+        ;
+            PredOrFunc = pf_function,
+            PFUMM = pfumm_function(moa_arity(UserArity))
+        ),
+        user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
+        MaybeSpecProcs = ok5(ProcTable, ProcIds, UserArity, PredFormArity,
+            PFUMM)
     ).
 
 :- pred reset_imported_structure_sharing_reuse(

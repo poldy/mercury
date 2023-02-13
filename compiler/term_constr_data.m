@@ -386,10 +386,9 @@
 
 :- import_module int.
 :- import_module require.
-:- import_module std_util.
 :- import_module string.
-:- import_module varset.
 :- import_module term.
+:- import_module varset.
 
 %-----------------------------------------------------------------------------%
 %
@@ -512,9 +511,9 @@ simplify_abstract_rep(Goal0, Goal) :-
         some [!Conjuncts] (
             !:Conjuncts = Conjuncts0,
             list.map(simplify_abstract_rep, !Conjuncts),
-            list.filter(isnt(is_empty_primitive), !Conjuncts),
+            list.negated_filter(is_empty_primitive, !Conjuncts),
             flatten_conjuncts(!Conjuncts),
-            list.filter(isnt(is_empty_conj), !Conjuncts),
+            list.negated_filter(is_empty_conj, !Conjuncts),
             Conjuncts = !.Conjuncts
         ),
         ( if Conjuncts = [Conjunct] then
@@ -674,7 +673,7 @@ dump_abstract_proc(Stream, ModuleInfo, Indent, Proc, !IO) :-
     Body = Proc ^ ap_body,
     SizeVarSet = Proc ^ ap_size_varset,
     AbstractPPId = real(PPId),
-    PPIdStr = pred_proc_id_to_string(ModuleInfo, PPId),
+    PPIdStr = pred_proc_id_to_dev_string(ModuleInfo, PPId),
     HeadVarSizeStrs = list.map(size_var_to_string(SizeVarSet), HeadVars),
     HeadVarSizesStr = string.join_list(", ", HeadVarSizeStrs),
     indent_line(Stream, Indent, !IO),
@@ -745,7 +744,7 @@ dump_abstract_goal(Stream, ModuleInfo, VarSet, Indent, AbstractGoal, !IO) :-
     ;
         AbstractGoal = term_call(PPId0, _, CallVars, _, _, _, CallPoly),
         PPId0 = real(PPId),
-        PPIdStr = pred_proc_id_to_string(ModuleInfo, PPId),
+        PPIdStr = pred_proc_id_to_dev_string(ModuleInfo, PPId),
         CallVarNamesStr = var_names_to_string(VarSet, CallVars),
         indent_line(Stream, Indent, !IO),
         io.format(Stream, "call: %s : [%s]\n",

@@ -64,9 +64,11 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 
+:- import_module io.
+
 %-----------------------------------------------------------------------------%
 
-:- pred unneeded_process_proc_msg(pred_proc_id::in,
+:- pred unneeded_process_proc_msg(io.text_output_stream::in, pred_proc_id::in,
     proc_info::in, proc_info::out, module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
@@ -87,7 +89,6 @@
 :- import_module hlds.make_goal.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.optimization_options.
@@ -98,11 +99,12 @@
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
 :- import_module int.
-:- import_module io.
 :- import_module list.
 :- import_module map.
 :- import_module pair.
@@ -225,9 +227,10 @@
 
 %-----------------------------------------------------------------------------%
 
-unneeded_process_proc_msg(PredProcId, !ProcInfo, !ModuleInfo) :-
+unneeded_process_proc_msg(ProgressStream, PredProcId,
+        !ProcInfo, !ModuleInfo) :-
     trace [io(!IO)] (
-        write_proc_progress_message(!.ModuleInfo,
+        maybe_write_proc_progress_message(ProgressStream, !.ModuleInfo,
             "Removing dead code in", PredProcId, !IO)
     ),
     % The transformation considers every nonlocal variable of a goal
@@ -245,15 +248,13 @@ unneeded_process_proc_msg(PredProcId, !ProcInfo, !ModuleInfo) :-
 unneeded_pre_process_proc(!ProcInfo) :-
     proc_info_get_headvars(!.ProcInfo, HeadVars),
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
-    implicitly_quantify_clause_body_general(ordinary_nonlocals_no_lambda,
+    implicitly_quantify_clause_body_general(ord_nl_no_lambda,
         HeadVars, _Warnings, Goal0, Goal,
-        VarSet0, VarSet, VarTypes0, VarTypes, RttiVarMaps0, RttiVarMaps),
+        VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
     proc_info_set_goal(Goal, !ProcInfo),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo).
 
 % The source-to-source transform operates in two phases.
@@ -293,7 +294,7 @@ unneeded_pre_process_proc(!ProcInfo) :-
 :- type unneeded_code_info
     --->    unneeded_code_info(
                 uci_module_info         :: module_info,
-                uci_vartypes            :: vartypes,
+                uci_var_table           :: var_table,
                 uci_options             :: uc_option_values,
                 uci_containing_goal_map :: containing_goal_map
             ).
@@ -304,8 +305,7 @@ unneeded_pre_process_proc(!ProcInfo) :-
 unneeded_process_proc(!ProcInfo, !ModuleInfo, PredId, Pass, Successful) :-
     fill_goal_id_slots_in_proc(!.ModuleInfo, ContainingGoalMap, !ProcInfo),
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InitInstMap),
     Goal0 = hlds_goal(_, GoalInfo0),
     InstMapDelta = goal_info_get_instmap_delta(GoalInfo0),
@@ -345,15 +345,16 @@ unneeded_process_proc(!ProcInfo, !ModuleInfo, PredId, Pass, Successful) :-
                     io.format(Stream, "%% Starting unneededed code pass %d\n",
                         [i(Pass)], !IO),
                     OutInfo = init_hlds_out_info(Globals, output_debug),
-                    write_goal(OutInfo, Stream, !.ModuleInfo, VarSet0,
-                        print_name_and_num, 0, ".\n", Goal0, !IO)
+                    write_goal(OutInfo, Stream, !.ModuleInfo,
+                        vns_var_table(VarTable0), print_name_and_num,
+                        0, ".\n", Goal0, !IO)
                 else
                     true
                 )
             )
         )
     ),
-    UnneededInfo = unneeded_code_info(!.ModuleInfo, VarTypes0, Options,
+    UnneededInfo = unneeded_code_info(!.ModuleInfo, VarTable0, Options,
         ContainingGoalMap),
     unneeded_process_goal(UnneededInfo, Goal0, Goal1,
         InitInstMap, FinalInstMap, WhereNeededMap1, _,
@@ -368,15 +369,13 @@ unneeded_process_proc(!ProcInfo, !ModuleInfo, PredId, Pass, Successful) :-
         proc_info_get_headvars(!.ProcInfo, HeadVars),
         proc_info_get_inst_varset(!.ProcInfo, InstVarSet),
         proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
-        implicitly_quantify_clause_body_general(ordinary_nonlocals_no_lambda,
-            HeadVars, _Warnings,
-            Goal2, Goal3, VarSet0, VarSet, VarTypes0, VarTypes,
-            RttiVarMaps0, RttiVarMaps),
-        recompute_instmap_delta(do_not_recompute_atomic_instmap_deltas,
-            Goal3, Goal, VarTypes, InstVarSet, InitInstMap, !ModuleInfo),
+        implicitly_quantify_clause_body_general(ord_nl_no_lambda,
+            HeadVars, _Warnings, Goal2, Goal3,
+            VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
+        recompute_instmap_delta(no_recomp_atomics, VarTable, InstVarSet,
+            InitInstMap, Goal3, Goal, !ModuleInfo),
         proc_info_set_goal(Goal, !ProcInfo),
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
         ( if Pass > 3 then
             true
@@ -475,8 +474,8 @@ insert_branch_arm_into_refined_goals(Goal, GoalPath, BranchNum,
 can_eliminate_or_move(UnneededInfo, Goal, InitInstMap, FinalInstMap,
         WhereNeededMap, !:WhereInfo) :-
     ModuleInfo = UnneededInfo ^ uci_module_info,
-    VarTypes = UnneededInfo ^ uci_vartypes,
-    instmap_changed_vars(ModuleInfo, VarTypes, InitInstMap, FinalInstMap,
+    VarTable = UnneededInfo ^ uci_var_table,
+    instmap_changed_vars(ModuleInfo, VarTable, InitInstMap, FinalInstMap,
         ChangedVarSet),
     set_of_var.to_sorted_list(ChangedVarSet, ChangedVars),
     map.init(Empty),

@@ -14,7 +14,7 @@
 
 :- import_module libs.
 :- import_module libs.globals.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_item.
 
 :- import_module list.
@@ -161,28 +161,28 @@ split_nested_info_get_context(SplitNested) = Context :-
     maybe(module_name)::out) is det.
 
 section_has_some_ancestor_in_interface(SectionAncestors,
-        MaybeProblemAncestor) :-
+        MaybeInterfaceAncestor) :-
     SectionAncestors = sa_parent(_ModuleName, ModuleAncestors),
     (
         ModuleAncestors = ma_no_parent,
-        MaybeProblemAncestor = no
+        MaybeInterfaceAncestor = no
     ;
         ModuleAncestors = ma_parent(SectionKind, _SectionContext,
             SectionParentAncestors),
         (
             SectionKind = ms_interface,
-            SectionParentAncestors = sa_parent(ProblemAncestor, _),
-            MaybeProblemAncestor = yes(ProblemAncestor)
+            SectionParentAncestors = sa_parent(InterfaceAncestor, _),
+            MaybeInterfaceAncestor = yes(InterfaceAncestor)
         ;
             SectionKind = ms_implementation,
             section_has_some_ancestor_in_interface(SectionParentAncestors,
-                MaybeProblemAncestor)
+                MaybeInterfaceAncestor)
         )
     ).
 
     % Maps each module to the list of its submodules seen so far.
     % A submodule that is nested into its parent twice (because it has
-    % its interface section and implementation inside separate `:- module'/
+    % its interface and implementation sections inside separate `:- module'/
     % `:- end_module' pairs) will appear twice in the cord.
     %
 :- type module_to_submodules_map == map(module_name, cord(module_name)).
@@ -255,8 +255,6 @@ create_split_compilation_units_depth_first(Globals, ModuleName,
             ; NestedInfo = split_nested_only_int(Context)
             ; NestedInfo = split_nested_int_imp(Context, _)
             ),
-            check_interface_blocks_for_abstract_instances(RawItemBlocks,
-                !Specs),
             RawCompUnit = raw_compilation_unit(ModuleName, Context,
                 RawItemBlocks),
             check_convert_raw_comp_unit_to_module_src(Globals, RawCompUnit,
@@ -294,40 +292,6 @@ create_split_compilation_units_depth_first(Globals, ModuleName,
             true
         )
     ).
-
-    % Check to make sure that non-abstract instance declarations
-    % do not occur in a module interface.
-    %
-:- pred check_interface_blocks_for_abstract_instances(list(raw_item_block)::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-check_interface_blocks_for_abstract_instances([], !Specs).
-check_interface_blocks_for_abstract_instances([RawItemBlock | RawItemBlocks],
-        !Specs) :-
-    RawItemBlock = item_block(_, Section, _Incls, _Avails, _FIMs, Items),
-    (
-        Section = ms_interface,
-        check_interface_items_for_abstract_instances(Items, !Specs)
-    ;
-        Section = ms_implementation
-    ),
-    check_interface_blocks_for_abstract_instances(RawItemBlocks, !Specs).
-
-:- pred check_interface_items_for_abstract_instances(list(item)::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-check_interface_items_for_abstract_instances([], !Specs).
-check_interface_items_for_abstract_instances([Item | Items], !Specs) :-
-    ( if
-        Item = item_instance(ItemInstance),
-        ItemInstance ^ ci_method_instances \= instance_body_abstract
-    then
-        InstanceContext = ItemInstance ^ ci_context,
-        report_non_abstract_instance_in_interface(InstanceContext, !Specs)
-    else
-        true
-    ),
-    check_interface_items_for_abstract_instances(Items, !Specs).
 
 %---------------------------------------------------------------------------%
 
@@ -786,11 +750,11 @@ split_component_discover_submodules(ModuleName, Component, SectionAncestors,
         ;
             SectionKind = ms_implementation,
             section_has_some_ancestor_in_interface(SectionAncestors,
-                MaybeProblemAncestor),
+                MaybeInterfaceAncestor),
             (
-                MaybeProblemAncestor = no
+                MaybeInterfaceAncestor = no
             ;
-                MaybeProblemAncestor = yes(ProblemAncestor),
+                MaybeInterfaceAncestor = yes(InterfaceAncestor),
                 SectionAncestors = sa_parent(CurModuleName, ModuleAncestors),
                 (
                     ModuleAncestors = ma_no_parent,
@@ -799,7 +763,7 @@ split_component_discover_submodules(ModuleName, Component, SectionAncestors,
                 ;
                     ModuleAncestors = ma_parent(_, _, ModuleSectionAncestor),
                     ModuleSectionAncestor = sa_parent(ModuleParent, _),
-                    ( if ModuleParent = ProblemAncestor then
+                    ( if ModuleParent = InterfaceAncestor then
                         PorA = "parent"
                     else
                         PorA = "ancestor"
@@ -808,7 +772,7 @@ split_component_discover_submodules(ModuleName, Component, SectionAncestors,
                 Pieces = [words("This implementation section for module"),
                     qual_sym_name(CurModuleName), words("occurs in"),
                     words("the interface section of"), words(PorA),
-                    words("module"), qual_sym_name(ProblemAncestor),
+                    words("module"), qual_sym_name(InterfaceAncestor),
                     suffix("."), nl],
                 Spec = simplest_spec($pred, severity_error,
                     phase_parse_tree_to_hlds, SectionContext, Pieces),
@@ -918,14 +882,22 @@ discover_included_submodules([Include | Includes], SectionAncestors,
 combine_submodule_include_infos(EntryA, EntryB, Entry) :-
     EntryA = submodule_include_info(SectionA, ContextA),
     EntryB = submodule_include_info(SectionB, ContextB),
-    ( if SectionA = ms_interface, SectionB = ms_implementation then
+    (
+        SectionA = ms_interface,
+        SectionB = ms_implementation,
         Entry = EntryA
-    else if SectionA = ms_implementation, SectionB = ms_interface then
+    ;
+        SectionA = ms_implementation,
+        SectionB = ms_interface,
         Entry = EntryB
-    else
-        % The conditions above test for the only two possible ways
-        % these could be different.
-        expect(unify(SectionA, SectionB), $pred, "SectionA != SectionB"),
+    ;
+        (
+            SectionA = ms_interface,
+            SectionB = ms_interface
+        ;
+            SectionA = ms_implementation,
+            SectionB = ms_implementation
+        ),
         compare(CmpResult, ContextA, ContextB),
         (
             CmpResult = (<),
@@ -1014,52 +986,6 @@ submodule_include_info_map_to_item_includes_acc(IntMods, ImpMods,
             !:RevImpIncludes = [Incl | !.RevImpIncludes]
         )
     ).
-
-%---------------------------------------------------------------------------%
-
-:- pred report_error_implementation_in_interface(module_name::in,
-    prog_context::in, list(error_spec)::in, list(error_spec)::out) is det.
-:- pragma consider_used(pred(report_error_implementation_in_interface/4)).
-
-report_error_implementation_in_interface(ModuleName, Context, !Specs) :-
-    % XXX Delete this predicate once its job has been confirmed to be done
-    % somewhere else.
-    (
-        ModuleName = qualified(ParentModule0, ChildModule0),
-        ParentModule = ParentModule0,
-        ChildModule = ChildModule0
-    ;
-        ModuleName = unqualified(_),
-        unexpected($pred, "unqualified module name")
-    ),
-    Pieces = [words("In interface for module"), qual_sym_name(ParentModule),
-        suffix(":"), nl, words("in definition of submodule"),
-        quote(ChildModule), suffix(":"), nl,
-        words("error:"), decl("implementation"),
-        words("declaration for submodule"),
-        words("occurs in interface section of parent module."), nl],
-    Spec = simplest_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        Context, Pieces),
-    !:Specs = [Spec | !.Specs].
-
-%---------------------------------------------------------------------------%
-
-:- pred report_non_abstract_instance_in_interface(prog_context::in,
-    list(error_spec)::in, list(error_spec)::out) is det.
-
-report_non_abstract_instance_in_interface(Context, !Specs) :-
-    AlwaysPieces = [words("Error: non-abstract instance declaration"),
-        words("in module interface."), nl],
-    VerbosePieces = [words("If you intend to export this instance,"),
-        words("move this declaration to the implementation section,"),
-        words("replacing it in the interface section"),
-        words("with its abstract version, which omits"),
-        words("the"), quote("where [...]"), words("part."), nl],
-    Msg = simple_msg(Context,
-        [always(AlwaysPieces), verbose_only(verbose_once, VerbosePieces)]),
-    Spec = error_spec($pred, severity_error, phase_parse_tree_to_hlds,
-        [Msg]),
-    !:Specs = [Spec | !.Specs].
 
 %---------------------------------------------------------------------------%
 :- end_module parse_tree.split_parse_tree_src.

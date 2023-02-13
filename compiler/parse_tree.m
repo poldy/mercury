@@ -70,13 +70,22 @@
 
 % Utility data structures.
 :- include_module set_of_var.
+:- include_module var_db.
+:- include_module var_table.
+:- include_module vartypes.
+
+% Error handling.
+:- include_module error_sort.
+:- include_module error_spec.
+:- include_module error_type_util.
+:- include_module error_util.
+:- include_module maybe_error.
+:- include_module write_error_spec.
 
 % Utility routines.
 :- include_module builtin_lib_types.
 :- include_module check_type_inst_mode_defns.
-:- include_module error_util.
 :- include_module item_util.
-:- include_module maybe_error.
 :- include_module prog_detism.
 :- include_module prog_event.
 :- include_module prog_foreign.
@@ -95,7 +104,7 @@
 % Transformations that act on the parse tree,
 % and stuff relating to the module system.
 :- include_module canonicalize_interface.
-:- include_module check_raw_comp_unit.
+:- include_module check_module_interface.
 :- include_module comp_unit_interface.
 :- include_module convert_parse_tree.
 :- include_module deps_map.
@@ -104,9 +113,10 @@
 :- include_module generate_dep_d_files.
 :- include_module get_dependencies.
 :- include_module grab_modules.
+:- include_module module_baggage.
 :- include_module module_cmds.
+:- include_module module_dep_info.
 :- include_module module_deps_graph.
-:- include_module module_imports.
 :- include_module module_qual.
 :- include_module read_modules.
 :- include_module source_file_map.

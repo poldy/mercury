@@ -83,20 +83,19 @@ generate_goal(ContextModel, Goal, Code, !CI, !CLD) :-
     % the generic data structures before and after the actual code generation,
     % which is delegated to goal-specific predicates.
 
+    get_proc_info(!.CI, ProcInfo),
     trace [compiletime(flag("codegen_goal")), io(!IO)] (
-        some [ModuleInfo, VarSet, GoalDesc] (
-            code_info.get_module_info(!.CI, ModuleInfo),
-            code_info.get_varset(!.CI, VarSet),
-            GoalDesc = describe_goal(ModuleInfo, VarSet, Goal),
+        code_info.get_module_info(!.CI, ModuleInfo),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        GoalDesc = describe_goal(ModuleInfo, VarTable, Goal),
 
-            ( if should_trace_code_gen(!.CI) then
-                get_debug_output_stream(ModuleInfo, DebugStream, !IO),
-                io.format(DebugStream, "\nGOAL START: %s\n",
-                    [s(GoalDesc)], !IO),
-                io.flush_output(DebugStream, !IO)
-            else
-                true
-            )
+        ( if should_trace_code_gen(!.CI) then
+            get_debug_output_stream(ModuleInfo, DebugStream, !IO),
+            io.format(DebugStream, "\nGOAL START: %s\n",
+                [s(GoalDesc)], !IO),
+            io.flush_output(DebugStream, !IO)
+        else
+            true
         )
     ),
 
@@ -137,7 +136,6 @@ generate_goal(ContextModel, Goal, Code, !CI, !CLD) :-
         generate_goal_expr(GoalExpr, GoalInfo, CodeModel,
             ForwardLiveVarsBeforeGoal, GoalCode, !CI, !CLD),
         Features = goal_info_get_features(GoalInfo),
-        get_proc_info(!.CI, ProcInfo),
 
         % If the predicate's evaluation method is memo, loopcheck or minimal
         % model, the goal generated the variable that represents the call table
@@ -150,7 +148,6 @@ generate_goal(ContextModel, Goal, Code, !CI, !CLD) :-
         % to have a stack slot.
         ( if
             set.member(feature_call_table_gen, Features),
-            get_proc_info(!.CI, ProcInfo),
             proc_info_get_call_table_tip(ProcInfo, MaybeCallTableVar),
             MaybeCallTableVar = yes(CallTableVar),
             get_maybe_trace_info(!.CI, yes(_))
@@ -191,21 +188,19 @@ generate_goal(ContextModel, Goal, Code, !CI, !CLD) :-
         Code = empty
     ),
     trace [compiletime(flag("codegen_goal")), io(!IO)] (
-        some [ModuleInfo, VarSet, GoalDesc] (
-            code_info.get_module_info(!.CI, ModuleInfo),
-            code_info.get_varset(!.CI, VarSet),
-            GoalDesc = describe_goal(ModuleInfo, VarSet, Goal),
+        code_info.get_module_info(!.CI, ModuleInfo),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        GoalDesc = describe_goal(ModuleInfo, VarTable, Goal),
 
-            ( if should_trace_code_gen(!.CI) then
-                get_debug_output_stream(ModuleInfo, DebugStream, !IO),
-                Instrs = cord.list(Code),
-                io.format(DebugStream, "\nGOAL FINISH: %s\n",
-                    [s(GoalDesc)], !IO),
-                write_instrs(DebugStream, Instrs, no, auto_comments, !IO),
-                io.flush_output(DebugStream, !IO)
-            else
-                true
-            )
+        ( if should_trace_code_gen(!.CI) then
+            get_debug_output_stream(ModuleInfo, DebugStream, !IO),
+            Instrs = cord.list(Code),
+            io.format(DebugStream, "\nGOAL FINISH: %s\n",
+                [s(GoalDesc)], !IO),
+            write_instrs(DebugStream, Instrs, no, auto_comments, !IO),
+            io.flush_output(DebugStream, !IO)
+        else
+            true
         )
     ).
 
@@ -313,7 +308,7 @@ generate_goal_expr(GoalExpr, GoalInfo, CodeModel, ForwardLiveVarsBeforeGoal,
         Lang = get_foreign_language(Attributes),
         (
             Lang = lang_c,
-            generate_foreign_proc_code(CodeModel, Attributes,
+            generate_code_for_foreign_proc(CodeModel, Attributes,
                 PredId, ProcId, Args, ExtraArgs, MaybeTraceRuntimeCond,
                 PragmaCode, GoalInfo, Code, !CI, !CLD)
         ;

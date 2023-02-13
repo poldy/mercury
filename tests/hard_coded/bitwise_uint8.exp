@@ -27,7 +27,6 @@
 \ 11111111 =
   00000000
 
-
 *** Test binary operation '/\' ***
 
 00000000 /\
@@ -353,7 +352,6 @@
 11111111 /\
 11111111 =
 11111111
-
 
 *** Test binary operation '\/' ***
 
@@ -681,7 +679,6 @@
 11111111 =
 11111111
 
-
 *** Test binary operation 'xor' ***
 
 00000000 xor
@@ -1008,8 +1005,7 @@
 11111111 =
 00000000
 
-
-*** Test binary operation '>>' ***
+*** Test shift operations '>>' and '>>u' ***
 
 00000000 >> -1 =
 <<exception>>
@@ -1308,8 +1304,7 @@
 11111111 >> 9 =
 <<exception>>
 
-
-*** Test binary operation '<<' ***
+*** Test shift operations '<<' and '<<u' ***
 
 00000000 << -1 =
 <<exception>>

@@ -31,9 +31,11 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 
+:- import_module io.
+
 %-----------------------------------------------------------------------------%
 
-:- pred saved_vars_proc(pred_proc_id::in,
+:- pred saved_vars_proc(io.text_output_stream::in, pred_proc_id::in,
     proc_info::in, proc_info::out, module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
@@ -50,15 +52,15 @@
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
-:- import_module io.
 :- import_module list.
 :- import_module map.
 :- import_module pair.
@@ -69,54 +71,52 @@
 
 %-----------------------------------------------------------------------------%
 
-saved_vars_proc(proc(PredId, ProcId), !ProcInfo, !ModuleInfo) :-
+saved_vars_proc(ProgressStream, PredProcId, !ProcInfo, !ModuleInfo) :-
     trace [io(!IO)] (
-        write_proc_progress_message(!.ModuleInfo,
-            "Minimizing saved vars in", PredId, ProcId, !IO)
+        maybe_write_proc_progress_message(ProgressStream, !.ModuleInfo,
+            "Minimizing saved vars in", PredProcId, !IO)
     ),
-
+    
+    PredProcId = proc(PredId, _ProcId),
     module_info_get_globals(!.ModuleInfo, Globals),
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
     body_should_use_typeinfo_liveness(PredInfo, Globals, TypeInfoLiveness),
 
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, Varset0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
-    init_slot_info(Varset0, VarTypes0, RttiVarMaps0, TypeInfoLiveness,
-        SlotInfo0),
+    init_slot_info(VarTable0, RttiVarMaps0, TypeInfoLiveness, SlotInfo0),
 
     saved_vars_in_goal(Goal0, Goal1, SlotInfo0, SlotInfo),
 
-    final_slot_info(Varset1, VarTypes1, RttiVarMaps1, SlotInfo),
+    final_slot_info(SlotInfo, VarTable1, RttiVarMaps1),
     proc_info_get_headvars(!.ProcInfo, HeadVars),
 
     % Recompute the nonlocals for each goal.
-    implicitly_quantify_clause_body_general(ordinary_nonlocals_no_lambda,
+    implicitly_quantify_clause_body_general(ord_nl_no_lambda,
         HeadVars, _Warnings, Goal1, Goal2,
-        Varset1, Varset, VarTypes1, VarTypes, RttiVarMaps1, RttiVarMaps),
+        VarTable1, VarTable, RttiVarMaps1, RttiVarMaps),
     proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InstMap0),
     proc_info_get_inst_varset(!.ProcInfo, InstVarSet),
-    recompute_instmap_delta(do_not_recompute_atomic_instmap_deltas,
-        Goal2, Goal, VarTypes, InstVarSet, InstMap0, !ModuleInfo),
+    recompute_instmap_delta(no_recomp_atomics, VarTable, InstVarSet,
+        InstMap0, Goal2, Goal, !ModuleInfo),
 
     trace [io(!IO), compile_time(flag("debug_saved_vars"))] (
         OutInfo = hlds_out_util.init_hlds_out_info(Globals, output_debug),
         io.output_stream(Stream, !IO),
         io.write_string(Stream, "initial version:\n", !IO),
-        hlds_out_goal.write_goal(OutInfo, Stream, !.ModuleInfo, Varset0,
-            print_name_and_num, 0, "\n", Goal0, !IO),
+        hlds_out_goal.write_goal(OutInfo, Stream, !.ModuleInfo,
+            vns_var_table(VarTable0), print_name_and_num, 0, "\n", Goal0, !IO),
         io.write_string(Stream, "after transformation:\n", !IO),
-        hlds_out_goal.write_goal(OutInfo, Stream, !.ModuleInfo, Varset1,
-            print_name_and_num, 0, "\n", Goal1, !IO),
+        hlds_out_goal.write_goal(OutInfo, Stream, !.ModuleInfo,
+            vns_var_table(VarTable1), print_name_and_num, 0, "\n", Goal1, !IO),
         io.write_string(Stream, "final version:\n", !IO),
-        hlds_out_goal.write_goal(OutInfo, Stream, !.ModuleInfo, Varset,
-            print_name_and_num, 0, "\n", Goal, !IO)
+        hlds_out_goal.write_goal(OutInfo, Stream, !.ModuleInfo,
+            vns_var_table(VarTable), print_name_and_num, 0, "\n", Goal, !IO)
     ),
 
     proc_info_set_goal(Goal, !ProcInfo),
-    proc_info_set_varset(Varset, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo).
 
 %-----------------------------------------------------------------------------%
@@ -599,36 +599,35 @@ saved_vars_in_switch([Case0 | Cases0], [Case | Cases], !SlotInfo) :-
 
 :- type slot_info
     --->    slot_info(
-                prog_varset,
-                vartypes,
+                var_table,
                 rtti_varmaps,
                 bool            % TypeInfoLiveness
             ).
 
-:- pred init_slot_info(prog_varset::in, vartypes::in,
-    rtti_varmaps::in, bool::in, slot_info::out) is det.
+:- pred init_slot_info(var_table::in, rtti_varmaps::in, bool::in,
+    slot_info::out) is det.
 
-init_slot_info(Varset, VarTypes, RttiVarMaps, TypeInfoLiveness, SlotInfo) :-
-    SlotInfo = slot_info(Varset, VarTypes, RttiVarMaps, TypeInfoLiveness).
+init_slot_info(VarTable, RttiVarMaps, TypeInfoLiveness, SlotInfo) :-
+    SlotInfo = slot_info(VarTable, RttiVarMaps, TypeInfoLiveness).
 
-:- pred final_slot_info(prog_varset::out, vartypes::out, rtti_varmaps::out,
-    slot_info::in) is det.
+:- pred final_slot_info(slot_info::in, var_table::out, rtti_varmaps::out)
+    is det.
 
-final_slot_info(Varset, VarTypes, RttiVarMaps, SlotInfo) :-
-    SlotInfo = slot_info(Varset, VarTypes, RttiVarMaps, _).
+final_slot_info(SlotInfo, VarTable, RttiVarMaps) :-
+    SlotInfo = slot_info(VarTable, RttiVarMaps, _).
 
 :- pred saved_vars_rename_var(prog_var::in, prog_var::out,
     map(prog_var, prog_var)::out, slot_info::in, slot_info::out) is det.
 
 saved_vars_rename_var(Var, NewVar, Substitution, !SlotInfo) :-
-    !.SlotInfo = slot_info(Varset0, VarTypes0, RttiVarMaps0, TypeInfoLiveness),
-    varset.new_var(NewVar, Varset0, Varset),
+    !.SlotInfo = slot_info(VarTable0, RttiVarMaps0, TypeInfoLiveness),
+    lookup_var_entry(VarTable0, Var, Entry0),
+    Entry0 = vte(_N, Type, IsDummy),
+    Entry = vte("", Type, IsDummy),
+    add_var_entry(Entry, NewVar, VarTable0, VarTable),
     map.from_assoc_list([Var - NewVar], Substitution),
-    lookup_var_type(VarTypes0, Var, Type),
-    add_var_type(NewVar, Type, VarTypes0, VarTypes),
     rtti_var_info_duplicate(Var, NewVar, RttiVarMaps0, RttiVarMaps),
-    !:SlotInfo = slot_info(Varset, VarTypes, RttiVarMaps,
-        TypeInfoLiveness).
+    !:SlotInfo = slot_info(VarTable, RttiVarMaps, TypeInfoLiveness).
 
     % Check whether it is ok to duplicate a given variable according
     % to the information in the slot_info. If TypeInfoLiveness is set,
@@ -642,9 +641,9 @@ saved_vars_rename_var(Var, NewVar, Substitution, !SlotInfo) :-
 :- pred slot_info_do_not_duplicate_var(slot_info::in, prog_var::in) is semidet.
 
 slot_info_do_not_duplicate_var(SlotInfo, Var) :-
-    SlotInfo = slot_info(_, VarTypes, _, TypeInfoLiveness),
+    SlotInfo = slot_info(VarTable, _, TypeInfoLiveness),
     TypeInfoLiveness = yes,
-    lookup_var_type(VarTypes, Var, Type),
+    lookup_var_type(VarTable, Var, Type),
     type_is_type_info_or_ctor_type(Type).
 
 %-----------------------------------------------------------------------------%

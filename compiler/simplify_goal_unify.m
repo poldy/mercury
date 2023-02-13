@@ -44,7 +44,6 @@
 :- import_module hlds.make_goal.
 :- import_module hlds.pred_table.
 :- import_module hlds.special_pred.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
@@ -53,13 +52,14 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module bool.
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
-:- import_module term.
+:- import_module term_context.
 :- import_module uint.
 
 simplify_goal_unify(GoalExpr0, GoalExpr, GoalInfo0, GoalInfo,
@@ -147,8 +147,8 @@ process_compl_unify(XVar, YVar, UnifyMode, CanFail, _OldTypeInfoVars,
         UnifyContext, GoalInfo0, Goal, NestedContext0, InstMap0,
         !Common, !Info) :-
     simplify_info_get_module_info(!.Info, ModuleInfo),
-    simplify_info_get_var_types(!.Info, VarTypes),
-    lookup_var_type(VarTypes, XVar, Type),
+    simplify_info_get_var_table(!.Info, VarTable),
+    lookup_var_type(VarTable, XVar, Type),
     ( if Type = type_variable(TypeVar, Kind) then
         % Convert polymorphic unifications into calls to `unify/2',
         % the general unification predicate, passing the appropriate type_info:
@@ -165,10 +165,10 @@ process_compl_unify(XVar, YVar, UnifyMode, CanFail, _OldTypeInfoVars,
         % Convert higher-order unifications into calls to
         % builtin_unify_pred (which calls error/1).
         Context = goal_info_get_context(GoalInfo0),
-        generate_simple_call(ModuleInfo, mercury_private_builtin_module,
-            "builtin_unify_pred", pf_predicate, mode_no(0), detism_semi,
-            purity_pure, [XVar, YVar], [], instmap_delta_bind_no_var,
-            Context, hlds_goal(Call0, _)),
+        generate_plain_call(ModuleInfo, pf_predicate,
+            mercury_private_builtin_module, "builtin_unify_pred",
+            [], [XVar, YVar], instmap_delta_bind_no_var, mode_no(0),
+            detism_semi, purity_pure, [], Context, hlds_goal(Call0, _)),
         simplify_goal_expr(Call0, Call1, GoalInfo0, GoalInfo,
             NestedContext0, InstMap0, !Common, !Info),
         Call = hlds_goal(Call1, GoalInfo),
@@ -194,7 +194,11 @@ process_compl_unify(XVar, YVar, UnifyMode, CanFail, _OldTypeInfoVars,
             type_definitely_has_no_user_defined_equality_pred(ModuleInfo, Type)
         then
             ExtraGoals = [],
-            call_builtin_compound_eq(XVar, YVar, ModuleInfo, GoalInfo0, Call)
+            Context = goal_info_get_context(GoalInfo0),
+            generate_plain_call(ModuleInfo, pf_predicate,
+                mercury_private_builtin_module, "builtin_compound_eq",
+                [], [XVar, YVar], instmap_delta_bind_no_var, only_mode,
+                detism_semi, purity_pure, [], Context, Call)
         else if
             hlds_pred.in_in_unification_proc_id(ProcId),
 
@@ -233,11 +237,11 @@ process_compl_unify(XVar, YVar, UnifyMode, CanFail, _OldTypeInfoVars,
 
 call_generic_unify(TypeInfoVar, XVar, YVar, ModuleInfo, _, _, GoalInfo,
         Call) :-
-    ArgVars = [TypeInfoVar, XVar, YVar],
     Context = goal_info_get_context(GoalInfo),
-    generate_simple_call(ModuleInfo, mercury_public_builtin_module, "unify",
-        pf_predicate, mode_no(0), detism_semi, purity_pure, ArgVars,
-        [], instmap_delta_bind_no_var, Context, Call).
+    generate_plain_call(ModuleInfo, pf_predicate,
+        mercury_public_builtin_module, "unify",
+        [TypeInfoVar], [XVar, YVar], instmap_delta_bind_no_var, mode_no(0),
+        detism_semi, purity_pure, [], Context, Call).
 
 :- pred call_specific_unify(type_ctor::in, list(prog_var)::in,
     prog_var::in, prog_var::in, proc_id::in,
@@ -264,16 +268,6 @@ call_specific_unify(TypeCtor, TypeInfoVars, XVar, YVar, ProcId, ModuleInfo,
     set_of_var.insert_list(TypeInfoVars, NonLocals0, NonLocals),
     goal_info_set_nonlocals(NonLocals, GoalInfo0, CallGoalInfo).
 
-:- pred call_builtin_compound_eq(prog_var::in, prog_var::in, module_info::in,
-    hlds_goal_info::in, hlds_goal::out) is det.
-
-call_builtin_compound_eq(XVar, YVar, ModuleInfo, GoalInfo, Call) :-
-    Context = goal_info_get_context(GoalInfo),
-    generate_simple_call(ModuleInfo, mercury_private_builtin_module,
-        "builtin_compound_eq", pf_predicate, only_mode, detism_semi,
-        purity_pure, [XVar, YVar], [], instmap_delta_bind_no_var,
-        Context, Call).
-
 %---------------------------------------------------------------------------%
 
 :- pred make_type_info_vars(list(mer_type)::in, list(prog_var)::out,
@@ -281,33 +275,28 @@ call_builtin_compound_eq(XVar, YVar, ModuleInfo, GoalInfo, Call) :-
 
 make_type_info_vars(Types, TypeInfoVars, TypeInfoGoals, !Info) :-
     % Extract the information from simplify_info.
-    simplify_info_get_varset(!.Info, VarSet0),
-    simplify_info_get_var_types(!.Info, VarTypes0),
+    simplify_info_get_var_table(!.Info, VarTable0),
     simplify_info_get_rtti_varmaps(!.Info, RttiVarMaps0),
     simplify_info_get_module_info(!.Info, ModuleInfo0),
     simplify_info_get_pred_proc_id(!.Info, PredProcId),
 
     some [!PredInfo, !ProcInfo] (
-        % The varset, vartypes and rtti_varmaps get updated by the call to
+        % The varset, var_table and rtti_varmaps get updated by the call to
         % polymorphism_make_type_info_vars_raw_store below, which will get
         % this information from the pred_info and proc_info.
         module_info_pred_proc_info(ModuleInfo0, PredProcId,
             !:PredInfo, !:ProcInfo),
-        proc_info_set_vartypes(VarTypes0, !ProcInfo),
-        proc_info_set_varset(VarSet0, !ProcInfo),
+        proc_info_set_var_table(VarTable0, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps0, !ProcInfo),
 
         % Generate the code that creates the type_infos.
-        term.context_init(Context),
-        polymorphism_make_type_info_vars_raw(Types, Context,
+        polymorphism_make_type_info_vars_mi(Types, dummy_context,
             TypeInfoVars, TypeInfoGoals, ModuleInfo0, ModuleInfo1,
             !PredInfo, !ProcInfo),
 
-        proc_info_get_vartypes(!.ProcInfo, VarTypes),
-        proc_info_get_varset(!.ProcInfo, VarSet),
+        proc_info_get_var_table(!.ProcInfo, VarTable),
         proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps),
-        simplify_info_set_var_types(VarTypes, !Info),
-        simplify_info_set_varset(VarSet, !Info),
+        simplify_info_set_var_table(VarTable, !Info),
         simplify_info_set_rtti_varmaps(RttiVarMaps, !Info),
 
         % Put the new proc_info and pred_info back in the module_info
@@ -341,16 +330,14 @@ get_type_info_locn(TypeVar, Kind, Context, TypeInfoVar, Goals, !Info) :-
 extract_type_info(TypeVar, Kind, TypeClassInfoVar, Index, Context,
         Goals, TypeInfoVar, !Info) :-
     simplify_info_get_module_info(!.Info, ModuleInfo),
-    simplify_info_get_varset(!.Info, VarSet0),
-    simplify_info_get_var_types(!.Info, VarTypes0),
+    simplify_info_get_var_table(!.Info, VarTable0),
     simplify_info_get_rtti_varmaps(!.Info, RttiVarMaps0),
 
     polymorphism_type_info.gen_extract_type_info(ModuleInfo, TypeVar, Kind,
         TypeClassInfoVar, iov_int(Index), Context, Goals, TypeInfoVar,
-        VarSet0, VarSet, VarTypes0, VarTypes, RttiVarMaps0, RttiVarMaps),
+        VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
 
-    simplify_info_set_var_types(VarTypes, !Info),
-    simplify_info_set_varset(VarSet, !Info),
+    simplify_info_set_var_table(VarTable, !Info),
     simplify_info_set_rtti_varmaps(RttiVarMaps, !Info).
 
 %---------------------------------------------------------------------------%

@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2002-2007, 2009-2012 The University of Melbourne.
-% Copyright (C) 2013-2018 The Mercury team.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -106,16 +106,16 @@
 
     % type_ctor_and_args(Type, TypeCtor, TypeArgs):
     %
-    % True iff `TypeCtor' is a representation of the top-level type constructor
-    % for `Type', and `TypeArgs' is a list of the corresponding type arguments
-    % to `TypeCtor', and `TypeCtor' is not an equivalence type.
+    % True iff TypeCtor is a representation of the top-level type constructor
+    % for Type, and TypeArgs is a list of the corresponding type arguments
+    % to TypeCtor, and TypeCtor is not an equivalence type.
     %
     % For example, type_ctor_and_args(type_of([2,3]), TypeCtor, TypeArgs)
-    % will bind `TypeCtor' to a representation of the type constructor list/1,
-    % and will bind `TypeArgs' to the list `[Int]', where `Int' is a
+    % will bind TypeCtor to a representation of the type constructor list/1,
+    % and will bind TypeArgs to the list `[Int]', where Int is a
     % representation of the type `int'.
     %
-    % Note that the requirement that `TypeCtor' not be an equivalence type
+    % Note that the requirement that TypeCtor not be an equivalence type
     % is fulfilled by fully expanding any equivalence types. For example,
     % if you have a declaration `:- type foo == bar.', then
     % type_ctor_and_args/3 will always return a representation of type
@@ -127,9 +127,9 @@
 
     % pseudo_type_ctor_and_args(Type, TypeCtor, TypeArgs):
     %
-    % True iff `TypeCtor' is a representation of the top-level type constructor
-    % for `Type', and `TypeArgs' is a list of the corresponding type arguments
-    % to `TypeCtor', and `TypeCtor' is not an equivalence type.
+    % True iff TypeCtor is a representation of the top-level type constructor
+    % for Type, and TypeArgs is a list of the corresponding type arguments
+    % to TypeCtor, and TypeCtor is not an equivalence type.
     %
     % Similar to type_ctor_and_args, but works on pseudo_type_infos.
     % Fails if the input pseudo_type_info is a variable.
@@ -184,8 +184,8 @@
 
     % make_type(TypeCtor, TypeArgs) = Type:
     %
-    % True iff `Type' is a type constructed by applying the type constructor
-    % `TypeCtor' to the type arguments `TypeArgs'.
+    % True iff Type is a type constructed by applying the type constructor
+    % TypeCtor to the type arguments TypeArgs.
     %
     % Operationally, the forwards mode returns the type formed by applying
     % the specified type constructor to the specified argument types, or fails
@@ -203,7 +203,7 @@
     %
     % Returns the type formed by applying the specified type constructor
     % to the specified argument types. Throws an exception if the length of
-    % `TypeArgs' is not the same as the arity of `TypeCtor'.
+    % TypeArgs is not the same as the arity of TypeCtor.
     %
 :- func det_make_type(type_ctor_desc, list(type_desc)) = type_desc.
 
@@ -235,7 +235,6 @@
 
 :- implementation.
 
-:- import_module bool.
 :- import_module require.
 :- import_module string.
 
@@ -462,36 +461,29 @@ type_name(Type) = TypeName :-
     ( if Arity = 0 then
         UnqualifiedTypeName = Name
     else
-        ( if ModuleName = "builtin", Name = "func" then
-            IsFunc = yes
+        ( if ModuleName = "builtin", Name = "{}" then
+            type_arg_names(ArgTypes, ArgTypeNames),
+            TupleArgTypeNames = ["{" | ArgTypeNames] ++ ["}"],
+            string.append_list(TupleArgTypeNames, UnqualifiedTypeName)
         else
-            IsFunc = no
-        ),
-        ( if
-            ModuleName = "builtin", Name = "{}"
-        then
-            type_arg_names(ArgTypes, IsFunc, ArgTypeNames),
-            list.append(ArgTypeNames, ["}"], TypeStrings0),
-            TypeStrings = ["{" | TypeStrings0],
-            string.append_list(TypeStrings, UnqualifiedTypeName)
-        else if
-            IsFunc = yes,
-            ArgTypes = [FuncRetType]
-        then
-            FuncRetTypeName = type_name(FuncRetType),
-            string.append_list(["((func) = ", FuncRetTypeName, ")"],
-                UnqualifiedTypeName)
-        else
-            type_arg_names(ArgTypes, IsFunc, ArgTypeNames),
-            (
-                IsFunc = no,
-                list.append(ArgTypeNames, [")"], TypeStrings0)
-            ;
-                IsFunc = yes,
-                TypeStrings0 = ArgTypeNames
+            ( if ModuleName = "builtin", Name = "func" then
+                det_split_last(ArgTypes, NonReturnArgTypes, ReturnArgType),
+                ReturnArgTypeName = type_name(ReturnArgType),
+                (
+                    NonReturnArgTypes = [],
+                    TypeNameStrs = ["((func) = ", ReturnArgTypeName, ")"]
+                ;
+                    NonReturnArgTypes = [HeadArgType | TailArgTypes],
+                    type_arg_names_lag(HeadArgType, TailArgTypes,
+                        NonReturnArgTypeNames),
+                    TypeNameStrs = [Name, "(" | NonReturnArgTypeNames]
+                        ++ [") = ", ReturnArgTypeName]
+                )
+            else
+                type_arg_names(ArgTypes, ArgTypeNames),
+                TypeNameStrs = [Name, "(" | ArgTypeNames] ++ [")"]
             ),
-            TypeNameStrings = [Name, "(" | TypeStrings0],
-            string.append_list(TypeNameStrings, UnqualifiedTypeName)
+            string.append_list(TypeNameStrs, UnqualifiedTypeName)
         )
     ),
     ( if ModuleName = "builtin" then
@@ -502,33 +494,26 @@ type_name(Type) = TypeName :-
 
     % Turn the types into a list of strings representing an argument list,
     % adding commas as separators as required. For example:
-    %   ["TypeName1", ",", "TypeName2"]
-    % If formatting a function type, we close the parentheses around
-    % the function's input parameters, e.g.
-    %   ["TypeName1", ",", "TypeName2", ") = ", "ReturnTypeName"]
-    % It is the caller's responsibility to add matching parentheses.
+    % ["TypeName1", ",", "TypeName2"].
     %
-:- pred type_arg_names(list(type_desc)::in, bool::in, list(string)::out)
-    is det.
+:- pred type_arg_names(list(type_desc)::in, list(string)::out) is det.
 
-type_arg_names([], _, []).
-type_arg_names([Type | Types], IsFunc, ArgNames) :-
-    Name = type_name(Type),
+type_arg_names([], []).
+type_arg_names([Type | Types], ArgNames) :-
+    type_arg_names_lag(Type, Types, ArgNames).
+
+:- pred type_arg_names_lag(type_desc::in, list(type_desc)::in,
+    list(string)::out) is det.
+
+type_arg_names_lag(HeadType, TailTypes, Names) :-
+    HeadName = type_name(HeadType),
     (
-        Types = [],
-        ArgNames = [Name]
+        TailTypes = [],
+        Names = [HeadName]
     ;
-        Types = [_ | _],
-        ( if
-            IsFunc = yes,
-            Types = [FuncReturnType]
-        then
-            FuncReturnName = type_name(FuncReturnType),
-            ArgNames = [Name, ") = ", FuncReturnName]
-        else
-            type_arg_names(Types, IsFunc, Names),
-            ArgNames = [Name, ", " | Names]
-        )
+        TailTypes = [HeadTailType | TailTailTypes],
+        type_arg_names_lag(HeadTailType, TailTailTypes, TailNames),
+        Names = [HeadName, ", " | TailNames]
     ).
 
 %---------------------------------------------------------------------------%
@@ -667,8 +652,7 @@ type_ctor_arity(TypeCtor) = Arity :-
 
 :- pragma foreign_proc("C#",
     make_type_ctor_desc(TypeInfo::in, TypeCtorInfo::in, TypeCtorDesc::out),
-    [will_not_call_mercury, promise_pure, thread_safe,
-        may_not_duplicate],
+    [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     runtime.TypeCtorInfo_Struct tci = TypeCtorInfo;
 
@@ -688,8 +672,7 @@ type_ctor_arity(TypeCtor) = Arity :-
 
 :- pragma foreign_proc("Java",
     make_type_ctor_desc(TypeInfo::in, TypeCtorInfo::in, TypeCtorDesc::out),
-    [will_not_call_mercury, promise_pure, thread_safe,
-        may_not_duplicate],
+    [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     TypeCtorInfo_Struct tci = TypeCtorInfo;
 
@@ -717,8 +700,7 @@ make_type_ctor_desc(_, _, _) :-
 :- pragma foreign_proc("C#",
     make_type_ctor_desc_with_arity(Arity::in, TypeCtorInfo::in,
         TypeCtorDesc::out),
-    [will_not_call_mercury, promise_pure, thread_safe,
-        may_not_duplicate],
+    [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     runtime.TypeCtorInfo_Struct tci = TypeCtorInfo;
 
@@ -739,8 +721,7 @@ make_type_ctor_desc(_, _, _) :-
 :- pragma foreign_proc("Java",
     make_type_ctor_desc_with_arity(Arity::in, TypeCtorInfo::in,
         TypeCtorDesc::out),
-    [will_not_call_mercury, promise_pure, thread_safe,
-        may_not_duplicate],
+    [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     TypeCtorInfo_Struct tci = TypeCtorInfo;
 
@@ -766,8 +747,7 @@ make_type_ctor_desc_with_arity(_, _, _) :-
 :- pragma foreign_proc("C",
     type_ctor_name_and_arity(TypeCtorDesc::in, TypeCtorModuleName::out,
         TypeCtorName::out, TypeCtorArity::out),
-    [will_not_call_mercury, thread_safe, promise_pure,
-        will_not_modify_trail],
+    [will_not_call_mercury, thread_safe, promise_pure, will_not_modify_trail],
 "{
     MR_TypeCtorDesc type_ctor_desc;
 

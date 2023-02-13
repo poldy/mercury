@@ -64,6 +64,7 @@
 :- import_module check_hlds.recompute_instmap_deltas.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
@@ -74,7 +75,6 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.prog_util.
 :- import_module transform_hlds.ctgc.structure_reuse.analysis.
 
 :- import_module bimap.
@@ -84,22 +84,6 @@
 :- import_module maybe.
 :- import_module require.
 :- import_module set.
-
-%-----------------------------------------------------------------------------%
-
-:- type reuse_name == sym_name.
-
-:- func generate_reuse_name(module_info, pred_proc_id, list(int)) = reuse_name.
-
-generate_reuse_name(ModuleInfo, PPId, NoClobbers) = ReuseName :-
-    PPId = proc(_, ProcId),
-    module_info_pred_proc_info(ModuleInfo, PPId, PredInfo, _ProcInfo),
-    PredModule = pred_info_module(PredInfo),
-    PredOrFunc = pred_info_is_pred_or_func(PredInfo),
-    PredName = pred_info_name(PredInfo),
-    proc_id_to_int(ProcId, ProcInt),
-    make_pred_name(PredModule, "ctgc", yes(PredOrFunc), PredName,
-        newpred_structure_reuse(ProcInt, NoClobbers), ReuseName).
 
 %-----------------------------------------------------------------------------%
 
@@ -190,30 +174,36 @@ maybe_create_full_reuse_proc_copy(PPId, NewPPId, !ModuleInfo, !ReuseTable) :-
 
 %-----------------------------------------------------------------------------%
 
-create_fresh_pred_proc_info_copy(PPId, NoClobbers, NewPPId, !ModuleInfo) :-
+create_fresh_pred_proc_info_copy(PPId, NoClobberArgNums, NewPPId,
+        !ModuleInfo) :-
     module_info_pred_proc_info(!.ModuleInfo, PPId, PredInfo0, ProcInfo0),
-    ReusePredName = generate_reuse_name(!.ModuleInfo, PPId, NoClobbers),
-    PPId = proc(PredId, _),
-    create_fresh_pred_proc_info_copy_2(PredId, PredInfo0, ProcInfo0,
-        ReusePredName, ReusePredInfo, ReuseProcId),
-
-    NewPPId = proc(ReusePredId, ReuseProcId),
+    create_fresh_pred_proc_info_copy_2(PPId, PredInfo0, ProcInfo0,
+        NoClobberArgNums, ReusePredInfo, ReuseProcId),
 
     module_info_get_predicate_table(!.ModuleInfo, PredTable0),
     predicate_table_insert(ReusePredInfo, ReusePredId, PredTable0, PredTable),
     module_info_set_predicate_table(PredTable, !ModuleInfo),
 
+    NewPPId = proc(ReusePredId, ReuseProcId),
+
     module_info_get_structure_reuse_preds(!.ModuleInfo, ReusePreds0),
     set.insert(ReusePredId, ReusePreds0, ReusePreds),
     module_info_set_structure_reuse_preds(ReusePreds, !ModuleInfo).
 
-:- pred create_fresh_pred_proc_info_copy_2(pred_id::in, pred_info::in,
-    proc_info::in, reuse_name::in, pred_info::out, proc_id::out) is det.
+:- pred create_fresh_pred_proc_info_copy_2(pred_proc_id::in, 
+    pred_info::in, proc_info::in, no_clobber_args::in,
+    pred_info::out, proc_id::out) is det.
 
-create_fresh_pred_proc_info_copy_2(PredId, PredInfo, ProcInfo, ReusePredName,
-        ReusePredInfo, ReuseProcId) :-
-    ModuleName = pred_info_module(PredInfo),
+create_fresh_pred_proc_info_copy_2(PredProcId, PredInfo, ProcInfo,
+        NoClobberArgNums, ReusePredInfo, ReuseProcId) :-
+    PredProcId = proc(PredId, ProcId),
     PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+    PredName = pred_info_name(PredInfo),
+    Transform = tn_structure_reuse(PredOrFunc, proc_id_to_int(ProcId),
+        NoClobberArgNums),
+    make_transformed_pred_name(PredName, Transform, ReusePredName),
+
+    PredModuleName = pred_info_module(PredInfo),
     pred_info_get_context(PredInfo, ProgContext),
     pred_info_get_origin(PredInfo, PredOrigin),
     pred_info_get_status(PredInfo, PredStatus0),
@@ -231,11 +221,13 @@ create_fresh_pred_proc_info_copy_2(PredId, PredInfo, ProcInfo, ReusePredName,
     pred_info_get_class_context(PredInfo, ProgConstraints),
     pred_info_get_assertions(PredInfo, AssertIds),
     pred_info_get_var_name_remap(PredInfo, VarNameRemap),
-    NewPredOrigin = origin_transformed(transform_structure_reuse, PredOrigin,
-        PredId),
+    NewPredOrigin = origin_pred_transform(pred_transform_structure_reuse,
+        PredOrigin, PredId),
     GoalType = goal_not_for_promise(np_goal_type_none),
-    pred_info_create(ModuleName, ReusePredName, PredOrFunc, ProgContext,
-        NewPredOrigin, PredStatus, PredMarkers, MerTypes, TVarset,
+    % Shouldn't we use the *current* module's name, even if it is not
+    % the same as PredModuleName?
+    pred_info_create(PredOrFunc, PredModuleName, ReusePredName,
+        ProgContext, NewPredOrigin, PredStatus, PredMarkers, MerTypes, TVarset,
         ExistQTVars, ProgConstraints, AssertIds, VarNameRemap, GoalType,
         ProcInfo, ReuseProcId, ReusePredInfo).
 
@@ -301,7 +293,8 @@ check_cond_apply_reuse_in_proc(ConvertPotentialReuse, ReuseTable, ReusePPId,
 
 apply_reuse_in_proc(ConvertPotentialReuse, ReuseTable, PPId, !ModuleInfo) :-
     trace [io(!IO)] (
-        write_proc_progress_message(!.ModuleInfo, "Apply reuse ", PPId, !IO)
+        maybe_write_proc_progress_message(!.ModuleInfo, "Apply reuse ",
+            PPId, !IO)
     ),
     some [!ProcInfo] (
         module_info_pred_proc_info(!.ModuleInfo, PPId, PredInfo0, !:ProcInfo),
@@ -319,9 +312,8 @@ apply_reuse_in_proc(ConvertPotentialReuse, ReuseTable, PPId, !ModuleInfo) :-
             % construction unification in which its space is reused, so we
             % requantify.  Then we recompute instmap deltas with the updated
             % non-local sets.
-            requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
-            recompute_instmap_delta_proc(
-                do_not_recompute_atomic_instmap_deltas,
+            requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+            recompute_instmap_delta_proc(no_recomp_atomics,
                 !ProcInfo, !ModuleInfo),
             module_info_set_pred_proc_info(PPId, PredInfo0, !.ProcInfo,
                 !ModuleInfo)
@@ -378,7 +370,9 @@ process_goal(ConvertPotentialReuse, ReuseTable, ModuleInfo, !Goal) :-
             true
         )
     ;
-        GoalExpr0 = generic_call(_, _, _, _, _)
+        ( GoalExpr0 = generic_call(_, _, _, _, _)
+        ; GoalExpr0 = call_foreign_proc(_, _, _, _, _, _, _)
+        )
     ;
         GoalExpr0 = unify(_, _, _, Unification0, _),
         ReuseDescription0 = goal_info_get_reuse(GoalInfo0),
@@ -440,9 +434,6 @@ process_goal(ConvertPotentialReuse, ReuseTable, ModuleInfo, !Goal) :-
         GoalExpr = if_then_else(Vars, IfGoal, ThenGoal, ElseGoal),
         !:Goal = hlds_goal(GoalExpr, GoalInfo0)
     ;
-        GoalExpr0 = call_foreign_proc(_Attrs, _ForeignPredId, _ForeignProcId,
-            _Args, _ExtraArgs, _MaybeTraceRuntimeCond, _Impl)
-    ;
         GoalExpr0 = shorthand(_),
         % These should have been expanded out by now.
         unexpected($pred, "shorthand")
@@ -476,7 +467,7 @@ unification_set_reuse(ShortReuseDescription, !Unification) :-
 
 :- pred determine_reuse_version(reuse_as_table::in, module_info::in,
     pred_id::in, proc_id::in, sym_name::in, list(int)::in,
-    pred_id::out, proc_id::out, reuse_name::out) is det.
+    pred_id::out, proc_id::out, sym_name::out) is det.
 
 determine_reuse_version(ReuseTable, ModuleInfo, PredId, ProcId, PredName,
         NoClobbers, ReusePredId, ReuseProcId, ReusePredName) :-

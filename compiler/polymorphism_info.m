@@ -25,10 +25,10 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module io.
@@ -100,10 +100,8 @@
 
 :- pred poly_info_get_module_info(poly_info::in,
     module_info::out) is det.
-:- pred poly_info_get_varset(poly_info::in,
-    prog_varset::out) is det.
-:- pred poly_info_get_var_types(poly_info::in,
-    vartypes::out) is det.
+:- pred poly_info_get_var_table(poly_info::in,
+    var_table::out) is det.
 :- pred poly_info_get_rtti_varmaps(poly_info::in,
     rtti_varmaps::out) is det.
 :- pred poly_info_get_typevarset(poly_info::in,
@@ -133,12 +131,9 @@
 :- pred poly_info_get_errors(poly_info::in,
     list(error_spec)::out) is det.
 
-:- pred poly_info_set_varset(prog_varset::in,
+:- pred poly_info_set_var_table(var_table::in,
     poly_info::in, poly_info::out) is det.
-:- pred poly_info_set_varset_types(prog_varset::in, vartypes::in,
-    poly_info::in, poly_info::out) is det.
-:- pred poly_info_set_varset_types_rtti(prog_varset::in, vartypes::in,
-    rtti_varmaps::in,
+:- pred poly_info_set_var_table_rtti(var_table::in, rtti_varmaps::in,
     poly_info::in, poly_info::out) is det.
 :- pred poly_info_set_rtti_varmaps(rtti_varmaps::in,
     poly_info::in, poly_info::out) is det.
@@ -187,8 +182,7 @@
 :- type var_maps
     --->    var_maps(
                 vm_snapshot_num             :: int,
-                vm_varset                   :: prog_varset,
-                vm_vartypes                 :: vartypes,
+                vm_var_table                :: var_table,
                 vm_rtti_varmaps             :: rtti_varmaps,
                 vm_cache_maps               :: cache_maps
             ).
@@ -248,8 +242,7 @@
     --->    poly_info(
                 poly_module_info            :: module_info,
 
-                poly_varset                 :: prog_varset,
-                poly_vartypes               :: vartypes,
+                poly_var_table              :: var_table,
                 poly_rtti_varmaps           :: rtti_varmaps,
 
                 poly_typevarset             :: tvarset,
@@ -304,8 +297,7 @@
 %---------------------------------------------------------------------------%
 
 init_poly_info(ModuleInfo, PredInfo, ClausesInfo, PolyInfo) :-
-    clauses_info_get_varset(ClausesInfo, VarSet),
-    clauses_info_get_vartypes(ClausesInfo, VarTypes),
+    clauses_info_get_var_table(ClausesInfo, VarTable),
     pred_info_get_typevarset(PredInfo, TypeVarSet),
     pred_info_get_tvar_kind_map(PredInfo, TypeVarKinds),
     pred_info_get_constraint_proof_map(PredInfo, ProofMap),
@@ -325,7 +317,7 @@ init_poly_info(ModuleInfo, PredInfo, ClausesInfo, PolyInfo) :-
     ),
     Requant = no_must_requantify,
     Specs = [],
-    PolyInfo = poly_info(ModuleInfo, VarSet, VarTypes, RttiVarMaps,
+    PolyInfo = poly_info(ModuleInfo, VarTable, RttiVarMaps,
         TypeVarSet, TypeVarKinds, ProofMap, ConstraintMap,
         TypeInfoVarMap, TypeClassInfoMap, IntConstMap, ConstStructVarMap,
         NumReuses, SnapshotNum, ConstStructDb, DefinedWhere, Requant, Specs).
@@ -335,8 +327,7 @@ create_poly_info(ModuleInfo, PredInfo, ProcInfo, PolyInfo) :-
     pred_info_get_tvar_kind_map(PredInfo, TypeVarKinds),
     pred_info_get_constraint_proof_map(PredInfo, ProofMap),
     pred_info_get_constraint_map(PredInfo, ConstraintMap),
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
     proc_info_get_rtti_varmaps(ProcInfo, RttiVarMaps),
     map.init(TypeInfoVarMap),
     map.init(TypeClassInfoMap),
@@ -352,13 +343,13 @@ create_poly_info(ModuleInfo, PredInfo, ProcInfo, PolyInfo) :-
     ),
     Requant = no_must_requantify,
     Specs = [],
-    PolyInfo = poly_info(ModuleInfo, VarSet, VarTypes, RttiVarMaps,
+    PolyInfo = poly_info(ModuleInfo, VarTable, RttiVarMaps,
         TypeVarSet, TypeVarKinds, ProofMap, ConstraintMap,
         TypeInfoVarMap, TypeClassInfoMap, IntConstMap, ConstStructVarMap,
         NumReuses, SnapshotNum, ConstStructDb, DefinedWhere, Requant, Specs).
 
 poly_info_extract(Info, Specs, !PredInfo, !ProcInfo, !:ModuleInfo) :-
-    Info = poly_info(!:ModuleInfo, VarSet, VarTypes, RttiVarMaps,
+    Info = poly_info(!:ModuleInfo, VarTable, RttiVarMaps,
         TypeVarSet, TypeVarKinds, _ProofMap, _ConstraintMap,
         _TypeInfoVarMap, _TypeClassInfoMap, _IntConstMap, _ConstStructVarMap,
         _NumReuses, _SnapshotNum, ConstStructDb, _DefinedWhere,
@@ -367,8 +358,7 @@ poly_info_extract(Info, Specs, !PredInfo, !ProcInfo, !:ModuleInfo) :-
     module_info_set_const_struct_db(ConstStructDb, !ModuleInfo),
 
     % Set the new values of the fields in proc_info and pred_info.
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
     pred_info_set_typevarset(TypeVarSet, !PredInfo),
     pred_info_set_tvar_kind_map(TypeVarKinds, !PredInfo).
@@ -376,8 +366,7 @@ poly_info_extract(Info, Specs, !PredInfo, !ProcInfo, !:ModuleInfo) :-
 %---------------------------------------------------------------------------%
 
 :- pragma inline(pred(poly_info_get_module_info/2)).
-:- pragma inline(pred(poly_info_get_varset/2)).
-:- pragma inline(pred(poly_info_get_var_types/2)).
+:- pragma inline(pred(poly_info_get_var_table/2)).
 :- pragma inline(pred(poly_info_get_rtti_varmaps/2)).
 :- pragma inline(pred(poly_info_get_typevarset/2)).
 :- pragma inline(pred(poly_info_get_tvar_kind_map/2)).
@@ -393,10 +382,8 @@ poly_info_extract(Info, Specs, !PredInfo, !ProcInfo, !:ModuleInfo) :-
 
 poly_info_get_module_info(!.PI, X) :-
     X = !.PI ^ poly_module_info.
-poly_info_get_varset(!.PI, X) :-
-    X = !.PI ^ poly_varset.
-poly_info_get_var_types(!.PI, X) :-
-    X = !.PI ^ poly_vartypes.
+poly_info_get_var_table(!.PI, X) :-
+    X = !.PI ^ poly_var_table.
 poly_info_get_rtti_varmaps(!.PI, X) :-
     X = !.PI ^ poly_rtti_varmaps.
 poly_info_get_typevarset(!.PI, X) :-
@@ -426,9 +413,8 @@ poly_info_get_must_requantify(!.PI, X) :-
 poly_info_get_errors(!.PI, X) :-
     X = !.PI ^ poly_errors.
 
-:- pragma inline(pred(poly_info_set_varset/3)).
-:- pragma inline(pred(poly_info_set_varset_types/4)).
-:- pragma inline(pred(poly_info_set_varset_types_rtti/5)).
+:- pragma inline(pred(poly_info_set_var_table/3)).
+:- pragma inline(pred(poly_info_set_var_table_rtti/4)).
 :- pragma inline(pred(poly_info_set_rtti_varmaps/3)).
 :- pragma inline(pred(poly_info_set_typevarset/3)).
 :- pragma inline(pred(poly_info_set_proof_map/3)).
@@ -440,17 +426,12 @@ poly_info_get_errors(!.PI, X) :-
 :- pragma inline(pred(poly_info_set_const_struct_db/3)).
 :- pragma inline(pred(poly_info_set_errors/3)).
 
-poly_info_set_varset(X, !PI) :-
-    !PI ^ poly_varset := X.
-poly_info_set_varset_types(X, Y, !PI) :-
+poly_info_set_var_table(X, !PI) :-
+    !PI ^ poly_var_table := X.
+poly_info_set_var_table_rtti(X, Y, !PI) :-
     !:PI = ((!.PI
-        ^ poly_varset := X)
-        ^ poly_vartypes := Y).
-poly_info_set_varset_types_rtti(X, Y, Z, !PI) :-
-    !:PI = (((!.PI
-        ^ poly_varset := X)
-        ^ poly_vartypes := Y)
-        ^ poly_rtti_varmaps := Z).
+        ^ poly_var_table := X)
+        ^ poly_rtti_varmaps := Y).
 poly_info_set_rtti_varmaps(X, !PI) :-
     ( if private_builtin.pointer_equal(X, !.PI ^ poly_rtti_varmaps) then
         true
@@ -648,8 +629,8 @@ get_cache_maps_snapshot(Name, CacheMaps, !Info) :-
         then
             poly_info_get_debug_stream(!.Info, Stream, !IO),
             IndentStr = string.duplicate_char(' ', Level * 4),
-            poly_info_get_varset(!.Info, VarSet),
-            NumVars = varset.num_allocated(VarSet),
+            poly_info_get_var_table(!.Info, VarTable),
+            var_table_count(VarTable, NumVars),
             io.format(Stream, "%sget_cache_maps_snapshot %d %s\n",
                 [s(IndentStr), i(SnapshotNum), s(Name)], !IO),
             io.format(Stream, "%snum_allocated vars: %d\n\n",
@@ -690,8 +671,8 @@ set_cache_maps_snapshot(Name, CacheMaps, !Info) :-
         then
             poly_info_get_debug_stream(!.Info, Stream, !IO),
             IndentStr = string.duplicate_char(' ', Level * 4),
-            poly_info_get_varset(!.Info, VarSet),
-            NumVars = varset.num_allocated(VarSet),
+            poly_info_get_var_table(!.Info, VarTable),
+            var_table_count(VarTable, NumVars),
 
             io.format(Stream, "%sset_cache_maps_snapshot %d %s\n",
                 [s(IndentStr), i(SnapshotNum), s(Name)], !IO),
@@ -722,8 +703,7 @@ empty_cache_maps(!Info) :-
 
 get_var_maps_snapshot(Name, VarMaps, !Info) :-
     SnapshotNum = !.Info ^ poly_snapshot_num,
-    poly_info_get_varset(!.Info, VarSet),
-    poly_info_get_var_types(!.Info, VarTypes),
+    poly_info_get_var_table(!.Info, VarTable),
     poly_info_get_rtti_varmaps(!.Info, RttiVarMaps),
 
     trace [compiletime(flag("debug_poly_caches")), io(!IO)] (
@@ -735,7 +715,7 @@ get_var_maps_snapshot(Name, VarMaps, !Info) :-
             SelectedPred = is_selected_pred,
             poly_info_get_debug_stream(!.Info, Stream, !IO),
             IndentStr = string.duplicate_char(' ', Level * 4),
-            NumVars = varset.num_allocated(VarSet),
+            var_table_count(VarTable, NumVars),
             io.format(Stream, "%sget_var_maps_snapshot %d %s\n",
                 [s(IndentStr), i(SnapshotNum), s(Name)], !IO),
             io.format(Stream, "%snum_allocated vars: %d\n\n",
@@ -744,10 +724,10 @@ get_var_maps_snapshot(Name, VarMaps, !Info) :-
     ),
 
     get_cache_maps_snapshot("", CacheMaps, !Info),
-    VarMaps = var_maps(SnapshotNum, VarSet, VarTypes, RttiVarMaps, CacheMaps).
+    VarMaps = var_maps(SnapshotNum, VarTable, RttiVarMaps, CacheMaps).
 
 set_var_maps_snapshot(Name, VarMaps, !Info) :-
-    VarMaps = var_maps(SnapshotNum, VarSet, VarTypes, RttiVarMaps, CacheMaps),
+    VarMaps = var_maps(SnapshotNum, VarTable, RttiVarMaps, CacheMaps),
 
     trace [compiletime(flag("debug_poly_caches")), io(!IO)] (
         get_selected_pred(SelectedPred, !IO),
@@ -774,14 +754,12 @@ set_var_maps_snapshot(Name, VarMaps, !Info) :-
         )
     ),
 
-    poly_info_set_varset_types_rtti(VarSet, VarTypes, RttiVarMaps, !Info),
+    poly_info_set_var_table_rtti(VarTable, RttiVarMaps, !Info),
     set_cache_maps_snapshot("", CacheMaps, !Info).
 
 %---------------------------------------------------------------------------%
 
 get_poly_const(IntConst, IntVar, Goals, !Info) :-
-    poly_info_get_varset(!.Info, VarSet0),
-    poly_info_get_var_types(!.Info, VarTypes0),
     poly_info_get_int_const_map(!.Info, IntConstMap0),
     ( if map.search(IntConstMap0, IntConst, IntVarPrime) then
         poly_info_get_num_reuses(!.Info, NumReuses),
@@ -789,12 +767,13 @@ get_poly_const(IntConst, IntVar, Goals, !Info) :-
         IntVar = IntVarPrime,
         Goals = []
     else
-        make_int_const_construction_alloc(IntConst,
-            yes("PolyConst" ++ string.int_to_string(IntConst)),
-            Goal, IntVar, VarSet0, VarSet, VarTypes0, VarTypes),
+        Name = "PolyConst" ++ string.int_to_string(IntConst),
+        poly_info_get_var_table(!.Info, VarTable0),
+        make_int_const_construction_alloc(IntConst, Name, Goal, IntVar,
+            VarTable0, VarTable),
+        poly_info_set_var_table(VarTable, !Info),
         map.det_insert(IntConst, IntVar, IntConstMap0, IntConstMap),
         poly_info_set_int_const_map(IntConstMap, !Info),
-        poly_info_set_varset_types(VarSet, VarTypes, !Info),
         Goals = [Goal]
     ).
 

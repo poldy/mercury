@@ -61,12 +61,12 @@
 
 :- type version_array(T).
 
-    % An `version_array.index_out_of_bounds' is the exception thrown
-    % on out-of-bounds array accesses. The string describes
-    % the predicate or function reporting the error.
+    % An `index_out_of_bounds' is the exception thrown on out-of-bounds
+    % array accesses. The string describes the predicate or function
+    % reporting the error.
     %
-:- type version_array.index_out_of_bounds
-    --->    version_array.index_out_of_bounds(string).
+:- type index_out_of_bounds
+    --->    index_out_of_bounds(string).
 
 %---------------------------------------------------------------------------%
 
@@ -116,6 +116,7 @@
     % (The first item has index 0).
     %
 :- func lookup(version_array(T), int) = T.
+:- pred lookup(version_array(T)::in, int::in, T::out) is det.
 
     % A ^ elem(I) = lookup(A, I)
     %
@@ -145,10 +146,16 @@
     %
 :- pred is_empty(version_array(T)::in) is semidet.
 
-    % resize(A, N, X) returns a new array whose items from
-    % 0..min(size(A), N - 1) are taken from A and whose items
-    % from min(size(A), N - 1)..(N - 1) (if any) are initialised to X.
-    % A predicate version is also provided.
+    % resize(Array0, NewSize, NewValue) = Array:
+    % resize(NewSize, NewValue, Array0, Array):
+    %
+    % Return in Array a new array whose size is NewSize.
+    %
+    % Each slot in Array will be filled with the value from the corresponding
+    % slot in Array0, if there is one.
+    %
+    % When NewSize is greater than size(Array0), Array will have more slots
+    % than Array0. All those extra slots will be initialised to NewValue.
     %
 :- func resize(version_array(T), int, T) = version_array(T).
 :- pred resize(int::in, T::in, version_array(T)::in, version_array(T)::out)
@@ -224,13 +231,15 @@
 :- mode foldr2(pred(in, in, out, di, uo) is semidet, in,
     in, out, di, uo) is semidet.
 
-    % version_array.all_true(Pred, Array):
+    % all_true(Pred, Array):
+    %
     % True iff Pred is true for every element of Array.
     %
 :- pred all_true(pred(T)::in(pred(in) is semidet), version_array(T)::in)
     is semidet.
 
-    % version_array.all_false(Pred, Array):
+    % all_false(Pred, Array):
+    %
     % True iff Pred is false for every element of Array.
     %
 :- pred all_false(pred(T)::in(pred(in) is semidet), version_array(T)::in)
@@ -248,6 +257,8 @@
     % Convert a version_array to a pretty_printer.doc for formatting.
     %
 :- func version_array_to_doc(version_array(T)) = pretty_printer.doc.
+:- pragma obsolete(func(version_array_to_doc/1),
+    [pretty_printer.version_array_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -267,7 +278,7 @@
 %---------------------------------------------------------------------------%
 
 :- pragma foreign_proc("C",
-    version_array.empty = (VA::out),
+    empty = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
         does_not_affect_liveness],
 "
@@ -290,14 +301,14 @@
 ").
 
 :- pragma foreign_proc("C#",
-    version_array.empty = (VA::out),
+    empty = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     VA = new version_array.ML_sva(version_array.ML_uva.empty());
 ").
 
 :- pragma foreign_proc("Java",
-    version_array.empty = (VA::out),
+    empty = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     VA = new jmercury.version_array.ML_sva(
@@ -305,7 +316,7 @@
 ").
 
 :- pragma foreign_proc("C",
-    version_array.unsafe_empty = (VA::out),
+    unsafe_empty = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
         does_not_affect_liveness],
 "
@@ -327,21 +338,21 @@
 ").
 
 :- pragma foreign_proc("C#",
-    version_array.unsafe_empty = (VA::out),
+    unsafe_empty = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     VA = version_array.ML_uva.empty();
 ").
 
 :- pragma foreign_proc("Java",
-    version_array.unsafe_empty = (VA::out),
+    unsafe_empty = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe],
 "
     VA = jmercury.version_array.ML_uva.empty();
 ").
 
 :- pragma foreign_proc("C",
-    version_array.init(N::in, X::in) = (VA::out),
+    init(N::in, X::in) = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
         does_not_affect_liveness, may_not_duplicate],
 "
@@ -369,14 +380,14 @@
 ").
 
 :- pragma foreign_proc("C#",
-    version_array.init(N::in, X::in) = (VA::out),
+    init(N::in, X::in) = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     VA = new version_array.ML_sva(version_array.ML_uva.init(N, X));
 ").
 
 :- pragma foreign_proc("Java",
-    version_array.init(N::in, X::in) = (VA::out),
+    init(N::in, X::in) = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     VA = new jmercury.version_array.ML_sva(
@@ -384,7 +395,7 @@
 ").
 
 :- pragma foreign_proc("C",
-    version_array.unsafe_init(N::in, X::in) = (VA::out),
+    unsafe_init(N::in, X::in) = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, will_not_modify_trail,
         does_not_affect_liveness, may_not_duplicate],
 "
@@ -411,14 +422,14 @@
 ").
 
 :- pragma foreign_proc("C#",
-    version_array.unsafe_init(N::in, X::in) = (VA::out),
+    unsafe_init(N::in, X::in) = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     VA = version_array.ML_uva.init(N, X);
 ").
 
 :- pragma foreign_proc("Java",
-    version_array.unsafe_init(N::in, X::in) = (VA::out),
+    unsafe_init(N::in, X::in) = (VA::out),
     [will_not_call_mercury, promise_pure, thread_safe, may_not_duplicate],
 "
     VA = jmercury.version_array.ML_uva.init(N, X);
@@ -428,16 +439,17 @@
 
 version_array([]) = version_array.empty.
 version_array([X | Xs]) = VA :-
-    VA0 = version_array.init(1 + list.length(Xs), X),
-    version_array_loop(1, Xs, VA0, VA).
+    NumElems = 1 + list.length(Xs),
+    VA0 = version_array.init(NumElems, X),
+    version_array_init_loop(1, Xs, VA0, VA).
 
-:- pred version_array_loop(int::in, list(T)::in,
+:- pred version_array_init_loop(int::in, list(T)::in,
     version_array(T)::in, version_array(T)::out) is det.
 
-version_array_loop(_, [], !VA).
-version_array_loop(I, [X | Xs], !VA) :-
+version_array_init_loop(_, [], !VA).
+version_array_init_loop(I, [X | Xs], !VA) :-
     set(I, X, !VA),
-    version_array_loop(I + 1, Xs, !VA).
+    version_array_init_loop(I + 1, Xs, !VA).
 
 from_list(Xs) = version_array(Xs).
 
@@ -445,31 +457,36 @@ from_reverse_list([]) = version_array.empty.
 from_reverse_list([X | Xs]) = VA :-
     NumElems = 1 + list.length(Xs),
     VA0 = version_array.init(NumElems, X),
-    from_reverse_list_loop(NumElems - 2, Xs, VA0, VA).
+    from_reverse_list_init_loop(NumElems - 2, Xs, VA0, VA).
 
-:- pred from_reverse_list_loop(int::in, list(T)::in,
+:- pred from_reverse_list_init_loop(int::in, list(T)::in,
     version_array(T)::in, version_array(T)::out) is det.
 
-from_reverse_list_loop(_, [], !VA).
-from_reverse_list_loop(I, [X | Xs], !VA) :-
+from_reverse_list_init_loop(_, [], !VA).
+from_reverse_list_init_loop(I, [X | Xs], !VA) :-
     set(I, X, !VA),
-    from_reverse_list_loop(I - 1, Xs, !VA).
+    from_reverse_list_init_loop(I - 1, Xs, !VA).
 
 %---------------------------------------------------------------------------%
 
 lookup(VA, I) = X :-
+    lookup(VA, I, X).
+
+:- pragma inline(pred(lookup/3)).
+lookup(VA, I, X) :-
     ( if get_if_in_range(VA, I, X0) then
         X = X0
     else
         out_of_bounds_error(I, max(VA), "version_array.lookup")
     ).
 
-:- pragma inline(func(version_array.elem/2)).
-VA ^ elem(I) =
-    lookup(VA, I).
+:- pragma inline(func(elem/2)).
+VA ^ elem(I) = X :-
+    lookup(VA, I, X).
 
 %---------------------------------------------------------------------------%
 
+:- pragma inline(pred(set/4)).
 set(I, X, !VA) :-
     ( if set_if_in_range(I, X, !VA) then
         true
@@ -477,7 +494,7 @@ set(I, X, !VA) :-
         out_of_bounds_error(I, max(!.VA), "version_array.set")
     ).
 
-:- pragma inline(func(version_array.'elem :='/3)).
+:- pragma inline(func('elem :='/3)).
 (VA0 ^ elem(I) := X) = VA :-
     set(I, X, VA0, VA).
 
@@ -551,15 +568,18 @@ to_list(VA) = list(VA).
 
 %---------------------------------------------------------------------------%
 
-foldl(F, VA, Acc) = do_foldl_func(F, VA, Acc, 0, size(VA)).
+foldl(F, VA, Acc0) = Acc :-
+    do_foldl_func(F, VA, 0, size(VA), Acc0, Acc).
 
-:- func do_foldl_func(func(T1, T2) = T2, version_array(T1), T2, int, int) = T2.
+:- pred do_foldl_func((func(T1, T2) = T2)::in,
+    version_array(T1)::in, int::in, int::in, T2::in, T2::out) is det.
 
-do_foldl_func(F, VA, Acc, Lo, Hi) =
+do_foldl_func(F, VA, Lo, Hi, !Acc) :-
     ( if Lo < Hi then
-        do_foldl_func(F, VA, F(lookup(VA, Lo), Acc), Lo + 1, Hi)
+        !:Acc = F(lookup(VA, Lo), !.Acc),
+        do_foldl_func(F, VA, Lo + 1, Hi, !Acc)
     else
-        Acc
+        true
     ).
 
 %---------------------------------------------------------------------------%
@@ -616,21 +636,24 @@ do_foldl2(P, VA, Lo, Hi, !Acc1, !Acc2) :-
 
 %---------------------------------------------------------------------------%
 
-foldr(F, VA, Acc) = do_foldr_func(F, VA, Acc, version_array.max(VA)).
+foldr(F, VA, Acc0) = Acc :-
+    do_foldr_func(F, VA, max(VA), Acc0, Acc).
 
-:- func do_foldr_func(func(T1, T2) = T2, version_array(T1), T2, int) = T2.
+:- pred do_foldr_func((func(T1, T2) = T2)::in, version_array(T1)::in,
+    int::in, T2::in, T2::out) is det.
 
-do_foldr_func(F, VA, Acc, Hi) =
+do_foldr_func(F, VA, Hi, !Acc) :-
     ( if 0 =< Hi then
-        do_foldr_func(F, VA, F(lookup(VA, Hi), Acc), Hi - 1)
+        !:Acc = F(lookup(VA, Hi), !.Acc),
+        do_foldr_func(F, VA, Hi - 1, !Acc)
     else
-        Acc
+        true
     ).
 
 %---------------------------------------------------------------------------%
 
 foldr(P, VA, !Acc) :-
-    do_foldr_pred(P, VA, version_array.max(VA), !Acc).
+    do_foldr_pred(P, VA, max(VA), !Acc).
 
 :- pred do_foldr_pred(pred(T1, T2, T2), version_array(T1), int, T2, T2).
 :- mode do_foldr_pred(pred(in, in, out) is det, in, in, in, out) is det.
@@ -654,7 +677,7 @@ do_foldr_pred(P, VA, I, !Acc) :-
 %---------------------------------------------------------------------------%
 
 foldr2(P, VA, !Acc1, !Acc2) :-
-    do_foldr2(P, VA, version_array.max(VA), !Acc1, !Acc2).
+    do_foldr2(P, VA, max(VA), !Acc1, !Acc2).
 
 :- pred do_foldr2(pred(T1, T2, T2, T3, T3), version_array(T1), int,
     T2, T2, T3, T3).
@@ -689,7 +712,7 @@ all_true(Pred, VA) :-
 
 do_all_true(Pred, I, N, VA) :-
     ( if I < N then
-        Elem = VA ^ elem(I),
+        lookup(VA, I, Elem),
         Pred(Elem),
         do_all_true(Pred, I + 1, N, VA)
     else
@@ -704,7 +727,7 @@ all_false(Pred, VA) :-
 
 do_all_false(Pred, I, N, VA) :-
     ( if I < N then
-        Elem = VA ^ elem(I),
+        lookup(VA, I, Elem),
         not Pred(Elem),
         do_all_false(Pred, I + 1, N, VA)
     else
@@ -758,7 +781,8 @@ eq_version_array(VAa, VAb) :-
 
 eq_version_array_2(I, VAa, VAb) :-
     ( if I >= 0 then
-        lookup(VAa, I) = lookup(VAb, I),
+        lookup(VAa, I, Elem),
+        lookup(VAb, I, Elem),
         eq_version_array_2(I - 1, VAa, VAb)
     else
         true
@@ -789,7 +813,9 @@ cmp_version_array_2(I, Size, VAa, VAb, R) :-
     ( if I >= Size then
         R = (=)
       else
-        compare(R0, lookup(VAa, I), lookup(VAb, I)),
+        lookup(VAa, I, ElemA),
+        lookup(VAb, I, ElemB),
+        compare(R0, ElemA, ElemB),
         (
             R0 = (=),
             cmp_version_array_2(I + 1, Size, VAa, VAb, R)
@@ -1356,8 +1382,8 @@ public interface ML_va {
 // An implementation of version arrays that is safe when used in multiple
 // threads.
 //
-// It just wraps the unsafe version is some synchronization logic so
-// that only one thread can be accessing the array at one instant.
+// It just wraps the unsafe version in some synchronization logic
+// so that only one thread can be accessing the array at one instant.
 [System.Serializable]
 public class ML_sva : ML_va {
     private ML_uva version_array;
@@ -1679,8 +1705,8 @@ public static class Lock implements java.io.Serializable {
 // An implementation of version arrays that is safe when used in multiple
 // threads.
 //
-// It just wraps the unsafe version is some synchronization logic so
-// that only one thread can be accessing the array at one instant.
+// It just wraps the unsafe version in some synchronization logic
+// so that only one thread can be accessing the array at one instant.
 public static class ML_sva implements ML_va, java.io.Serializable {
     private ML_uva version_array;
     private Lock lock;
@@ -1975,29 +2001,11 @@ out_of_bounds_error(Index, Max, PredName) :-
     % elimination.
     string.format("%s: index %d not in range [0, %d]",
         [s(PredName), i(Index), i(Max)], Msg),
-    throw(version_array.index_out_of_bounds(Msg)).
+    throw(index_out_of_bounds(Msg)).
 
 %---------------------------------------------------------------------------%
 
-version_array_to_doc(A) =
-    indent([str("version_array(["), version_array_to_doc_2(0, A), str("])")]).
-
-:- func version_array_to_doc_2(int, version_array(T)) = doc.
-
-version_array_to_doc_2(I, VA) =
-    ( if I > version_array.max(VA) then
-        str("")
-    else
-        docs([
-            format_arg(format(lookup(VA, I))),
-            ( if I = version_array.max(VA) then
-                str("")
-            else
-                group([str(", "), nl])
-            ),
-            format_susp((func) = version_array_to_doc_2(I + 1, VA))
-        ])
-    ).
+version_array_to_doc(A) = pretty_printer.version_array_to_doc(A).
 
 %---------------------------------------------------------------------------%
 :- end_module version_array.

@@ -76,10 +76,10 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 %---------------------------------------------------------------------------%
 
@@ -101,7 +101,7 @@
 :- type lambda_info.
 
 :- pred init_lambda_info(module_info::in, pred_info::in,
-    prog_varset::in, tvarset::in, inst_varset::in, vartypes::in,
+    tvarset::in, inst_varset::in, var_table::in,
     rtti_varmaps::in, has_parallel_conj::in, lambda_info::out) is det.
 
 :- type maybe_recompute_nonlocals
@@ -110,20 +110,17 @@
 
 :- pred lambda_info_get_module_info(lambda_info::in, module_info::out) is det.
 :- pred lambda_info_get_pred_info(lambda_info::in, pred_info::out) is det.
-:- pred lambda_info_get_varset(lambda_info::in, prog_varset::out) is det.
 :- pred lambda_info_get_tvarset(lambda_info::in, tvarset::out) is det.
-:- pred lambda_info_get_vartypes(lambda_info::in, vartypes::out) is det.
+:- pred lambda_info_get_inst_varset(lambda_info::in, inst_varset::out) is det.
+:- pred lambda_info_get_var_table(lambda_info::in, var_table::out) is det.
 :- pred lambda_info_get_rtti_varmaps(lambda_info::in, rtti_varmaps::out)
     is det.
-:- pred lambda_info_get_inst_varset(lambda_info::in, inst_varset::out) is det.
 :- pred lambda_info_get_recompute_nonlocals(lambda_info::in,
     maybe_recompute_nonlocals::out) is det.
 
 :- pred lambda_info_set_module_info(module_info::in,
     lambda_info::in, lambda_info::out) is det.
-:- pred lambda_info_set_varset(prog_varset::in,
-    lambda_info::in, lambda_info::out) is det.
-:- pred lambda_info_set_vartypes(vartypes::in,
+:- pred lambda_info_set_var_table(var_table::in,
     lambda_info::in, lambda_info::out) is det.
 :- pred lambda_info_set_recompute_nonlocals(maybe_recompute_nonlocals::in,
     lambda_info::in, lambda_info::out) is det.
@@ -140,6 +137,7 @@
 :- import_module check_hlds.type_util.
 :- import_module hlds.code_model.
 :- import_module hlds.goal_util.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
@@ -150,7 +148,6 @@
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_type.
-:- import_module parse_tree.prog_util.
 :- import_module transform_hlds.
 :- import_module transform_hlds.direct_arg_in_out.
 
@@ -165,6 +162,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -190,8 +188,7 @@ expand_lambdas_in_pred(PredId, !ModuleInfo) :-
     module_info::in, module_info::out) is det.
 
 expand_lambdas_in_proc(PredId, ProcId, !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
     map.lookup(ProcTable0, ProcId, ProcInfo0),
 
@@ -201,9 +198,7 @@ expand_lambdas_in_proc(PredId, ProcId, !ModuleInfo) :-
     pred_info_get_proc_table(PredInfo1, ProcTable1),
     map.det_update(ProcId, ProcInfo, ProcTable1, ProcTable),
     pred_info_set_proc_table(ProcTable, PredInfo1, PredInfo),
-    module_info_get_preds(!.ModuleInfo, PredTable1),
-    map.det_update(PredId, PredInfo, PredTable1, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 :- pred do_expand_lambdas_in_proc(proc_info::in, proc_info::out,
     pred_info::in, pred_info::out, module_info::in, module_info::out) is det.
@@ -212,54 +207,49 @@ do_expand_lambdas_in_proc(!ProcInfo, !PredInfo, !ModuleInfo) :-
     % Grab the appropriate fields from the pred_info and proc_info.
     pred_info_get_typevarset(!.PredInfo, TypeVarSet0),
     proc_info_get_headvars(!.ProcInfo, HeadVars),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_goal(!.ProcInfo, Goal0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
     proc_info_get_inst_varset(!.ProcInfo, InstVarSet0),
     proc_info_get_has_parallel_conj(!.ProcInfo, HasParallelConj),
 
     % Process the goal.
-    Info0 = lambda_info(!.ModuleInfo, !.PredInfo, VarSet0, TypeVarSet0,
-        InstVarSet0, VarTypes0, RttiVarMaps0, HasParallelConj,
+    Info0 = lambda_info(!.ModuleInfo, !.PredInfo, TypeVarSet0, InstVarSet0,
+        VarTable0, RttiVarMaps0, HasParallelConj,
         need_not_recompute_nonlocals, have_not_expanded_lambdas),
     expand_lambdas_in_goal(Goal0, Goal1, Info0, Info1),
-    Info1 = lambda_info(!:ModuleInfo, _PredInfo, VarSet1, TypeVarSet,
-        _InstVarSet, VarTypes1, RttiVarMaps1, _HasParallelConj,
+    Info1 = lambda_info(!:ModuleInfo, _PredInfo, TypeVarSet, _InstVarSet,
+        VarTable1, RttiVarMaps1, _HasParallelConj,
         MustRecomputeNonLocals, HaveExpandedLambdas),
 
     % Check if we need to requantify.
     (
         MustRecomputeNonLocals = must_recompute_nonlocals,
-        implicitly_quantify_clause_body_general(
-            ordinary_nonlocals_no_lambda, HeadVars, _Warnings,
-            Goal1, Goal2, VarSet1, VarSet2, VarTypes1, VarTypes2,
-            RttiVarMaps1, RttiVarMaps2),
+        implicitly_quantify_clause_body_general(ord_nl_no_lambda,
+            HeadVars, _Warnings, Goal1, Goal2,
+            VarTable1, VarTable2, RttiVarMaps1, RttiVarMaps2),
         proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InstMap0),
-        recompute_instmap_delta(recompute_atomic_instmap_deltas,
-            Goal2, Goal, VarTypes2, InstVarSet0, InstMap0, !ModuleInfo)
+        recompute_instmap_delta(recomp_atomics,
+            VarTable2, InstVarSet0, InstMap0, Goal2, Goal, !ModuleInfo)
     ;
         MustRecomputeNonLocals = need_not_recompute_nonlocals,
         Goal = Goal1,
-        VarSet2 = VarSet1,
-        VarTypes2 = VarTypes1,
+        VarTable2 = VarTable1,
         RttiVarMaps2 = RttiVarMaps1
     ),
     (
         HaveExpandedLambdas = have_expanded_lambdas,
-        restrict_var_maps(HeadVars, Goal, VarSet2, VarSet, VarTypes2, VarTypes,
+        restrict_var_maps(HeadVars, Goal, VarTable2, VarTable,
             RttiVarMaps2, RttiVarMaps)
     ;
         HaveExpandedLambdas = have_not_expanded_lambdas,
-        VarSet = VarSet2,
-        VarTypes = VarTypes2,
+        VarTable = VarTable2,
         RttiVarMaps = RttiVarMaps2
     ),
 
     % Set the new values of the fields in proc_info and pred_info.
     proc_info_set_goal(Goal, !ProcInfo),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
     pred_info_set_typevarset(TypeVarSet, !PredInfo).
 
@@ -394,14 +384,13 @@ expand_lambdas_in_unify_goal(LHSVar, RHS0, UnifyMode, Unification0,
 
 expand_lambda(RegWrapperProc, LHSVar, RHS0, UnifyMode,
         Unification0, UnifyContext, GoalExpr, LambdaInfo0, LambdaInfo) :-
-    LambdaInfo0 = lambda_info(ModuleInfo0, OrigPredInfo, VarSet, TVarSet,
-        InstVarSet, VarTypes, RttiVarMaps, HasParallelConj,
+    LambdaInfo0 = lambda_info(ModuleInfo0, OrigPredInfo, TVarSet, InstVarSet,
+        VarTable, RttiVarMaps, HasParallelConj,
         MustRecomputeNonLocals0, _HaveExpandedLambdas),
     RHS0 = rhs_lambda_goal(_Purity, _Groundness, PredOrFunc, EvalMethod,
         RHSNonLocals, VarsModes, Detism, LambdaGoal),
     assoc_list.keys(VarsModes, Vars),
-    Unification0 = construct(Var, _, ArgVars0, ArgUnifyModes0,
-        _, _, _),
+    Unification0 = construct(Var, _, ArgVars0, ArgUnifyModes0, _, _, _),
     trace [compiletime(flag("lambda_sanity_check"))]
     (
         expect(unify(LHSVar, Var), $pred, "LHSVar != Var"),
@@ -437,8 +426,8 @@ expand_lambda(RegWrapperProc, LHSVar, RHS0, UnifyMode,
     Unification = construct(Var, ConsId, ArgVars, ArgUnifyModes,
         construct_dynamically, cell_is_unique, no_construct_sub_info),
     GoalExpr = unify(LHSVar, RHS, UnifyMode, Unification, UnifyContext),
-    LambdaInfo = lambda_info(ModuleInfo, OrigPredInfo, VarSet, TVarSet,
-        InstVarSet, VarTypes, RttiVarMaps, HasParallelConj,
+    LambdaInfo = lambda_info(ModuleInfo, OrigPredInfo, TVarSet, InstVarSet,
+        VarTable, RttiVarMaps, HasParallelConj,
         MustRecomputeNonLocals, have_expanded_lambdas).
 
 %---------------------%
@@ -524,22 +513,21 @@ can_we_use_existing_pred(ModuleInfo, PredOrFunc, Vars, Detism, LambdaGoal,
 create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
         PredId, ProcId, ArgUnifyModes0, ArgUnifyModes, !MustRecomputeNonLocals,
         LambdaInfo0, !:ModuleInfo) :-
-    LambdaInfo0 = lambda_info(!:ModuleInfo, OrigPredInfo, VarSet, TVarSet,
-        InstVarSet, VarTypes, RttiVarMaps, HasParallelConj,
+    LambdaInfo0 = lambda_info(!:ModuleInfo, OrigPredInfo, TVarSet,
+        InstVarSet, VarTable, RttiVarMaps, HasParallelConj,
         MustRecomputeNonLocals0, _HaveExpandedLambdas),
     RHS0 = rhs_lambda_goal(Purity, _Groundness, PredOrFunc, _EvalMethod,
-        _RHSNonLocals, VarsModes, Detism, LambdaGoal),
-    assoc_list.keys_and_values(VarsModes, Vars, Modes),
+        _ClosureVars, LambdaVarsModes, Detism, LambdaGoal),
+    assoc_list.keys_and_values(LambdaVarsModes, LambdaVars, LambdaVarModes),
     LambdaGoal = hlds_goal(_, LambdaGoalInfo),
 
     % Calculate the constraints which apply to this lambda expression.
     % Note currently we only allow lambda expressions to have universally
     % quantified constraints.
     rtti_varmaps_reusable_constraints(RttiVarMaps, AllConstraints),
-    lookup_var_types(VarTypes, Vars, LambdaVarTypeList),
-    list.map(type_vars, LambdaVarTypeList, LambdaTypeVarsList),
-    list.condense(LambdaTypeVarsList, LambdaTypeVars),
-    list.filter(constraint_contains_vars(LambdaTypeVars),
+    lookup_var_types(VarTable, LambdaVars, LambdaVarTypeList),
+    set_of_type_vars_in_types(LambdaVarTypeList, LambdaTypeVars),
+    list.filter(constraint_contains_only_lambda_tvars(LambdaTypeVars),
         AllConstraints, UnivConstraints),
     Constraints = constraints(UnivConstraints, []),
 
@@ -547,11 +535,11 @@ create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
     % (see the documentation at top of this file).
     ExistQVars = [],
     LambdaGoalNonLocals = goal_info_get_nonlocals(LambdaGoalInfo),
-    set_of_var.insert_list(Vars, LambdaGoalNonLocals, LambdaNonLocals),
-    goal_util.extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, VarTypes,
+    set_of_var.insert_list(LambdaVars, LambdaGoalNonLocals, LambdaNonLocals),
+    extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, VarTable,
         ExistQVars, LambdaNonLocals, ExtraTiTcis),
 
-    set_of_var.delete_list(Vars, LambdaGoalNonLocals, NonLocals1),
+    set_of_var.delete_list(LambdaVars, LambdaGoalNonLocals, NonLocals1),
     % We need all the typeinfos, including the ones that are not used,
     % for the layout structure describing the closure.
     set_of_var.difference(ExtraTiTcis, NonLocals1, NewTiTcis),
@@ -570,17 +558,17 @@ create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
     % work out the arguments, module name, predicate name, arity,
     % arg types, determinism, context, status, etc. for the new predicate.
 
-    ArgVars = put_typeinfo_vars_first(ArgVars1, VarTypes),
-    AllArgVars = ArgVars ++ Vars,
+    ArgVars = put_typeinfo_vars_first(VarTable, ArgVars1),
+    AllArgVars = ArgVars ++ LambdaVars,
 
     module_info_get_name(!.ModuleInfo, ModuleName),
     OrigPredName = pred_info_name(OrigPredInfo),
     OrigContext = goal_info_get_context(LambdaGoalInfo),
-    term.context_file(OrigContext, OrigFile),
-    term.context_line(OrigContext, OrigLine),
+    OrigFile = term_context.context_file(OrigContext),
+    OrigLine = term_context.context_line(OrigContext),
     module_info_next_lambda_count(OrigContext, LambdaCount, !ModuleInfo),
-    make_pred_name_with_context(ModuleName, "IntroducedFrom",
-        PredOrFunc, OrigPredName, OrigLine, LambdaCount, PredName),
+    Transform = tn_lambda(PredOrFunc, lnc(OrigLine, LambdaCount)),
+    make_transformed_pred_name(OrigPredName, Transform, TransformedName),
     LambdaContext = goal_info_get_context(LambdaGoalInfo),
     % The TVarSet is a superset of what it really ought be,
     % but that should not matter.
@@ -604,8 +592,8 @@ create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
     % Recompute the unify_modes.
     modes_to_unify_modes(!.ModuleInfo, ArgModes1, ArgModes1, ArgUnifyModes),
 
-    AllArgModes = ArgModes1 ++ Modes,
-    lookup_var_types(VarTypes, AllArgVars, ArgTypes),
+    AllArgModes = ArgModes1 ++ LambdaVarModes,
+    lookup_var_types(VarTable, AllArgVars, ArgTypes),
     list.foldl_corresponding(check_lambda_arg_type_and_mode(!.ModuleInfo),
         ArgTypes, AllArgModes, 0, _),
 
@@ -616,15 +604,15 @@ create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
     % Now construct the proc_info and pred_info for the new single-mode
     % predicate, using the information computed above.
     map.init(VarNameRemap),
-    restrict_var_maps(AllArgVars, LambdaGoal, VarSet, LambdaVarSet,
-        VarTypes, LambdaVarTypes, RttiVarMaps, LambdaRttiVarMaps),
+    restrict_var_maps(AllArgVars, LambdaGoal, VarTable, LambdaVarTable,
+        RttiVarMaps, LambdaRttiVarMaps),
     some [!ProcInfo] (
         % If the original procedure contained parallel conjunctions,
         % then the one we are creating here may have them as well.
         % If it does not, then the value in the proc_info of the lambda
         % predicate will be an overconservative estimate.
         SeqNum = item_no_seq_num,
-        proc_info_create(LambdaContext, SeqNum, LambdaVarSet, LambdaVarTypes,
+        proc_info_create(LambdaContext, SeqNum, LambdaVarTable,
             AllArgVars, InstVarSet, AllArgModes, detism_decl_explicit, Detism,
             LambdaGoal, LambdaRttiVarMaps, address_is_taken,
             HasParallelConj, VarNameRemap, !:ProcInfo),
@@ -637,8 +625,7 @@ create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
         % that we just created.
         (
             MustRecomputeNonLocals0 = must_recompute_nonlocals,
-            requantify_proc_general(ordinary_nonlocals_maybe_lambda,
-                !ProcInfo)
+            requantify_proc_general(ord_nl_maybe_lambda, !ProcInfo)
         ;
             MustRecomputeNonLocals0 = need_not_recompute_nonlocals
         ),
@@ -650,34 +637,29 @@ create_new_pred_for_lambda(RegWrapperProc, RHS0, OrigVars, ArgVars,
         ),
         ProcInfo = !.ProcInfo
     ),
+    Origin = origin_user(user_made_lambda(OrigFile, OrigLine, LambdaCount)),
     set.init(Assertions),
     GoalType = goal_not_for_promise(np_goal_type_none),
-    pred_info_create(ModuleName, PredName, PredOrFunc, LambdaContext,
-        origin_lambda(OrigFile, OrigLine, LambdaCount),
-        pred_status(status_local), LambdaMarkers, ArgTypes, TVarSet,
-        ExistQVars, Constraints, Assertions, VarNameRemap, GoalType,
-        ProcInfo, ProcId, PredInfo),
+    pred_info_create(PredOrFunc, ModuleName, TransformedName,
+        LambdaContext, Origin, pred_status(status_local), LambdaMarkers,
+        ArgTypes, TVarSet, ExistQVars, Constraints, Assertions, VarNameRemap,
+        GoalType, ProcInfo, ProcId, PredInfo),
 
     % Save the new predicate in the predicate table.
     module_info_get_predicate_table(!.ModuleInfo, PredicateTable0),
     predicate_table_insert(PredInfo, PredId, PredicateTable0, PredicateTable),
     module_info_set_predicate_table(PredicateTable, !ModuleInfo),
 
-    find_and_record_any_direct_arg_in_out_posns(PredId, ProcId, LambdaVarTypes,
+    find_and_record_any_direct_arg_in_out_posns(PredId, ProcId, LambdaVarTable,
         AllArgVars, AllArgModes, !ModuleInfo).
 
-:- pred constraint_contains_vars(list(tvar)::in, prog_constraint::in)
-    is semidet.
+:- pred constraint_contains_only_lambda_tvars(set(tvar)::in,
+    prog_constraint::in) is semidet.
 
-constraint_contains_vars(LambdaVars, ClassConstraint) :-
+constraint_contains_only_lambda_tvars(LambdaTVars, ClassConstraint) :-
     ClassConstraint = constraint(_, ConstraintTypes),
-    list.map(type_vars, ConstraintTypes, ConstraintVarsList),
-    list.condense(ConstraintVarsList, ConstraintVars),
-    % Probably not the most efficient way of doing it, but I wouldn't think
-    % that it matters.
-    set.list_to_set(LambdaVars, LambdaVarsSet),
-    set.list_to_set(ConstraintVars, ConstraintVarsSet),
-    set.subset(ConstraintVarsSet, LambdaVarsSet).
+    set_of_type_vars_in_types(ConstraintTypes, ConstraintTVars),
+    set.subset(ConstraintTVars, LambdaTVars).
 
     % This predicate works out the modes of the original non-local variables
     % of a lambda expression based on the list of unify_mode in the unify_info
@@ -720,21 +702,18 @@ check_lambda_arg_type_and_mode(ModuleInfo, Type, Mode, X, X) :-
     % the equiv_types_hlds pass) iterate over the entries in these maps,
     % and if an entry is duplicated N times, they have to process it N times.
     % The task of this predicate is to eliminate unnecessary entries
-    % from the vartypes map, and this requires also eliminating them from
+    % from the var_table, and this requires also eliminating them from
     % the rtti_varmaps.
     %
-    % We could in theory restrict the varsets in the proc_info as well
-    % both the main prog_varset and the other varsets, e.g. the tvarset),
+    % We could in theory restrict the tvarset and the inst_varset as well,
     % but since we don't iterate over those sets, there is (as yet) no need
     % for this.
     %
 :- pred restrict_var_maps(list(prog_var)::in, hlds_goal::in,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    rtti_varmaps::in, rtti_varmaps::out) is det.
+    var_table::in, var_table::out, rtti_varmaps::in, rtti_varmaps::out) is det.
 
-restrict_var_maps(HeadVars, Goal, !VarSet, !VarTypes, !RttiVarMaps) :-
-    MaxVar = varset.max_var(!.VarSet),
-    MaxVarNum = var_to_int(MaxVar),
+restrict_var_maps(HeadVars, Goal, !VarTable, !RttiVarMaps) :-
+    var_table_max_var_num(!.VarTable, MaxVarNum),
     % Variable numbers go from 1 to MaxVarNum. Reserve array slots
     % from 0 to MaxVarNum, since wasting the space of one array element
     % is preferable to having to do a subtraction on every array lookup.
@@ -742,10 +721,10 @@ restrict_var_maps(HeadVars, Goal, !VarSet, !VarTypes, !RttiVarMaps) :-
     mark_vars_as_used(HeadVars, VarUses0, VarUses1),
     find_used_vars_in_goal(Goal, VarUses1, VarUses),
 
-    vartypes_to_sorted_assoc_list(!.VarTypes, VarTypesList0),
-    filter_vartypes(VarTypesList0, [], RevVarTypesList, VarUses),
-    list.reverse(RevVarTypesList, VarTypesList),
-    vartypes_from_sorted_assoc_list(VarTypesList, !:VarTypes),
+    var_table_to_sorted_assoc_list(!.VarTable, VarTableEntries0),
+    filter_var_table_entries(VarTableEntries0, VarUses,
+        [], RevVarTableEntries),
+    var_table_from_rev_sorted_assoc_list(RevVarTableEntries, !:VarTable),
 
     restrict_rtti_varmaps(VarUses, !RttiVarMaps).
 
@@ -771,20 +750,7 @@ find_used_vars_in_goal(Goal, !VarUses) :-
             ; Unif = complicated_unify(_, _, _)
             )
         ),
-        (
-            RHS = rhs_var(RHSVar),
-            mark_var_as_used(RHSVar, !VarUses)
-        ;
-            RHS = rhs_functor(_, _, ArgVars),
-            mark_vars_as_used(ArgVars, !VarUses)
-        ;
-            RHS = rhs_lambda_goal(_, _, _, _, NonLocals, ArgVarsModes,
-                _, LambdaGoal),
-            assoc_list.keys(ArgVarsModes, ArgVars),
-            mark_vars_as_used(NonLocals, !VarUses),
-            mark_vars_as_used(ArgVars, !VarUses),
-            find_used_vars_in_goal(LambdaGoal, !VarUses)
-        )
+        find_used_vars_in_unify_rhs(RHS, !VarUses)
     ;
         GoalExpr = generic_call(GenericCall, ArgVars, _, _, _),
         (
@@ -800,8 +766,16 @@ find_used_vars_in_goal(Goal, !VarUses) :-
         ),
         mark_vars_as_used(ArgVars, !VarUses)
     ;
-        GoalExpr = plain_call(_, _, ArgVars, _, _, _),
-        mark_vars_as_used(ArgVars, !VarUses)
+        GoalExpr = plain_call(_, _, ArgVars, _, MaybeCallUnifyContext, _),
+        mark_vars_as_used(ArgVars, !VarUses),
+        (
+            MaybeCallUnifyContext = no
+        ;
+            MaybeCallUnifyContext = yes(CallUnifyContext),
+            CallUnifyContext = call_unify_context(Var, RHS, _UC),
+            mark_var_as_used(Var, !VarUses),
+            find_used_vars_in_unify_rhs(RHS, !VarUses)
+        )
     ;
         ( GoalExpr = conj(_, Goals)
         ; GoalExpr = disj(Goals)
@@ -905,6 +879,25 @@ find_used_vars_in_cases([Case | Cases], !VarUses) :-
     find_used_vars_in_goal(Goal, !VarUses),
     find_used_vars_in_cases(Cases, !VarUses).
 
+:- pred find_used_vars_in_unify_rhs(unify_rhs::in,
+    array(bool)::array_di, array(bool)::array_uo) is det.
+
+find_used_vars_in_unify_rhs(RHS, !VarUses) :-
+    (
+        RHS = rhs_var(RHSVar),
+        mark_var_as_used(RHSVar, !VarUses)
+    ;
+        RHS = rhs_functor(_, _, ArgVars),
+        mark_vars_as_used(ArgVars, !VarUses)
+    ;
+        RHS = rhs_lambda_goal(_, _, _, _, NonLocals, ArgVarsModes,
+            _, LambdaGoal),
+        assoc_list.keys(ArgVarsModes, ArgVars),
+        mark_vars_as_used(NonLocals, !VarUses),
+        mark_vars_as_used(ArgVars, !VarUses),
+        find_used_vars_in_goal(LambdaGoal, !VarUses)
+    ).
+
 :- pred mark_var_as_used(prog_var::in,
     array(bool)::array_di, array(bool)::array_uo) is det.
 :- pragma inline(pred(mark_var_as_used/3)).
@@ -920,22 +913,23 @@ mark_vars_as_used([Var | Vars], !VarUses) :-
     mark_var_as_used(Var, !VarUses),
     mark_vars_as_used(Vars, !VarUses).
 
-:- pred filter_vartypes(assoc_list(prog_var, mer_type)::in,
-    assoc_list(prog_var, mer_type)::in, assoc_list(prog_var, mer_type)::out,
-    array(bool)::in) is det.
+:- pred filter_var_table_entries(assoc_list(prog_var, var_table_entry)::in,
+    array(bool)::in,
+    assoc_list(prog_var, var_table_entry)::in,
+    assoc_list(prog_var, var_table_entry)::out) is det.
 
-filter_vartypes([], !RevVarTypes, _VarUses).
-filter_vartypes([VarType | VarTypes], !RevVarTypes, VarUses) :-
-    VarType = Var - _Type,
+filter_var_table_entries([], _VarUses, !RevVarsEntries).
+filter_var_table_entries([VarEntry | VarsEntries], VarUses, !RevVarsEntries) :-
+    VarEntry = Var - _Entry,
     VarNum = var_to_int(Var),
     array.unsafe_lookup(VarUses, VarNum, Used),
     (
         Used = yes,
-        !:RevVarTypes = [VarType | !.RevVarTypes]
+        !:RevVarsEntries = [VarEntry | !.RevVarsEntries]
     ;
         Used = no
     ),
-    filter_vartypes(VarTypes, !RevVarTypes, VarUses).
+    filter_var_table_entries(VarsEntries, VarUses, !RevVarsEntries).
 
 %---------------------------------------------------------------------------%
 
@@ -944,11 +938,10 @@ filter_vartypes([VarType | VarTypes], !RevVarTypes, VarUses) :-
                 li_module_info          :: module_info,
                 li_pred_info            :: pred_info,
 
-                li_varset               :: prog_varset,
                 li_tvarset              :: tvarset,
                 li_inst_varset          :: inst_varset,
 
-                li_vartypes             :: vartypes,
+                li_var_table            :: var_table,
                 li_rtti_varmaps         :: rtti_varmaps,
                 li_has_parallel_conj    :: has_parallel_conj,
 
@@ -963,35 +956,31 @@ filter_vartypes([VarType | VarTypes], !RevVarTypes, VarUses) :-
     --->    have_not_expanded_lambdas
     ;       have_expanded_lambdas.
 
-init_lambda_info(ModuleInfo, PredInfo, VarSet, TypeVarSet, InstVarSet,
-        VarTypes, RttiVarMaps, HasParallelConj, Info) :-
-    Info = lambda_info(ModuleInfo, PredInfo, VarSet, TypeVarSet, InstVarSet,
-        VarTypes, RttiVarMaps, HasParallelConj,
+init_lambda_info(ModuleInfo, PredInfo, TypeVarSet, InstVarSet, VarTable,
+        RttiVarMaps, HasParallelConj, Info) :-
+    Info = lambda_info(ModuleInfo, PredInfo, TypeVarSet, InstVarSet, VarTable,
+        RttiVarMaps, HasParallelConj,
         need_not_recompute_nonlocals, have_not_expanded_lambdas).
 
 lambda_info_get_module_info(Info, X) :-
     X = Info ^ li_module_info.
 lambda_info_get_pred_info(Info, X) :-
     X = Info ^ li_pred_info.
-lambda_info_get_varset(Info, X) :-
-    X = Info ^ li_varset.
 lambda_info_get_tvarset(Info, X) :-
     X = Info ^ li_tvarset.
-lambda_info_get_vartypes(Info, X) :-
-    X = Info ^ li_vartypes.
-lambda_info_get_rtti_varmaps(Info, X) :-
-    X = Info ^ li_rtti_varmaps.
 lambda_info_get_inst_varset(Info, X) :-
     X = Info ^ li_inst_varset.
+lambda_info_get_var_table(Info, X) :-
+    X = Info ^ li_var_table.
+lambda_info_get_rtti_varmaps(Info, X) :-
+    X = Info ^ li_rtti_varmaps.
 lambda_info_get_recompute_nonlocals(Info, X) :-
     X = Info ^ li_recompute_nonlocals.
 
 lambda_info_set_module_info(X, !Info) :-
     !Info ^ li_module_info := X.
-lambda_info_set_varset(X, !Info) :-
-    !Info ^ li_varset := X.
-lambda_info_set_vartypes(X, !Info) :-
-    !Info ^ li_vartypes := X.
+lambda_info_set_var_table(X, !Info) :-
+    !Info ^ li_var_table := X.
 lambda_info_set_recompute_nonlocals(X, !Info) :-
     !Info ^ li_recompute_nonlocals := X.
 

@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1993-2000, 2003-2008, 2011-2012 The University of Melbourne.
-% Copyright (C) 2014-2018 The Mercury team.
+% Copyright (C) 2014-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -109,7 +109,7 @@
     % Keep reading until we encounter either an `end' token
     % (i.e. a full stop followed by whitespace) or the end-of-file.
     %
-    % See `char.is_whitespace' for the definition of whitespace characters
+    % See char.is_whitespace for the definition of whitespace characters
     % used by this predicate.
     %
 :- pred get_token_list(token_list::out, io::di, io::uo) is det.
@@ -130,7 +130,7 @@
     % Return the tokens scanned in Tokens, and return the position one
     % character past the end of the last token in FinalPos.
     %
-    % See `char.is_whitespace' for the definition of whitespace characters
+    % See char.is_whitespace for the definition of whitespace characters
     % used by this predicate.
     %
 :- pred string_get_token_list_max(string::in, offset::in, token_list::out,
@@ -157,8 +157,8 @@
 
 :- interface.
 
-    % graphic_token_char(Char): true iff `Char'
-    % is "graphic token char" (ISO Prolog 6.4.2).
+    % graphic_token_char(Char): true iff Char
+    % is a "graphic token char" (ISO Prolog 6.4.2).
     % This is exported for use by term_io.quote_atom.
     %
 :- pred graphic_token_char(char::in) is semidet.
@@ -217,7 +217,7 @@ get_token_list(Tokens, !IO) :-
 
 get_token_list(Stream, Tokens, !IO) :-
     % We build the tokens up as lists of characters in reverse order.
-    % When we get to the end of each token, we call `rev_char_list_to_string/2'
+    % When we get to the end of each token, we call rev_char_list_to_string/2
     % to convert that representation into a string.
     get_token(Stream, Token, Context, !IO),
     get_token_list_2(Stream, Token, Context, Tokens, !IO).
@@ -560,7 +560,7 @@ get_token(Stream, Token, Context, !IO) :-
     % If passed `scanned_past_whitespace' then we have already scanned past
     % some whitespace, so '(' gets scanned as `open' rather than `open_ct'.
     %
-    % `get_token_2' must be inlined into `execute_get_token_action' so that
+    % get_token_2 must be inlined into execute_get_token_action so that
     % the recursive call can be compiled to a loop on backends that cannot
     % eliminate tail calls in general.
     %
@@ -1132,19 +1132,19 @@ lookup_token_action(Char, Action) :-
 
 %---------------------------------------------------------------------------%
 
-    % Some descendant predicates of `execute_get_token_action' have the job of
+    % Some descendant predicates of execute_get_token_action have the job of
     % consuming input that does not correspond to a token, e.g. skip_to_eol
     % skips to the end of line and does not produce a token unless it
     % encounters the end-of-file or an I/O error.
     %
     % If a descendant predicate does not produce a token, then it must return
-    % an indication back to `execute_get_token_action' that it did not, then
-    % `execute_get_token_action' will call itself recursively to get the next
+    % an indication back to execute_get_token_action that it did not, then
+    % execute_get_token_action will call itself recursively to get the next
     % token.
     %
     % An alternative would be for the descendant predicate which has not
-    % produced a token to call `execute_get_token_action' (indirectly) to get
-    % the next token. However, `execute_get_token_action' calling itself is
+    % produced a token to call execute_get_token_action (indirectly) to get
+    % the next token. However, execute_get_token_action calling itself is
     % preferable as the direct recursion can be compiled to a loop by backends
     % that cannot otherwise eliminate tail calls.
     %
@@ -1157,7 +1157,7 @@ lookup_token_action(Char, Action) :-
     %
     % but the heap allocation required to return "yes(Token, Context)" would be
     % a significant overhead. Instead, each predicate that might not produce a
-    % token returns two values, of type `token' and `maybe_have_valid_token'
+    % token returns two values, of type token and maybe_have_valid_token
     % (below).
     %
     % If the predicate does produce a token then it returns the token and the
@@ -2890,9 +2890,18 @@ get_graphic(Stream, !.RevChars, Token, !IO) :-
         )
     ;
         Result = ok,
-        ( if graphic_token_char(Char) then
+        ( if
+            graphic_token_char(Char)
+        then
             !:RevChars = [Char | !.RevChars],
             get_graphic(Stream, !.RevChars, Token, !IO)
+        else if
+            Char = 'u',
+            ( !.RevChars = ['<', '<'], Name = "<<u"
+            ; !.RevChars = ['>', '>'], Name = ">>u"
+            )
+        then
+            Token = name(Name)
         else
             io.putback_char(Stream, Char, !IO),
             ( if rev_char_list_to_string(!.RevChars, Name) then
@@ -2909,10 +2918,19 @@ get_graphic(Stream, !.RevChars, Token, !IO) :-
 string_get_graphic(String, Len, Posn0, Token, Context, !Posn) :-
     LastCharPosn = !.Posn,
     ( if string_read_char(String, Len, Char, !Posn) then
-        ( if graphic_token_char(Char) then
+        ( if
+            graphic_token_char(Char)
+        then
             disable_warning [suspicious_recursion] (
                 string_get_graphic(String, Len, Posn0, Token, Context, !Posn)
             )
+        else if
+            Char = 'u',
+            grab_string(String, Posn0, !.Posn, ShiftOp),
+            ( ShiftOp = "<<u" ; ShiftOp = ">>u" )
+        then
+            Token = name(ShiftOp),
+            string_get_context(Posn0, Context)
         else
             !:Posn = LastCharPosn,
             grab_string(String, Posn0, !.Posn, Name),
@@ -2935,11 +2953,20 @@ linestr_get_graphic(String, Len, LineContext0, LinePosn0, Token, Context,
     LastCharLineContext = !.LineContext,
     LastCharLinePosn = !.LinePosn,
     ( if linestr_read_char(String, Len, Char, !LineContext, !LinePosn) then
-        ( if graphic_token_char(Char) then
+        ( if
+            graphic_token_char(Char)
+        then
             disable_warning [suspicious_recursion] (
                 linestr_get_graphic(String, Len, LineContext0, LinePosn0,
                     Token, Context, !LineContext, !LinePosn)
             )
+        else if
+            Char = 'u',
+            linestr_grab_string(String, LinePosn0, !.LinePosn, ShiftOp),
+            ( ShiftOp = "<<u" ; ShiftOp = ">>u" )
+        then
+            Token = name(ShiftOp),
+            linestr_get_context(LineContext0, Context)
         else
             !:LineContext = LastCharLineContext,
             !:LinePosn = LastCharLinePosn,

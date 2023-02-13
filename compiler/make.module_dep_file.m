@@ -24,7 +24,7 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.module_baggage.
 
 :- import_module io.
 
@@ -38,7 +38,7 @@
     maybe_module_dep_info::out, make_info::in, make_info::out,
     io::di, io::uo) is det.
 
-:- pred write_module_dep_file(globals::in, burdened_aug_comp_unit::in,
+:- pred write_module_dep_file(globals::in, burdened_module::in,
     io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
@@ -54,22 +54,25 @@
 :- import_module make.build.
 :- import_module make.module_target.
 :- import_module make.util.
-:- import_module parse_tree.error_util.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.get_dependencies.
+:- import_module parse_tree.find_module.
 :- import_module parse_tree.item_util.
 :- import_module parse_tree.mercury_to_mercury.
+:- import_module parse_tree.module_dep_info.
 :- import_module parse_tree.parse_error.
 :- import_module parse_tree.parse_sym_name.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_item.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.read_modules.
+:- import_module parse_tree.write_error_spec.
 :- import_module parse_tree.write_module_interface_files.
 
 :- import_module bool.
 :- import_module dir.
 :- import_module getopt.
+:- import_module io.file.
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
@@ -78,6 +81,7 @@
 :- import_module set.
 :- import_module string.
 :- import_module term.
+:- import_module term_int.
 :- import_module term_io.
 
 %---------------------------------------------------------------------------%
@@ -322,43 +326,28 @@ do_get_module_dependencies(Globals, RebuildModuleDeps, ModuleName,
 
 %---------------------------------------------------------------------------%
 
-write_module_dep_file(Globals, BurdenedAugCompUnit0, !IO) :-
-    BurdenedAugCompUnit0 = burdened_aug_comp_unit(Baggage0, AugCompUnit0),
+write_module_dep_file(Globals, BurdenedModule0, !IO) :-
+    BurdenedModule0 = burdened_module(Baggage0, ParseTreeModuleSrc),
     Baggage0 = module_baggage(SourceFileName, _SourceFileDir,
         SourceFileModuleName, MaybeTopModule, _MaybeTimestampMap,
-        _GrabbedFileMap, Specs, _Errors),
-    AugCompUnit0 = aug_compilation_unit(ParseTreeModuleSrc,
-        _, _, _, _, _, _, _, _),
+        _GrabbedFileMap, _Errors),
 
     MaybeTimestampMap = maybe.no,
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     GrabbedFileMap = map.singleton(ModuleName, gf_src(ParseTreeModuleSrc)),
-    set.init(Errors),
+    Errors = init_read_module_errors,
     Baggage = module_baggage(SourceFileName, dir.this_directory,
         SourceFileModuleName, MaybeTopModule, MaybeTimestampMap,
-        GrabbedFileMap, Specs, Errors),
+        GrabbedFileMap, Errors),
 
-    map.init(AncestorIntSpecs),
-    map.init(DirectIntSpecs),
-    map.init(IndirectIntSpecs),
-    map.init(PlainOpts),
-    map.init(TransOpts),
-    map.init(IntForOptSpecs),
-    map.init(TypeRepnSpecs),
-    map.init(VersionNumbers),
-    AugCompUnit = aug_compilation_unit(ParseTreeModuleSrc,
-        AncestorIntSpecs, DirectIntSpecs, IndirectIntSpecs,
-        PlainOpts, TransOpts, IntForOptSpecs, TypeRepnSpecs, VersionNumbers),
+    BurdenedModule = burdened_module(Baggage, ParseTreeModuleSrc),
+    do_write_module_dep_file(Globals, BurdenedModule, !IO).
 
-    BurdenedAugCompUnit = burdened_aug_comp_unit(Baggage, AugCompUnit),
-    do_write_module_dep_file(Globals, BurdenedAugCompUnit, !IO).
-
-:- pred do_write_module_dep_file(globals::in, burdened_aug_comp_unit::in,
+:- pred do_write_module_dep_file(globals::in, burdened_module::in,
     io::di, io::uo) is det.
 
-do_write_module_dep_file(Globals, BurdenedAugCompUnit, !IO) :-
-    BurdenedAugCompUnit = burdened_aug_comp_unit(Baggage, AugCompUnit),
-    ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
+do_write_module_dep_file(Globals, BurdenedModule, !IO) :-
+    BurdenedModule = burdened_module(Baggage, ParseTreeModuleSrc),
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     module_name_to_file_name(Globals, $pred, do_create_dirs,
         ext_other(make_module_dep_file_extension),
@@ -367,7 +356,7 @@ do_write_module_dep_file(Globals, BurdenedAugCompUnit, !IO) :-
     (
         ProgDepResult = ok(ProgDepStream),
         do_write_module_dep_file_to_stream(ProgDepStream, Globals,
-            Baggage, AugCompUnit, !IO),
+            Baggage, ParseTreeModuleSrc, !IO),
         io.close_output(ProgDepStream, !IO)
     ;
         ProgDepResult = error(Error),
@@ -378,31 +367,32 @@ do_write_module_dep_file(Globals, BurdenedAugCompUnit, !IO) :-
     ).
 
 :- pred do_write_module_dep_file_to_stream(io.text_output_stream::in,
-    globals::in, module_baggage::in, aug_compilation_unit::in,
+    globals::in, module_baggage::in, parse_tree_module_src::in,
     io::di, io::uo) is det.
 
-do_write_module_dep_file_to_stream(Stream, Globals, Baggage, AugCompUnit,
-        !IO) :-
+do_write_module_dep_file_to_stream(Stream, Globals,
+        Baggage, ParseTreeModuleSrc, !IO) :-
     Version = module_dep_file_v2,
     version_number(Version, VersionNumber),
     SourceFileName = Baggage ^ mb_source_file_name,
     SourceFileModuleName = Baggage ^ mb_source_file_module_name,
     SourceFileModuleNameStr =
         mercury_bracketed_sym_name_to_string(SourceFileModuleName),
-    ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     Ancestors = set.to_sorted_list(get_ancestors_set(ModuleName)),
     IncludeMap = ParseTreeModuleSrc ^ ptms_include_map,
     Children = map.keys(IncludeMap),
-    aug_compilation_unit_get_int_imp_deps(AugCompUnit, IntDepSet, ImpDepSet),
+    parse_tree_module_src_get_int_imp_deps(ParseTreeModuleSrc,
+        IntDepSet, ImpDepSet),
     set.to_sorted_list(IntDepSet, IntDeps),
     set.to_sorted_list(ImpDepSet, ImpDeps),
     MaybeTopModule = Baggage ^ mb_maybe_top_module,
     NestedSubModules = get_nested_children_list_of_top_module(MaybeTopModule),
     get_fact_tables(ParseTreeModuleSrc, FactTableFilesSet),
-    set.to_sorted_list(FactTableFilesSet, FactTableFiles),
+    FactTableFilesStrs = list.map(term_io.quoted_string,
+        set.to_sorted_list(FactTableFilesSet)),
     globals.get_backend_foreign_languages(Globals, BackendLangsList),
-    BackendLangs = set.list_to_set(BackendLangsList), 
+    BackendLangs = set.list_to_set(BackendLangsList),
     get_foreign_code_langs(ParseTreeModuleSrc, CodeLangs),
     get_foreign_export_langs(ParseTreeModuleSrc, ExportLangs),
     set.intersect(BackendLangs, CodeLangs, BackendCodeLangs),
@@ -445,7 +435,7 @@ do_write_module_dep_file_to_stream(Stream, Globals, Baggage, AugCompUnit,
         s(bracketed_sym_names_to_comma_list_string(ImpDeps)),
         s(bracketed_sym_names_to_comma_list_string(Children)),
         s(bracketed_sym_names_to_comma_list_string(NestedSubModules)),
-        s(string.join_list(", ", FactTableFiles)),
+        s(string.join_list(", ", FactTableFilesStrs)),
         s(string.join_list(", ", CodeLangStrs)),
         s(string.join_list(", ", FIMSpecStrs)),
         s(ContainsForeignExportStr),
@@ -577,7 +567,7 @@ read_module_dependencies_3(Globals, SearchDirs, ModuleName, ModuleDir,
                 SourceFileExists = ok
             ;
                 SourceFileExists = error(_),
-                io.remove_file(ModuleDepFile, _, !IO)
+                io.file.remove_file(ModuleDepFile, _, !IO)
             )
         else
             SourceFileExists = ok
@@ -700,7 +690,7 @@ atom_term(Term, Atom, Args) :-
 :- pred version_number_term(term::in, module_dep_file_version::out) is semidet.
 
 version_number_term(Term, Version) :-
-    decimal_term_to_int(Term, Int),
+    term_int.decimal_term_to_int(Term, Int),
     version_number(Version, Int).
 
 :- pred string_term(term::in, string::out) is semidet.
@@ -769,7 +759,7 @@ some_bad_module_dependency(Info, ModuleNames) :-
 
 check_regular_file_exists(FileName, FileExists, !IO) :-
     FollowSymLinks = yes,
-    io.file_type(FollowSymLinks, FileName, ResFileType, !IO),
+    io.file.file_type(FollowSymLinks, FileName, ResFileType, !IO),
     (
         ResFileType = ok(FileType),
         (
@@ -838,144 +828,178 @@ make_module_dependencies(Globals, ModuleName, !Info, !IO) :-
     prepare_to_redirect_output(ModuleName, MaybeErrorStream, !Info, !IO),
     (
         MaybeErrorStream = yes(ErrorStream),
+        % Both make_module_dependencies_fatal_error and
+        % make_module_dependencies_no_fatal_error call unredirect_output,
+        % but factoring that call out of the latter would be non-trivial,
+        % and is better left for when we replace the whole redirect/unredirect
+        % machinery with the use of explicit streams.
         io.set_output_stream(ErrorStream, OldOutputStream, !IO),
         % XXX Why ask for the timestamp if we then ignore it?
-        read_module_src(Globals, rrm_get_deps(ModuleName),
-            do_not_ignore_errors, do_not_search,
-            ModuleName, [], SourceFileName,
-            always_read_module(do_return_timestamp), _,
-            ParseTreeSrc, Specs0, ReadModuleErrors, !IO),
-
-        set.intersect(ReadModuleErrors, fatal_read_module_errors, FatalErrors),
-        ( if set.is_non_empty(FatalErrors) then
-            FatalReadError = yes,
-            DisplayErrorReadingFile = yes
-        else if set.contains(ReadModuleErrors, rme_unexpected_module_name) then
-            % If the source file does not contain the expected module, then
-            % do not make the .module_dep file; it would leave a .module_dep
-            % file for the wrong module lying around, which the user needs
-            % to delete manually.
-            FatalReadError = yes,
-            DisplayErrorReadingFile = no
-        else
-            FatalReadError = no,
-            DisplayErrorReadingFile = no
-        ),
+        % NOTE: Asking for a timestamp and then ignoring it *could* make sense
+        % if we recorded HaveReadSrc in a have_read_module_map, because
+        % it would make the timestamp available for a later lookup,
+        % However, we do not record HaveReadSrc in a have_read_module_map.
+        MaybeProgressStream = maybe.no,
+        read_module_src(MaybeProgressStream, Globals, rrm_get_deps(ModuleName),
+            do_not_ignore_errors, do_not_search, ModuleName, [],
+            always_read_module(do_return_timestamp), HaveReadSrc, !IO),
         (
-            FatalReadError = yes,
-            write_error_specs(ErrorStream, Globals, Specs0, !IO),
-            io.set_output_stream(OldOutputStream, _, !IO),
-            (
+            HaveReadSrc = have_read_module(SourceFileName, _MaybeTimestamp,
+                ParseTreeSrc, ReadModuleErrors),
+
+            Fatal = ReadModuleErrors ^ rm_fatal_errors,
+            NonFatal = ReadModuleErrors ^ rm_nonfatal_errors,
+            ( if set.is_non_empty(Fatal) then
                 DisplayErrorReadingFile = yes,
-                io.format(
-                    "** Error reading file `%s' to generate dependencies.\n",
-                    [s(SourceFileName)], !IO),
-                maybe_write_importing_module(ModuleName,
-                    !.Info ^ mki_importing_module, !IO)
-            ;
-                DisplayErrorReadingFile = no
-            ),
-
-            % Display the contents of the `.err' file, then remove it
-            % so we don't leave `.err' files lying around for nonexistent
-            % modules.
-            globals.set_option(output_compile_error_lines, int(10000),
-                Globals, UnredirectGlobals),
-            unredirect_output(UnredirectGlobals, ModuleName, ErrorStream,
-                !Info, !IO),
-            module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-                ext_other(other_ext(".err")), ModuleName, ErrFileName, !IO),
-            io.remove_file(ErrFileName, _, !IO),
-
-            ModuleDepMap0 = !.Info ^ mki_module_dependencies,
-            % XXX Could this be map.det_update?
-            map.set(ModuleName, no_module_dep_info,
-                ModuleDepMap0, ModuleDepMap),
-            !Info ^ mki_module_dependencies := ModuleDepMap
-        ;
-            FatalReadError = no,
-            parse_tree_src_to_burdened_aug_comp_unit_list(Globals,
-                SourceFileName, ParseTreeSrc, ReadModuleErrors, Specs0, Specs,
-                BurdenedAugCompUnitList),
-            ParseTreeModuleSrcs = list.map(
-                ( func(burdened_aug_comp_unit(_, ACU)) = PTMS :-
-                    PTMS = ACU ^ acu_module_src
-                ), BurdenedAugCompUnitList),
-            SubModuleNames = list.map(parse_tree_module_src_project_name,
-                 ParseTreeModuleSrcs),
-
-            io.set_output_stream(ErrorStream, _, !IO),
-            % XXX Why are we ignoring all previously reported errors?
-            io.set_exit_status(0, !IO),
-            write_error_specs(Globals, Specs, !IO),
-            io.set_output_stream(OldOutputStream, _, !IO),
-
-            list.foldl(make_info_add_module_and_imports_as_dep,
-                BurdenedAugCompUnitList, !Info),
-
-            % If there were no errors, write out the `.int3' file
-            % while we have the contents of the module. The `int3' file
-            % does not depend on anything else.
-            globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
-            ( if set.is_empty(ReadModuleErrors) then
-                Target = target_file(ModuleName, module_target_int3),
-                maybe_make_target_message_to_stream(Globals, OldOutputStream,
-                    Target, !IO),
-                setup_checking_for_interrupt(CookieMSI, !IO),
-
-                DetectedGradeFlags = !.Info ^ mki_detected_grade_flags,
-                OptionVariables = !.Info ^ mki_options_variables,
-                OptionArgs = !.Info ^ mki_option_args,
-                ExtraOptions = ["--make-short-interface"],
-                setup_for_build_with_module_options(invoked_by_mmc_make,
-                    ModuleName, DetectedGradeFlags, OptionVariables,
-                    OptionArgs, ExtraOptions, MayBuild, !IO),
-                (
-                    MayBuild = may_not_build(MSISpecs),
-                    write_error_specs(ErrorStream, Globals,
-                        MSISpecs, !IO),
-                    Succeeded0 = did_not_succeed
-                ;
-                    MayBuild = may_build(_AllOptions, BuildGlobals),
-                    % Printing progress to the current output stream
-                    % preserves old behavior.
-                    % XXX Our caller should pass us ProgressStream.
-                    io.output_stream(ProgressStream, !IO),
-                    make_int3_files(ProgressStream, ErrorStream, BuildGlobals,
-                        ParseTreeModuleSrcs, Succeeded0, !Info, !IO)
-                ),
-
-                CleanupMSI = cleanup_int3_files(Globals, SubModuleNames),
-                teardown_checking_for_interrupt(VeryVerbose, CookieMSI,
-                    CleanupMSI, Succeeded0, Succeeded, !Info, !IO)
+                make_module_dependencies_fatal_error(Globals,
+                    OldOutputStream, ErrorStream, SourceFileName, ModuleName,
+                    ReadModuleErrors, DisplayErrorReadingFile, !Info, !IO)
+            else if set.contains(NonFatal, rme_unexpected_module_name) then
+                % If the source file does not contain the expected module, then
+                % do not make the .module_dep file; it would leave a
+                % .module_dep file for the wrong module lying around,
+                % which the user needs to delete manually.
+                DisplayErrorReadingFile = no,
+                make_module_dependencies_fatal_error(Globals,
+                    OldOutputStream, ErrorStream, SourceFileName, ModuleName,
+                    ReadModuleErrors, DisplayErrorReadingFile, !Info, !IO)
             else
-                Succeeded = did_not_succeed
-            ),
-
-            setup_checking_for_interrupt(CookieWMDF, !IO),
-            list.foldl(do_write_module_dep_file(Globals),
-                BurdenedAugCompUnitList, !IO),
-            CleanupWMDF = cleanup_module_dep_files(Globals, SubModuleNames),
-            teardown_checking_for_interrupt(VeryVerbose, CookieWMDF,
-                CleanupWMDF, succeeded, _Succeeded, !Info, !IO),
-
-            MadeTarget = target_file(ModuleName, module_target_int3),
-            record_made_target(Globals, MadeTarget,
-                process_module(task_make_int3), Succeeded, !Info, !IO),
-            unredirect_output(Globals, ModuleName, ErrorStream, !Info, !IO)
+                make_module_dependencies_no_fatal_error(Globals,
+                    OldOutputStream, ErrorStream, SourceFileName, ModuleName,
+                    ParseTreeSrc, ReadModuleErrors, !Info, !IO)
+            )
+        ;
+            HaveReadSrc = have_not_read_module(SourceFileName,
+                ReadModuleErrors),
+            DisplayErrorReadingFile = yes,
+            make_module_dependencies_fatal_error(Globals,
+                OldOutputStream, ErrorStream, SourceFileName, ModuleName,
+                ReadModuleErrors, DisplayErrorReadingFile, !Info, !IO)
         )
     ;
         MaybeErrorStream = no
     ).
 
-:- pred make_info_add_module_and_imports_as_dep(burdened_aug_comp_unit::in,
+:- pred make_module_dependencies_fatal_error(globals::in,
+    io.text_output_stream::in, io.text_output_stream::in,
+    file_name::in, module_name::in, read_module_errors::in, bool::in,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+make_module_dependencies_fatal_error(Globals, OldOutputStream, ErrorStream,
+        SourceFileName, ModuleName, ReadModuleErrors, DisplayErrorReadingFile,
+        !Info, !IO) :-
+    Specs0 = get_read_module_specs(ReadModuleErrors),
+    write_error_specs(ErrorStream, Globals, Specs0, !IO),
+    io.set_output_stream(OldOutputStream, _, !IO),
+    (
+        DisplayErrorReadingFile = yes,
+        io.format("** Error reading file `%s' to generate dependencies.\n",
+            [s(SourceFileName)], !IO),
+        maybe_write_importing_module(ModuleName,
+            !.Info ^ mki_importing_module, !IO)
+    ;
+        DisplayErrorReadingFile = no
+    ),
+
+    % Display the contents of the `.err' file, then remove it
+    % so we don't leave `.err' files lying around for nonexistent modules.
+    globals.set_option(output_compile_error_lines, int(10000),
+        Globals, UnredirectGlobals),
+    unredirect_output(UnredirectGlobals, ModuleName, ErrorStream, !Info, !IO),
+    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
+        ext_other(other_ext(".err")), ModuleName, ErrFileName, !IO),
+    io.file.remove_file(ErrFileName, _, !IO),
+
+    ModuleDepMap0 = !.Info ^ mki_module_dependencies,
+    % XXX Could this be map.det_update?
+    map.set(ModuleName, no_module_dep_info, ModuleDepMap0, ModuleDepMap),
+    !Info ^ mki_module_dependencies := ModuleDepMap.
+
+:- pred make_module_dependencies_no_fatal_error(globals::in,
+    io.text_output_stream::in, io.text_output_stream::in,
+    file_name::in, module_name::in, parse_tree_src::in,
+    read_module_errors::in,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+make_module_dependencies_no_fatal_error(Globals, OldOutputStream, ErrorStream,
+        SourceFileName, ModuleName, ParseTreeSrc, ReadModuleErrors,
+        !Info, !IO) :-
+    parse_tree_src_to_burdened_module_list(Globals, SourceFileName,
+        ParseTreeSrc, ReadModuleErrors, Specs, BurdenedModules),
+    ParseTreeModuleSrcs = list.map((func(burdened_module(_, PTMS)) = PTMS),
+        BurdenedModules),
+    SubModuleNames = list.map(parse_tree_module_src_project_name,
+         ParseTreeModuleSrcs),
+
+    % io.set_output_stream(ErrorStream, _, !IO),
+    % XXX Why are we ignoring all previously reported errors?
+    io.set_exit_status(0, !IO),
+    write_error_specs(ErrorStream, Globals, Specs, !IO),
+    % XXX Now that we pass ErrorStream to write_error_specs instead of
+    % setting the output stream to ErrorStream, this may now be redundant.
+    io.set_output_stream(OldOutputStream, _, !IO),
+
+    list.foldl(make_info_add_module_and_imports_as_dep,
+        BurdenedModules, !Info),
+
+    % If there were no errors, write out the `.int3' file
+    % while we have the contents of the module. The `int3' file
+    % does not depend on anything else.
+    globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
+    % We already know FatalReadError is empty.
+    NonFatalErrors = ReadModuleErrors ^ rm_nonfatal_errors,
+    ( if set.is_empty(NonFatalErrors) then
+        Target = target_file(ModuleName, module_target_int3),
+        maybe_make_target_message_to_stream(Globals, OldOutputStream,
+            Target, !IO),
+        setup_checking_for_interrupt(CookieMSI, !IO),
+
+        DetectedGradeFlags = !.Info ^ mki_detected_grade_flags,
+        OptionVariables = !.Info ^ mki_options_variables,
+        OptionArgs = !.Info ^ mki_option_args,
+        ExtraOptions = ["--make-short-interface"],
+        setup_for_build_with_module_options(invoked_by_mmc_make,
+            ModuleName, DetectedGradeFlags, OptionVariables,
+            OptionArgs, ExtraOptions, MayBuild, !IO),
+        (
+            MayBuild = may_not_build(MSISpecs),
+            write_error_specs(ErrorStream, Globals, MSISpecs, !IO),
+            Succeeded0 = did_not_succeed
+        ;
+            MayBuild = may_build(_AllOptions, BuildGlobals),
+            % Printing progress to the current output stream
+            % preserves old behavior.
+            % XXX Our caller should pass us ProgressStream.
+            io.output_stream(ProgressStream, !IO),
+            make_int3_files(ProgressStream, ErrorStream, BuildGlobals,
+                ParseTreeModuleSrcs, Succeeded0, !Info, !IO)
+        ),
+
+        CleanupMSI = cleanup_int3_files(Globals, SubModuleNames),
+        teardown_checking_for_interrupt(VeryVerbose, CookieMSI,
+            CleanupMSI, Succeeded0, Succeeded, !Info, !IO)
+    else
+        Succeeded = did_not_succeed
+    ),
+
+    setup_checking_for_interrupt(CookieWMDF, !IO),
+    list.foldl(do_write_module_dep_file(Globals), BurdenedModules, !IO),
+    CleanupWMDF = cleanup_module_dep_files(Globals, SubModuleNames),
+    teardown_checking_for_interrupt(VeryVerbose, CookieWMDF,
+        CleanupWMDF, succeeded, _Succeeded, !Info, !IO),
+
+    MadeTarget = target_file(ModuleName, module_target_int3),
+    record_made_target(Globals, MadeTarget,
+        process_module(task_make_int3), Succeeded, !Info, !IO),
+    unredirect_output(Globals, ModuleName, ErrorStream, !Info, !IO).
+
+:- pred make_info_add_module_and_imports_as_dep(burdened_module::in,
     make_info::in, make_info::out) is det.
 
-make_info_add_module_and_imports_as_dep(BurdenedAugCompUnit, !Info) :-
-    AugCompUnit = BurdenedAugCompUnit ^ bacu_acu,
-    ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
+make_info_add_module_and_imports_as_dep(BurdenedModule, !Info) :-
+    ParseTreeModuleSrc = BurdenedModule ^ bm_module,
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
-    ModuleDepInfo = module_dep_info_imports(BurdenedAugCompUnit),
+    ModuleDepInfo = module_dep_info_full(BurdenedModule),
     MaybeModuleDepInfo = some_module_dep_info(ModuleDepInfo),
     ModuleDeps0 = !.Info ^ mki_module_dependencies,
     % XXX Could this be map.det_insert?

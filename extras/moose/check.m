@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1998-2000, 2003, 2006, 2011 The University of Melbourne.
+% Copyright (C) 2014, 2016, 2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury Distribution.
 %---------------------------------------------------------------------------%
@@ -30,13 +31,12 @@
 
 :- import_module io.
 :- import_module list.
-:- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 
 :- type error
-    --->    error(list(string), context).
+    --->    error(list(string), term_context).
 
 :- pred check_rule_decls(list(rule_decl)::in,
     rule_decls::out, list(check.error)::out) is det.
@@ -63,6 +63,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module solutions.
+:- import_module string.
 
 %---------------------------------------------------------------------------%
 
@@ -327,7 +328,7 @@ id(start, _, _) :-
 %---------------------------------------------------------------------------%
 
 write_error(error(MsgLines, Context), !IO) :-
-    Context = term.context(File, Line),
+    Context = context(File, Line),
     string.format("%s:%d: ", [s(File), i(Line)], ContextMsg),
     io.stderr_stream(StdErr, !IO),
     WriteContextAndMsg =

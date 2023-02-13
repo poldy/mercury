@@ -27,101 +27,126 @@
 :- import_module hlds.hlds_pred.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 
 %-----------------------------------------------------------------------------%
 
     % Return a short, less than one line description of the given goal,
-    % given the ModuleInfo and the varset of the procedure the goal is from.
+    % given the ModuleInfo and the var_table of the procedure the goal is from.
     %
-:- func describe_goal(module_info, prog_varset, hlds_goal) = string.
+:- func describe_goal(module_info, var_table, hlds_goal) = string.
 
     % If the list is empty, return the empty string; if the list contains
     % some variables, return the descriptions of those variables between
-    % parentheses. The varset should be the varset of the procedure the
+    % parentheses. The var_table should be the var_table of the procedure the
     % arguments are from.
     %
-:- func describe_args(prog_varset, list(prog_var)) = string.
+:- func describe_args(var_table, list(prog_var)) = string.
 
-    % Return a description of the given variable, given the varset of the
+    % Return a description of the given variable, given the var_table of the
     % procedure it is from.
     %
-:- func describe_var(prog_varset, prog_var) = string.
+:- func describe_var(var_table, prog_var) = string.
+
+    % This type is isomorphic to should_module_qualify in hlds_error_util.m,
+    % but we want to allow that module and this one to be used independently
+    % of each other.
+:- type include_module_name
+    --->    do_not_include_module_name
+    ;       include_module_name.
+
+    % Return a description of the given predicate.
+    %
+:- func describe_pred_from_id(include_module_name, module_info, pred_id)
+    = string.
+:- func describe_pred(include_module_name, pred_info) = string.
 
     % Return a description of the given procedure of the given predicate.
     %
-:- func describe_proc_from_id(module_info, pred_proc_id) = string.
-:- func describe_proc(pred_info, proc_id) = string.
+:- func describe_proc_from_id(include_module_name, module_info, pred_proc_id)
+    = string.
+:- func describe_proc(include_module_name, pred_info, proc_id) = string.
 
 %-----------------------------------------------------------------------------%
 
 :- implementation.
 
+:- import_module hlds.pred_name.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_out.
-:- import_module parse_tree.prog_util.
 
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
-describe_goal(ModuleInfo, VarSet, Goal) = FullDesc :-
+describe_goal(ModuleInfo, VarTable, Goal) = FullDesc :-
     Goal = hlds_goal(GoalExpr, GoalInfo),
     (
         GoalExpr = unify(_, _, _, Unification, _),
         (
-            Unification = construct(Var, ConsId, Args, _, _, _, _),
-            Desc = describe_var(VarSet, Var) ++ " <= " ++
-                cons_id_and_arity_to_string(ConsId) ++
-                describe_args(VarSet, Args)
+            (
+                Unification = construct(Var, ConsId, Args, _, _, _, _),
+                OpStr = "<="
+            ;
+                Unification = deconstruct(Var, ConsId, Args, _, _, _),
+                OpStr = "=>"
+            ),
+            VarStr = describe_var(VarTable, Var),
+            ConsIdStr = cons_id_and_arity_to_string(ConsId),
+            ArgsStr = describe_args(VarTable, Args),
+            string.format("%s %s %s%s",
+                [s(VarStr), s(OpStr), s(ConsIdStr), s(ArgsStr)], Desc)
         ;
-            Unification = deconstruct(Var, ConsId, Args, _, _, _),
-            Desc = describe_var(VarSet, Var) ++ " => " ++
-                cons_id_and_arity_to_string(ConsId) ++
-                describe_args(VarSet, Args)
-        ;
-            Unification = assign(ToVar, FromVar),
-            Desc = describe_var(VarSet, ToVar) ++
-                " := " ++ describe_var(VarSet, FromVar)
-        ;
-            Unification = simple_test(VarA, VarB),
-            Desc = describe_var(VarSet, VarA) ++
-                " == " ++ describe_var(VarSet, VarB)
+            (
+                Unification = assign(VarA, VarB),
+                OpStr = ":="
+            ;
+                Unification = simple_test(VarA, VarB),
+                OpStr = "-="
+            ),
+            string.format("%s %s %s",
+                [s(describe_var(VarTable, VarA)), s(OpStr),
+                s(describe_var(VarTable, VarB))], Desc)
         ;
             Unification = complicated_unify(_, _, _),
             Desc = "complicated unify"
         )
     ;
         GoalExpr = plain_call(_, _, Args, _, _, SymName),
-        Desc = sym_name_to_string(SymName) ++ describe_args(VarSet, Args)
+        Desc = sym_name_to_string(SymName) ++ describe_args(VarTable, Args)
     ;
         GoalExpr = generic_call(GCall, Args, _, _, _),
+        ArgsStr = describe_args(VarTable, Args),
         (
             GCall = higher_order(Var, _, _, _),
-            Desc = describe_var(VarSet, Var) ++ describe_args(VarSet, Args)
+            string.format("%s%s",
+                [s(describe_var(VarTable, Var)), s(ArgsStr)], Desc)
         ;
-            GCall = class_method(Var, _, _, Method),
-            Desc = pf_sym_name_orig_arity_to_string(Method) ++
-                "[" ++ describe_var(VarSet, Var) ++ "]" ++
-                describe_args(VarSet, Args)
+            GCall = class_method(Var, _, _, MethodSNA),
+            string.format("%s[%s]%s",
+                [s(pf_sym_name_pred_form_arity_to_string(MethodSNA)),
+                s(describe_var(VarTable, Var)), s(ArgsStr)], Desc)
         ;
-            GCall = event_call(Event),
-            Desc = "event " ++ Event ++ describe_args(VarSet, Args)
+            GCall = event_call(EventName),
+            string.format("%s %s", [s(EventName), s(ArgsStr)], Desc)
         ;
             GCall = cast(CastType),
-            Desc = describe_cast(CastType) ++ " " ++
-                describe_args(VarSet, Args)
+            string.format("%s %s",
+                [s(describe_cast(CastType)), s(ArgsStr)], Desc)
         )
     ;
         GoalExpr = call_foreign_proc(_, PredId, _, Args, ExtraArgs, _, _),
         module_info_pred_info(ModuleInfo, PredId, PredInfo),
         Name = pred_info_name(PredInfo),
-        Desc = "foreign " ++ Name ++
-            describe_args(VarSet, list.map(foreign_arg_var, Args)) ++
-            describe_args(VarSet, list.map(foreign_arg_var, ExtraArgs))
+        ArgVars = list.map(foreign_arg_var, Args),
+        ExtraVars = list.map(foreign_arg_var, ExtraArgs),
+        string.format("foreign %s%s%s",
+            [s(Name), s(describe_args(VarTable, ArgVars)),
+            s(describe_args(VarTable, ExtraVars))], Desc)
     ;
         GoalExpr = conj(_, _),
         Desc = "conj"
@@ -130,7 +155,7 @@ describe_goal(ModuleInfo, VarSet, Goal) = FullDesc :-
         Desc = "disj"
     ;
         GoalExpr = switch(Var, _, _),
-        Desc = "switch on " ++ describe_var(VarSet, Var)
+        Desc = "switch on " ++ describe_var(VarTable, Var)
     ;
         GoalExpr = negation(_),
         Desc = "negation"
@@ -181,62 +206,8 @@ describe_goal(ModuleInfo, VarSet, Goal) = FullDesc :-
         Desc = "shorthand"
     ),
     Context = goal_info_get_context(GoalInfo),
-    Line = term.context_line(Context),
+    Line = term_context.context_line(Context),
     FullDesc = Desc ++ "@" ++ int_to_string(Line).
-
-%---------------------------------------------------------------------------%
-
-describe_args(_, []) = "".
-describe_args(VarSet, [HeadVar | TailVars]) =
-    "(" ++
-    describe_var(VarSet, HeadVar) ++
-    string.append_list(list.map(describe_comma_var(VarSet), TailVars)) ++
-    ")".
-
-:- func describe_comma_var(prog_varset, prog_var) = string.
-
-describe_comma_var(VarSet, Var) =
-    ", " ++ mercury_var_to_string(VarSet, print_name_and_num, Var).
-
-%---------------------------------------------------------------------------%
-
-describe_var(VarSet, Var) =
-    mercury_var_to_string(VarSet, print_name_and_num, Var).
-
-%---------------------------------------------------------------------------%
-
-describe_proc_from_id(ModuleInfo, PredProcId) = ProcDesc :-
-    PredProcId = proc(PredId, ProcId),
-    module_info_pred_info(ModuleInfo, PredId, PredInfo),
-    ProcDesc = describe_proc(PredInfo, ProcId).
-
-describe_proc(PredInfo, ProcId) = ProcDesc :-
-    PredOrFunc = pred_info_is_pred_or_func(PredInfo),
-    ModuleName = pred_info_module(PredInfo),
-    PredName = pred_info_name(PredInfo),
-    Arity0 = pred_info_orig_arity(PredInfo),
-    adjust_func_arity(PredOrFunc, Arity, Arity0),
-    pred_info_get_origin(PredInfo, Origin),
-    ( if Origin = origin_special_pred(SpecialId, TypeCtor) then
-        FullPredName = string.format("%s_for_%s",
-            [s(get_special_pred_id_generic_name(SpecialId)),
-            s(arg_type_ctor_name_to_string(TypeCtor))])
-    else
-        FullPredName = PredName
-    ),
-    ProcDesc = string.format("%s %s.%s/%d-%d",
-        [s(pred_or_func_to_str(PredOrFunc)),
-        s(sym_name_to_string(ModuleName)),
-        s(FullPredName), i(Arity), i(proc_id_to_int(ProcId))]).
-
-:- func arg_type_ctor_name_to_string(type_ctor) = string.
-
-arg_type_ctor_name_to_string(TypeCtor) = TypeCtorStr :-
-    TypeCtor = type_ctor(TypeCtorSymName, TypeCtorArity),
-    TypeCtorStr = string.format("%s_%d",
-        [s(sym_name_to_string(TypeCtorSymName)), i(TypeCtorArity)]).
-
-%---------------------------------------------------------------------------%
 
 :- func describe_cast(cast_kind) = string.
 
@@ -252,6 +223,69 @@ describe_cast(CastType) = Desc :-
         CastType = subtype_coerce,
         Desc = "coerce"
     ).
+
+%---------------------------------------------------------------------------%
+
+describe_args(_, []) = "".
+describe_args(VarTable, Vars @ [_ | _]) = Str :-
+    VarStrs = list.map(describe_var(VarTable), Vars),
+    VarsStr = string.join_list(", ", VarStrs),
+    string.format("(%s)", [s(VarsStr)], Str).
+
+%---------------------------------------------------------------------------%
+
+describe_var(VarTable, Var) =
+    mercury_var_to_string(VarTable, print_name_and_num, Var).
+
+%---------------------------------------------------------------------------%
+
+describe_pred_from_id(IncludeModuleName, ModuleInfo, PredId) = PredDesc :-
+    module_info_pred_info(ModuleInfo, PredId, PredInfo),
+    PredDesc = describe_pred(IncludeModuleName, PredInfo).
+
+describe_pred(IncludeModuleName, PredInfo) = ProcDesc :-
+    % XXX This function should subcontract its work to pred_name.m.
+    PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+    PredName = pred_info_name(PredInfo),
+    user_arity(Arity) = pred_info_user_arity(PredInfo),
+    pred_info_get_origin(PredInfo, Origin),
+    ( if Origin = origin_compiler(made_for_uci(SpecialId, TypeCtor)) then
+        FullPredName = string.format("%s_for_%s",
+            [s(get_special_pred_id_generic_name(SpecialId)),
+            s(arg_type_ctor_name_to_string(TypeCtor))])
+    else
+        FullPredName = PredName
+    ),
+    (
+        IncludeModuleName = do_not_include_module_name,
+        ProcDesc = string.format("%s %s/%d",
+            [s(pred_or_func_to_str(PredOrFunc)), s(FullPredName), i(Arity)])
+    ;
+        IncludeModuleName = include_module_name,
+        ModuleName = pred_info_module(PredInfo),
+        ProcDesc = string.format("%s %s.%s/%d",
+            [s(pred_or_func_to_str(PredOrFunc)),
+            s(sym_name_to_string(ModuleName)), s(FullPredName), i(Arity)])
+    ).
+
+:- func arg_type_ctor_name_to_string(type_ctor) = string.
+
+arg_type_ctor_name_to_string(TypeCtor) = TypeCtorStr :-
+    TypeCtor = type_ctor(TypeCtorSymName, TypeCtorArity),
+    TypeCtorStr = string.format("%s_%d",
+        [s(sym_name_to_string(TypeCtorSymName)), i(TypeCtorArity)]).
+
+%---------------------------------------------------------------------------%
+
+describe_proc_from_id(IncludeModuleName, ModuleInfo, PredProcId) = ProcDesc :-
+    PredProcId = proc(PredId, ProcId),
+    module_info_pred_info(ModuleInfo, PredId, PredInfo),
+    ProcDesc = describe_proc(IncludeModuleName, PredInfo, ProcId).
+
+describe_proc(IncludeModuleName, PredInfo, ProcId) = ProcDesc :-
+    PredDesc = describe_pred(IncludeModuleName, PredInfo),
+    ProcDesc = string.format("%s-%d",
+        [s(PredDesc), i(proc_id_to_int(ProcId))]).
 
 %---------------------------------------------------------------------------%
 :- end_module hlds.hlds_desc.

@@ -44,7 +44,6 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.builtin_lib_types.
@@ -52,6 +51,7 @@
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_type_subst.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module int.
 :- import_module map.
@@ -86,9 +86,9 @@ modecheck_coerce(Args0, Args, Modes0, Modes, Det, ExtraGoals, !ModeInfo) :-
         mode_info_get_module_info(!.ModeInfo, ModuleInfo0),
         mode_info_get_instmap(!.ModeInfo, InstMap),
         ( if instmap_is_reachable(InstMap) then
-            mode_info_get_var_types(!.ModeInfo, VarTypes),
-            lookup_var_type(VarTypes, X, TypeX),
-            lookup_var_type(VarTypes, Y, TypeY),
+            mode_info_get_var_table(!.ModeInfo, VarTable),
+            lookup_var_type(VarTable, X, TypeX),
+            lookup_var_type(VarTable, Y, TypeY),
             instmap_lookup_var(InstMap, X, InstX),
             instmap_lookup_var(InstMap, Y, InstY),
             ( if
@@ -192,12 +192,12 @@ modecheck_coerce_vars(ModuleInfo0, X, Y, TypeX, TypeY, InstX, InstY, Res,
     mode_info::in, mode_info::out) is det.
 
 create_fresh_var(VarType, Var, !ModeInfo) :-
-    mode_info_get_var_types(!.ModeInfo, VarTypes0),
-    mode_info_get_varset(!.ModeInfo, VarSet0),
-    varset.new_var(Var, VarSet0, VarSet),
-    add_var_type(Var, VarType, VarTypes0, VarTypes),
-    mode_info_set_varset(VarSet, !ModeInfo),
-    mode_info_set_var_types(VarTypes, !ModeInfo).
+    mode_info_get_module_info(!.ModeInfo, ModuleInfo),
+    VarIsDummy = is_type_a_dummy(ModuleInfo, VarType),
+    VarEntry = vte("", VarType, VarIsDummy),
+    mode_info_get_var_table(!.ModeInfo, VarTable0),
+    add_var_entry(VarEntry, Var, VarTable0, VarTable),
+    mode_info_set_var_table(VarTable, !ModeInfo).
 
 %---------------------------------------------------------------------------%
 
@@ -283,7 +283,7 @@ modecheck_coerce_make_inst(ModuleInfo, TVarSet, LiveX, RevTermPath0,
             ( if is_user_inst(InstNameX) then
                 % If TypeX =< TypeY then an inst valid for TypeX must be
                 % valid for TypeY.
-                ( if check_is_subtype(ModuleInfo, TVarSet, TypeX, TypeY) then
+                ( if is_subtype(ModuleInfo, TVarSet, TypeX, TypeY) then
                     InstY = defined_inst(InstNameX),
                     Res = ok(InstY)
                 else
@@ -652,8 +652,8 @@ modecheck_coerce_from_bound_make_bound_functor_arg_insts(ModuleInfo, TVarSet,
             HeadArgInstX, MaybeHeadArgInstY),
         (
             MaybeHeadArgInstY = ok(HeadArgInstY),
-            modecheck_coerce_from_bound_make_bound_functor_arg_insts(ModuleInfo,
-                TVarSet, LiveX, RevTermPath0, ExpandedInsts0,
+            modecheck_coerce_from_bound_make_bound_functor_arg_insts(
+                ModuleInfo, TVarSet, LiveX, RevTermPath0, ExpandedInsts0,
                 ConsIdX, CurArgNum + 1,
                 TailArgTypesX, TailArgTypesY,
                 TailArgInstsX, MaybeTailArgInstsY),
@@ -720,7 +720,7 @@ modecheck_coerce_from_ground_make_inst(ModuleInfo, TVarSet, LiveX, UniqX,
         UniqY = uniqueness_for_coerce_result(LiveX, UniqX),
         InstY = ground(UniqY, none_or_default_func),
         MaybeInstY = ok(InstY)
-    else if check_is_subtype(ModuleInfo, TVarSet, TypeX, TypeY) then
+    else if is_subtype(ModuleInfo, TVarSet, TypeX, TypeY) then
         set.init(SeenTypes0),
         modecheck_coerce_from_ground_make_inst_for_subtype(ModuleInfo, TVarSet,
             LiveX, UniqX, SeenTypes0, TypeX, TypeY, InstY),
@@ -869,10 +869,10 @@ get_ctor_arg_types_do_subst(ModuleInfo, Type, ConsId, CtorArgTypes) :-
     --->    compare_equal
     ;       compare_equal_lt.
 
-:- pred check_is_subtype(module_info::in, tvarset::in,
+:- pred is_subtype(module_info::in, tvarset::in,
     mer_type::in, mer_type::in) is semidet.
 
-check_is_subtype(ModuleInfo, TVarSet, TypeA, TypeB) :-
+is_subtype(ModuleInfo, TVarSet, TypeA, TypeB) :-
     module_info_get_type_table(ModuleInfo, TypeTable),
     compare_types(TypeTable, TVarSet, compare_equal_lt, TypeA, TypeB).
 

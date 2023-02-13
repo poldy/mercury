@@ -28,10 +28,10 @@
 
 :- import_module backend_libs.
 :- import_module backend_libs.rtti.
-:- import_module mdbcomp.
-:- import_module mdbcomp.prim_data.
 :- import_module ll_backend.llds_out.
 :- import_module ll_backend.llds_out.llds_out_util.
+:- import_module mdbcomp.
+:- import_module mdbcomp.prim_data.
 
 :- import_module bool.
 :- import_module io.
@@ -178,7 +178,7 @@ classify_rtti_datas_to_decl([RttiData | RttiDatas], !GroupMap) :-
         rtti_id_c_type(RttiId, CType, IsArray),
         rtti_id_linkage(RttiId, Linkage),
         Group = data_group(CType, IsArray, Linkage),
-        multi_map.set(Group, RttiId, !GroupMap)
+        multi_map.add(Group, RttiId, !GroupMap)
     ),
     classify_rtti_datas_to_decl(RttiDatas, !GroupMap).
 
@@ -211,18 +211,13 @@ output_rtti_data_decl_chunk(Info, Stream, Group, RttiIds, !DeclSet, !IO) :-
         unexpected($pred, "empty list")
     ),
     Group = data_group(CType, IsArray, Linkage),
-
     io.nl(Stream, !IO),
     output_rtti_type_decl(Stream, RttiId, !DeclSet, !IO),
     Globals = Info ^ lout_globals,
     LinkageStr = c_data_linkage_string(Linkage, no),
     InclCodeAddr = rtti_id_would_include_code_addr(RttiId),
-
-    io.write_string(Stream, LinkageStr, !IO),
-    io.write_string(Stream, c_data_const_string(Globals, InclCodeAddr), !IO),
-    c_util.output_quoted_string(Stream, CType, !IO),
-    io.nl(Stream, !IO),
-
+    ConstStr = c_data_const_string(Globals, InclCodeAddr),
+    io.format(Stream, "%s%s%s\n", [s(LinkageStr), s(ConstStr), s(CType)], !IO),
     output_rtti_data_decl_chunk_entries(Stream, IsArray, RttiIds,
         !DeclSet, !IO).
 
@@ -363,12 +358,11 @@ output_type_class_decl_defn(Info, Stream, TCDecl, !DeclSet, !IO) :-
     list.length(MethodIds, NumMethodIds),
     output_generic_rtti_data_defn_start(Info, Stream, TCIdRttiId,
         !DeclSet, !IO),
-    io.write_string(Stream, " = {\n\t""", !IO),
-    c_util.output_quoted_string(Stream, sym_name_to_string(ModuleSymName),
-        !IO),
-    io.write_string(Stream, """,\n\t""", !IO),
-    c_util.output_quoted_string(Stream, ClassName, !IO),
-    io.write_string(Stream, """,\n\t", !IO),
+    io.write_string(Stream, " = {\n\t", !IO),
+    output_quoted_string_c(Stream, sym_name_to_string(ModuleSymName), !IO),
+    io.write_string(Stream, ",\n\t", !IO),
+    output_quoted_string_c(Stream, ClassName, !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     io.write_int(Stream, Arity, !IO),
     io.write_string(Stream, ",\n\t", !IO),
     io.write_int(Stream, NumTVarNames, !IO),
@@ -429,18 +423,18 @@ output_type_class_decl_defn(Info, Stream, TCDecl, !DeclSet, !IO) :-
     string::in, io::di, io::uo) is det.
 
 output_type_class_id_tvar_name(Stream, TVarName, !IO) :-
-    io.write_string(Stream, "\t""", !IO),
-    c_util.output_quoted_string(Stream, TVarName, !IO),
-    io.write_string(Stream, """,\n", !IO).
+    io.write_string(Stream, "\t", !IO),
+    output_quoted_string_c(Stream, TVarName, !IO),
+    io.write_string(Stream, ",\n", !IO).
 
 :- pred output_type_class_id_method_id(io.text_output_stream::in,
     tc_method_id::in, io::di, io::uo) is det.
 
 output_type_class_id_method_id(Stream, MethodId, !IO) :-
     MethodId = tc_method_id(MethodName, MethodArity, PredOrFunc),
-    io.write_string(Stream, "\t{ """, !IO),
-    c_util.output_quoted_string(Stream, MethodName, !IO),
-    io.write_string(Stream, """, ", !IO),
+    io.write_string(Stream, "\t{ ", !IO),
+    output_quoted_string_c(Stream, MethodName, !IO),
+    io.write_string(Stream, ", ", !IO),
     io.write_int(Stream, MethodArity, !IO),
     io.write_string(Stream, ", ", !IO),
     io.write_string(Stream, mr_pred_or_func_to_string(PredOrFunc), !IO),
@@ -590,14 +584,14 @@ output_type_class_constraint(Info, Stream, MakeRttiId, Constraint,
 output_maybe_pseudo_type_info_or_self_defn(Info, Stream, MaybePseudoTypeInfo,
         !DeclSet, !IO) :-
     (
-        MaybePseudoTypeInfo = plain(TypeInfo),
+        MaybePseudoTypeInfo = arg_plain(TypeInfo),
         output_type_info_defn(Info, Stream, TypeInfo, !DeclSet, !IO)
     ;
-        MaybePseudoTypeInfo = pseudo(PseudoTypeInfo),
+        MaybePseudoTypeInfo = arg_pseudo(PseudoTypeInfo),
         output_pseudo_type_info_defn(Info, Stream, PseudoTypeInfo,
             !DeclSet, !IO)
     ;
-        MaybePseudoTypeInfo = self
+        MaybePseudoTypeInfo = arg_self
     ).
 
 :- pred output_maybe_pseudo_type_info_defn(llds_out_info::in,
@@ -822,13 +816,13 @@ output_type_ctor_data_defn(Info, Stream, TypeCtorData, !DeclSet, !IO) :-
     io.write_string(Stream, ",\n\t", !IO),
     % MR_type_ctor_compare_pred
     output_static_code_addr(CompareCodeAddr, Stream, !IO),
-    io.write_string(Stream, ",\n\t""", !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_type_ctor_module_name
-    c_util.output_quoted_string(Stream, sym_name_to_string(Module), !IO),
-    io.write_string(Stream, """,\n\t""", !IO),
+    output_quoted_string_c(Stream, sym_name_to_string(Module), !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_type_ctor_name
-    c_util.output_quoted_string(Stream, TypeName, !IO),
-    io.write_string(Stream, """,\n\t", !IO),
+    output_quoted_string_c(Stream, TypeName, !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_type_ctor_functors
     (
         MaybeFunctorsName = yes(FunctorsName),
@@ -997,10 +991,10 @@ output_enum_functor_defn(Info, Stream, RttiTypeCtor, EnumFunctor,
     output_generic_rtti_data_defn_start(Info, Stream,
         ctor_rtti_id(RttiTypeCtor, type_ctor_enum_functor_desc(Ordinal)),
         !DeclSet, !IO),
-    io.write_string(Stream, " = {\n\t""", !IO),
+    io.write_string(Stream, " = {\n\t", !IO),
     % MR_enum_functor_name
-    c_util.output_quoted_string(Stream, FunctorName, !IO),
-    io.write_string(Stream, """,\n\t", !IO),
+    output_quoted_string_c(Stream, FunctorName, !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_enum_functor_value -- XXX MAKE_FIELD_UNSIGNED
     io.write_int32(Stream, int32.cast_from_uint32(Value), !IO),
     io.write_string(Stream, "\n};\n", !IO).
@@ -1016,10 +1010,10 @@ output_foreign_enum_functor_defn(Info, Stream, RttiTypeCtor,
     RttiId = ctor_rtti_id(RttiTypeCtor,
         type_ctor_foreign_enum_functor_desc(FunctorOrdinal)),
     output_generic_rtti_data_defn_start(Info, Stream, RttiId, !DeclSet, !IO),
-    io.write_string(Stream, " = {\n\t""", !IO),
+    io.write_string(Stream, " = {\n\t", !IO),
     % MR_foreign_enum_functor_name
-    c_util.output_quoted_string(Stream, FunctorName, !IO),
-    io.write_string(Stream, """,\n\t", !IO),
+    output_quoted_string_c(Stream, FunctorName, !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_foreign_enum_functor_ordinal -- XXX MAKE_FIELD_UNSIGNED
     io.write_int32(Stream, int32.cast_from_uint32(FunctorOrdinal), !IO),
     io.write_string(Stream, ",\n\t", !IO),
@@ -1042,10 +1036,10 @@ output_notag_functor_defn(Info, Stream, RttiTypeCtor, NotagFunctor,
     output_generic_rtti_data_defn_start(Info, Stream,
         ctor_rtti_id(RttiTypeCtor, type_ctor_notag_functor_desc),
         !DeclSet, !IO),
-    io.write_string(Stream, " = {\n\t""", !IO),
+    io.write_string(Stream, " = {\n\t", !IO),
     % MR_notag_functor_name
-    c_util.output_quoted_string(Stream, FunctorName, !IO),
-    io.write_string(Stream, """,\n\t", !IO),
+    output_quoted_string_c(Stream, FunctorName, !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_notag_functor_arg_type
     (
         ArgType = plain(ArgTypeInfo),
@@ -1071,8 +1065,9 @@ output_notag_functor_defn(Info, Stream, RttiTypeCtor, NotagFunctor,
     ),
     io.write_string(Stream, ",\n\t", !IO),
     % MR_notag_functor_subtype
-    io.write_string(Stream,
-        functor_subtype_info_to_string(FunctorSubtypeInfo), !IO),
+    functor_subtype_info_to_string(FunctorSubtypeInfo, _,
+        FunctorSubtypeInfoStr),
+    io.write_string(Stream, FunctorSubtypeInfoStr, !IO),
     io.write_string(Stream, "\n};\n", !IO).
 
 :- pred output_du_functor_defn(llds_out_info::in,
@@ -1111,10 +1106,10 @@ output_du_functor_defn(Info, Stream, RttiTypeCtor, DuFunctor, !DeclSet, !IO) :-
     output_generic_rtti_data_defn_start(Info, Stream,
         ctor_rtti_id(RttiTypeCtor, type_ctor_du_functor_desc(Ordinal)),
         !DeclSet, !IO),
-    io.write_string(Stream, " = {\n\t""", !IO),
+    io.write_string(Stream, " = {\n\t", !IO),
     % MR_du_functor_name
-    c_util.output_quoted_string(Stream, FunctorName, !IO),
-    io.write_string(Stream, """,\n\t", !IO),
+    output_quoted_string_c(Stream, FunctorName, !IO),
+    io.write_string(Stream, ",\n\t", !IO),
     % MR_du_functor_orig_arity -- XXX MAKE_FIELD_UNSIGNED
     io.write_int16(Stream, int16.cast_from_uint16(OrigArity), !IO),
     io.write_string(Stream, ",\n\t", !IO),
@@ -1213,23 +1208,13 @@ output_du_functor_defn(Info, Stream, RttiTypeCtor, DuFunctor, !DeclSet, !IO) :-
     ),
     io.write_string(Stream, ",\n\t", !IO),
     % MR_du_functor_subtype
-    io.write_string(Stream,
-        functor_subtype_info_to_string(FunctorSubtypeInfo), !IO),
+    functor_subtype_info_to_string(FunctorSubtypeInfo, _,
+        FunctorSubtypeInfoStr),
+    io.write_string(Stream, FunctorSubtypeInfoStr, !IO),
     io.write_string(Stream, ",\n\t", !IO),
     % MR_du_functor_num_sectag_bits
     io.write_uint8(Stream, NumSectagBits, !IO),
     io.write_string(Stream, "\n};\n", !IO).
-
-:- func functor_subtype_info_to_string(functor_subtype_info) = string.
-
-functor_subtype_info_to_string(FunctorSubtypeInfo) = Str :-
-    (
-        FunctorSubtypeInfo = functor_subtype_none,
-        Str = "MR_FUNCTOR_SUBTYPE_NONE"
-    ;
-        FunctorSubtypeInfo = functor_subtype_exists,
-        Str = "MR_FUNCTOR_SUBTYPE_EXISTS"
-    ).
 
 %-----------------------------------------------------------------------------%
 
@@ -1363,8 +1348,8 @@ output_du_arg_names(Info, Stream, RttiTypeCtor, Ordinal, MaybeNames,
     rtti_type_ctor::in, uint32::in, list(du_arg_info)::in, bool::out,
     decl_set::in, decl_set::out, io::di, io::uo) is det.
 
-output_du_arg_locns(Info, Stream, RttiTypeCtor, Ordinal, ArgInfos, HaveArgLocns,
-        !DeclSet, !IO) :-
+output_du_arg_locns(Info, Stream, RttiTypeCtor, Ordinal, ArgInfos,
+        HaveArgLocns, !DeclSet, !IO) :-
     ( if
         some [ArgInfo] (
             list.member(ArgInfo, ArgInfos),
@@ -1499,7 +1484,8 @@ output_enum_name_ordered_table(Info, Stream, RttiTypeCtor, FunctorMap,
         ctor_rtti_id(RttiTypeCtor, type_ctor_enum_name_ordered_table),
         !DeclSet, !IO),
     io.write_string(Stream, " = {\n", !IO),
-    output_addr_of_ctor_rtti_names(RttiTypeCtor, FunctorRttiNames, Stream, !IO),
+    output_addr_of_ctor_rtti_names(RttiTypeCtor, FunctorRttiNames,
+        Stream, !IO),
     io.write_string(Stream, "};\n", !IO).
 
 :- pred output_foreign_enum_ordinal_ordered_table(llds_out_info::in,
@@ -1933,9 +1919,7 @@ output_ctor_rtti_id(Stream, RttiTypeCtor, RttiName, !IO) :-
 output_maybe_quoted_string(MaybeName, Stream, !IO) :-
     (
         MaybeName = yes(Name),
-        io.write_string(Stream, """", !IO),
-        c_util.output_quoted_string(Stream, Name, !IO),
-        io.write_string(Stream, """", !IO)
+        output_quoted_string_c(Stream, Name, !IO)
     ;
         MaybeName = no,
         io.write_string(Stream, "NULL", !IO)
@@ -2026,15 +2010,11 @@ output_rtti_id_storage_type_name(Info, Stream, RttiId, BeingDefined,
     output_rtti_type_decl(Stream, RttiId, !DeclSet, !IO),
     rtti_id_linkage(RttiId, Linkage),
     LinkageStr = c_data_linkage_string(Linkage, BeingDefined),
-    io.write_string(Stream, LinkageStr, !IO),
-
     Globals = Info ^ lout_globals,
     InclCodeAddr = rtti_id_would_include_code_addr(RttiId),
-    io.write_string(Stream, c_data_const_string(Globals, InclCodeAddr), !IO),
-
+    ConstStr = c_data_const_string(Globals, InclCodeAddr),
     rtti_id_c_type(RttiId, CType, IsArray),
-    c_util.output_quoted_string(Stream, CType, !IO),
-    io.write_string(Stream, " ", !IO),
+    io.format(Stream, "%s%s%s ", [s(LinkageStr), s(ConstStr), s(CType)], !IO),
     output_rtti_id(Stream, RttiId, !IO),
     (
         IsArray = is_array,
@@ -2057,17 +2037,16 @@ output_rtti_type_decl(Stream, RttiId, !DeclSet, !IO) :-
         Arity > max_always_declared_arity_type_ctor
     then
         DeclId = decl_type_info_like_struct(Arity),
-        ( if decl_set_is_member(DeclId, !.DeclSet) then
-            true
-        else
+        ( if decl_set_insert_new(DeclId, !DeclSet) then
             Template =
 "#ifndef MR_TYPE_INFO_LIKE_STRUCTS_FOR_ARITY_%d_GUARD
 #define MR_TYPE_INFO_LIKE_STRUCTS_FOR_ARITY_%d_GUARD
 MR_DECLARE_ALL_TYPE_INFO_LIKE_STRUCTS_FOR_ARITY(%d);
 #endif
 ",
-            io.format(Stream, Template, [i(Arity), i(Arity), i(Arity)], !IO),
-            decl_set_insert(DeclId, !DeclSet)
+            io.format(Stream, Template, [i(Arity), i(Arity), i(Arity)], !IO)
+        else
+            true
         )
     else if
         RttiId = tc_rtti_id(_, TCRttiName),
@@ -2075,9 +2054,7 @@ MR_DECLARE_ALL_TYPE_INFO_LIKE_STRUCTS_FOR_ARITY(%d);
         Arity > max_always_declared_arity_type_class_constraint
     then
         DeclId = decl_typeclass_constraint_struct(Arity),
-        ( if decl_set_is_member(DeclId, !.DeclSet) then
-            true
-        else
+        ( if decl_set_insert_new(DeclId, !DeclSet) then
             Template =
 "#ifndef MR_TYPECLASS_CONSTRAINT_STRUCT_%d_GUARD
 #define MR_TYPECLASS_CONSTRAINT_STRUCT_%d_GUARD
@@ -2085,8 +2062,9 @@ MR_DEFINE_TYPECLASS_CONSTRAINT_STRUCT(MR_TypeClassConstraint_%d, %d);
 #endif
 ",
             io.format(Stream, Template,
-                [i(Arity), i(Arity), i(Arity), i(Arity)], !IO),
-            decl_set_insert(DeclId, !DeclSet)
+                [i(Arity), i(Arity), i(Arity), i(Arity)], !IO)
+        else
+            true
         )
     else
         true

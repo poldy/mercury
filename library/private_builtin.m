@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-2007, 2012 The University of Melbourne.
-% Copyright (C) 2013-2018 The Mercury team.
+% Copyright (C) 2013-2018, 2020-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -10,7 +10,7 @@
 % Main authors: fjh, zs.
 % Stability: medium.
 %
-% This file is automatically imported, as if via `use_module', into every
+% This file is automatically imported, as if via ":- use_module", into every
 % module. It is intended for builtins that are just implementation details,
 % such as procedures that the compiler generates implicit calls to when
 % implementing polymorphism, unification, compare/3, etc.
@@ -1350,7 +1350,7 @@ __Compare____base_typeclass_info_1_0(
 
 %---------------------------------------------------------------------------%
 
-% Code to define the `heap_pointer' and `ref' types for the .NET back-end.
+% Code to define the heap_pointer and ref types for the .NET back-end.
 % (For the C back-ends, they're defined in runtime/mercury_builtin_types.[ch].)
 
 :- pragma foreign_code("C#", "

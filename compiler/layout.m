@@ -35,8 +35,8 @@
 :- interface.
 
 :- import_module hlds.
-:- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
+:- import_module hlds.pred_name.
 :- import_module libs.
 :- import_module libs.trace_params.
 :- import_module ll_backend.llds.
@@ -248,7 +248,7 @@
                 plet_eval_method            :: eval_method,
                 plet_maybe_call_table_slot  :: maybe(int),
                 plet_maybe_tail_rec_slot    :: maybe(int),
-                plet_eff_trace_level        :: trace_level,
+                plet_eff_trace_level        :: eff_trace_level,
                 plet_exec_trace_flags       :: int
             ).
 

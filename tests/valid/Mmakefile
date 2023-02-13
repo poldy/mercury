@@ -159,6 +159,7 @@ OTHER_PROGS = \
 	indexing \
 	inhibit_warn_test \
 	inlining_bug \
+	inst_for_char_type \
 	inst_perf_bug_1 \
 	inst_perf_bug_2 \
 	instmap_generic_failure \
@@ -286,8 +287,7 @@ LLDS_PROGS = \
 	liveness_disagree \
 	liveness_ite \
 	livevars_shallow \
-	livevars_shallow2 \
-	untuple_bug
+	livevars_shallow2
 
 TABLE_PROGS = \
 	bug36 \

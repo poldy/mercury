@@ -15,15 +15,18 @@
 :- module make.build.
 :- interface.
 
+% XXX The import of make.dependencies.m is for dependency_file.
+% It is an undesirable dependency.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.maybe_succeeded.
+:- import_module make.dependencies.
 :- import_module make.make_info.
 :- import_module make.options_file.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module io.
 :- import_module list.
@@ -103,44 +106,54 @@
     pred(globals, T, maybe_succeeded, Info, Info, IO, IO).
 :- inst foldl2_pred_with_status == (pred(in, in, out, in, out, di, uo) is det).
 
-    % foldl2_maybe_stop_at_error(KeepGoing, P, Globals, List, Succeeded,
+    % foldl2_make_module_targets(KeepGoing, ExtraOptions, Globals,
+    %   Targets, Succeeded, !Info, !IO).
+    %
+    % Invoke make_module_target, with any ExtraOptions, on each element of
+    % Targets, stopping at errors unless KeepGoing = do_keep_going.
+    %
+:- pred foldl2_make_module_targets(maybe_keep_going::in, list(string)::in,
+    globals::in, list(dependency_file)::in, maybe_succeeded::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+    % foldl2_install_library_grades(KeepGoing, LinkSucceeded, MainModuleName,
+    %   AllModules, Globals, LibGrades, Succeeded, !Info, !IO):
+    %
+    % Invoke install_library_grade(LinkSucceeded, MainModuleName, AllModules,
+    % ...) on each grade in LibGrades, stopping at errors unless KeepGoing =
+    % do_keep_going.
+    %
+:- pred foldl2_install_library_grades(maybe_keep_going::in,
+    maybe_succeeded::in, module_name::in, list(module_name)::in,
+    globals::in, list(string)::in, maybe_succeeded::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
+
+    % foldl2_make_top_targets(KeepGoing, Globals, TopTargets, Succeeded,
     %   !Info, !IO).
     %
-:- pred foldl2_maybe_stop_at_error(maybe_keep_going::in,
-    foldl2_pred_with_status(T, Info, IO)::in(foldl2_pred_with_status),
-    globals::in, list(T)::in, maybe_succeeded::out, Info::in, Info::out,
-    IO::di, IO::uo) is det.
-
-    % foldl3_pred_with_status(Globals, T, Succeeded, !Acc, !Info).
+    % Invoke make_top_target on each element of TopTargets, stopping at errors
+    % unless KeepGoing = do_keep_going.
     %
-:- type foldl3_pred_with_status(T, Acc, Info, IO) ==
-    pred(globals, T, maybe_succeeded, Acc, Acc, Info, Info, IO, IO).
-:- inst foldl3_pred_with_status ==
-    (pred(in, in, out, in, out, in, out, di, uo) is det).
-
-    % foldl3_maybe_stop_at_error(KeepGoing, P, Globals, List, Succeeded,
-    %   !Acc, !Info).
-    %
-:- pred foldl3_maybe_stop_at_error(maybe_keep_going::in,
-    foldl3_pred_with_status(T, Acc, Info, IO)::in(foldl3_pred_with_status),
-    globals::in, list(T)::in, maybe_succeeded::out, Acc::in, Acc::out,
-    Info::in, Info::out, IO::di, IO::uo) is det.
+:- pred foldl2_make_top_targets(maybe_keep_going::in,
+    globals::in, list(top_target_file)::in, maybe_succeeded::out,
+    make_info::in, make_info::out, io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
 
-    % foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing, P, Globals,
-    %   List, Succeeded, !Info, !IO).
+    % foldl2_make_module_targets_maybe_parallel(KeepGoing, ExtraOpts,
+    %   Globals, Targets, Succeeded, !Info, !IO):
     %
-    % Like foldl2_maybe_stop_at_error, but if parallel make is enabled,
-    % it tries to perform a first pass that overlaps execution of P(elem)
-    % in separate threads or processes. Updates to !Info in the first pass are
-    % ignored. If the first pass succeeds, a second sequential pass is made in
-    % which updates !Info are kept. Hence it must be safe to execute P(elem)
+    % Like foldl2_make_module_targets, but if parallel make is enabled,
+    % it tries to perform a first pass that overlaps execution of several
+    % invocations of make_module_targets in separate threads or processes.
+    % Updates to !Info in the first pass are ignored. If the first pass
+    % succeeds, a second sequential pass is made in which updates !Info
+    % are kept. Hence it must be safe to execute make_module_target
     % concurrently, in any order, and multiple times.
     %
-:- pred foldl2_maybe_stop_at_error_maybe_parallel(maybe_keep_going::in,
-    foldl2_pred_with_status(T, make_info, io)::in(foldl2_pred_with_status),
-    globals::in, list(T)::in, maybe_succeeded::out,
+:- pred foldl2_make_module_targets_maybe_parallel(maybe_keep_going::in,
+    list(string)::in,
+    globals::in, list(dependency_file)::in, maybe_succeeded::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
@@ -158,10 +171,16 @@
 
 :- implementation.
 
+% XXX The modules with the undesirable dependencies are imported because
+% they define actions that we fold over. The dependencies could be eliminated
+% by moving each fold predicate to its main (usually only) user module.
 :- import_module libs.file_util.
 :- import_module libs.handle_options.
 :- import_module libs.options.
 :- import_module libs.process_util.
+:- import_module make.module_target.    % XXX undesirable dependency.
+:- import_module make.program_target.   % XXX undesirable dependency.
+:- import_module make.top_level.        % XXX undesirable dependency.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.maybe_error.
 
@@ -169,6 +188,7 @@
 :- import_module char.
 :- import_module getopt.
 :- import_module int.
+:- import_module io.file.
 :- import_module require.
 :- import_module set.
 :- import_module string.
@@ -201,7 +221,9 @@ setup_for_build_with_module_options(InvokedByMmcMake, ModuleName,
         ),
         AllOptionArgs = InvokedByMake ++ DetectedGradeFlags ++
             ModuleOptionArgs ++ OptionArgs ++ ExtraOptions ++ UseSubdirs,
-        handle_given_options(AllOptionArgs, _, _,
+        % XXX STREAM
+        io.output_stream(CurStream, !IO),
+        handle_given_options(CurStream, AllOptionArgs, _, _,
             OptionSpecs, BuildGlobals, !IO),
         (
             OptionSpecs = [_ | _],
@@ -233,9 +255,9 @@ unredirect_output(Globals, ModuleName, ErrorOutputStream, !Info, !IO) :-
     io.output_stream_name(ErrorOutputStream, TmpErrorFileName, !IO),
     io.close_output(ErrorOutputStream, !IO),
 
-    io.open_input(TmpErrorFileName, TmpErrorInputRes, !IO),
+    io.read_named_file_as_lines(TmpErrorFileName, TmpErrorLinesRes, !IO),
     (
-        TmpErrorInputRes = ok(TmpErrorInputStream),
+        TmpErrorLinesRes = ok(TmpErrorLines),
         module_name_to_file_name(Globals, $pred, do_create_dirs,
             ext_other(other_ext(".err")), ModuleName, ErrorFileName, !IO),
         ( if set.member(ModuleName, !.Info ^ mki_error_file_modules) then
@@ -249,8 +271,8 @@ unredirect_output(Globals, ModuleName, ErrorOutputStream, !Info, !IO) :-
                 LinesToWrite),
             io.output_stream(CurrentOutputStream, !IO),
             with_locked_stdout(!.Info,
-                make_write_error_streams(TmpErrorFileName, TmpErrorInputStream,
-                    ErrorFileOutputStream, CurrentOutputStream, LinesToWrite),
+                make_write_error_streams(TmpErrorLines, LinesToWrite,
+                    ErrorFileOutputStream, CurrentOutputStream),
                 !IO),
             io.close_output(ErrorFileOutputStream, !IO),
 
@@ -260,55 +282,43 @@ unredirect_output(Globals, ModuleName, ErrorOutputStream, !Info, !IO) :-
             ErrorFileRes = error(Error),
             with_locked_stdout(!.Info,
                 write_error_opening_file(TmpErrorFileName, Error), !IO)
-        ),
-        io.close_input(TmpErrorInputStream, !IO)
+        )
     ;
-        TmpErrorInputRes = error(Error),
+        TmpErrorLinesRes = error(Error),
         with_locked_stdout(!.Info,
             write_error_opening_file(TmpErrorFileName, Error), !IO)
     ),
-    io.remove_file(TmpErrorFileName, _, !IO).
+    io.file.remove_file(TmpErrorFileName, _, !IO).
 
-:- pred make_write_error_streams(string::in, io.input_stream::in,
-    io.text_output_stream::in, io.text_output_stream::in, int::in,
+:- pred make_write_error_streams(list(string)::in, int::in,
+    io.text_output_stream::in, io.text_output_stream::in,
     io::di, io::uo) is det.
 
-make_write_error_streams(FileName, InputStream,
-        FullOutputStream, PartialOutputStream, LinesToWrite, !IO) :-
-    io.input_stream_foldl2_io(InputStream,
-        make_write_error_char(FullOutputStream, PartialOutputStream),
-        LinesToWrite, Res, !IO),
+make_write_error_streams(InputLines, LinesToWrite,
+        FullOutputStream, PartialOutputStream, !IO) :-
+    list.foldl(write_line_nl(FullOutputStream), InputLines, !IO),
+    list.split_upto(LinesToWrite, InputLines,
+        InputLinesToWrite, InputLinesNotToWrite),
+    list.foldl(write_line_nl(PartialOutputStream), InputLinesToWrite, !IO),
     (
-        Res = ok(_)
+        InputLinesNotToWrite = []
     ;
-        Res = error(_, Error),
-        io.format("Error reading `%s': %s\n",
-            [s(FileName), s(io.error_message(Error))], !IO)
+        InputLinesNotToWrite = [_ | _],
+        io.output_stream_name(FullOutputStream, FullOutputFileName, !IO),
+        % We used to refer to the "error log" being truncated, but
+        % the compiler's output can also contain things that are *not*
+        % error messages, with progress messages being one example.
+        io.format(PartialOutputStream,
+            "... output log truncated, see `%s' for the complete log.\n",
+            [s(FullOutputFileName)], !IO)
     ).
 
-:- pred make_write_error_char(io.text_output_stream::in,
-    io.text_output_stream::in, char::in, int::in, int::out,
+:- pred write_line_nl(io.text_output_stream::in, string::in,
     io::di, io::uo) is det.
 
-make_write_error_char(FullOutputStream, PartialOutputStream, Char,
-        !LinesRemaining, !IO) :-
-    io.write_char(FullOutputStream, Char, !IO),
-    ( if !.LinesRemaining > 0 then
-        io.write_char(PartialOutputStream, Char, !IO),
-        ( if Char = '\n' then
-            !:LinesRemaining = !.LinesRemaining - 1
-        else
-            true
-        )
-    else if !.LinesRemaining = 0 then
-        io.output_stream_name(FullOutputStream, FullOutputFileName, !IO),
-        io.format(PartialOutputStream,
-            "... error log truncated, see `%s' for the complete log.\n",
-            [s(FullOutputFileName)], !IO),
-        !:LinesRemaining = -1
-    else
-        true
-    ).
+write_line_nl(Stream, Line, !IO) :-
+    io.write_string(Stream, Line, !IO),
+    io.nl(Stream, !IO).
 
 :- pred write_error_opening_file(string::in, io.error::in, io::di, io::uo)
     is det.
@@ -325,20 +335,34 @@ write_error_creating_temp_file(ErrorMessage, !IO) :-
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-foldl2_maybe_stop_at_error(KeepGoing, MakeTarget, Globals, Targets, Succeeded,
-        !Info, !IO) :-
-    foldl2_maybe_stop_at_error_loop(KeepGoing, MakeTarget, Globals, Targets,
-        succeeded, Succeeded, !Info, !IO).
+foldl2_make_module_targets(KeepGoing, ExtraOptions, Globals, Targets,
+        Succeeded, !Info, !IO) :-
+    foldl2_maybe_stop_at_error_loop(KeepGoing,
+        make_module_target(ExtraOptions),
+        Globals, Targets, succeeded, Succeeded, !Info, !IO).
+
+foldl2_install_library_grades(KeepGoing, LinkSucceeded, MainModuleName,
+        AllModules, Globals, LibGrades, Succeeded, !Info, !IO) :-
+    foldl2_maybe_stop_at_error_loop(KeepGoing,
+        install_library_grade(LinkSucceeded, MainModuleName, AllModules),
+        Globals, LibGrades, succeeded, Succeeded, !Info, !IO).
+
+foldl2_make_top_targets(KeepGoing, Globals, Targets,
+        Succeeded, !Info, !IO) :-
+    foldl2_maybe_stop_at_error_loop(KeepGoing, make_top_target,
+        Globals, Targets, succeeded, Succeeded, !Info, !IO).
+
+%---------------------%
 
 :- pred foldl2_maybe_stop_at_error_loop(maybe_keep_going::in,
     foldl2_pred_with_status(T, Info, IO)::in(foldl2_pred_with_status),
     globals::in, list(T)::in, maybe_succeeded::in, maybe_succeeded::out,
     Info::in, Info::out, IO::di, IO::uo) is det.
 
-foldl2_maybe_stop_at_error_loop(_KeepGoing, _P, _Globals, [], !Succeeded,
-        !Info, !IO).
-foldl2_maybe_stop_at_error_loop(KeepGoing, P, Globals, [T | Ts], !Succeeded,
-        !Info, !IO) :-
+foldl2_maybe_stop_at_error_loop(_KeepGoing, _P, _Globals,
+        [], !Succeeded, !Info, !IO).
+foldl2_maybe_stop_at_error_loop(KeepGoing, P, Globals,
+        [T | Ts], !Succeeded, !Info, !IO) :-
     P(Globals, T, NewSucceeded, !Info, !IO),
     ( if
         ( NewSucceeded = succeeded
@@ -352,39 +376,12 @@ foldl2_maybe_stop_at_error_loop(KeepGoing, P, Globals, [T | Ts], !Succeeded,
         !:Succeeded = did_not_succeed
     ).
 
-foldl3_maybe_stop_at_error(KeepGoing, P, Globals, Ts, Succeeded,
-        !Acc, !Info, !IO) :-
-    foldl3_maybe_stop_at_error_loop(KeepGoing, P, Globals, Ts,
-        succeeded, Succeeded, !Acc, !Info, !IO).
-
-:- pred foldl3_maybe_stop_at_error_loop(maybe_keep_going::in,
-    foldl3_pred_with_status(T, Acc, Info, IO)::in(foldl3_pred_with_status),
-    globals::in, list(T)::in, maybe_succeeded::in, maybe_succeeded::out,
-    Acc::in, Acc::out, Info::in, Info::out, IO::di, IO::uo) is det.
-
-foldl3_maybe_stop_at_error_loop(_KeepGoing, _P, _Globals, [],
-        !Succeeded, !Acc, !Info, !IO).
-foldl3_maybe_stop_at_error_loop(KeepGoing, P, Globals, [T | Ts],
-        !Succeeded, !Acc, !Info, !IO) :-
-    P(Globals, T, NewSucceeded, !Acc, !Info, !IO),
-    ( if
-        ( NewSucceeded = succeeded
-        ; KeepGoing = do_keep_going
-        )
-    then
-        !:Succeeded = !.Succeeded `and` NewSucceeded,
-        foldl3_maybe_stop_at_error_loop(KeepGoing, P, Globals, Ts,
-            !Succeeded, !Acc, !Info, !IO)
-    else
-        !:Succeeded = did_not_succeed
-    ).
-
 %---------------------------------------------------------------------------%
 %
 % Parallel (concurrent) fold.
 %
 
-foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing, MakeTarget, Globals,
+foldl2_make_module_targets_maybe_parallel(KeepGoing, ExtraOpts, Globals,
         Targets, Succeeded, !Info, !IO) :-
     globals.lookup_int_option(Globals, jobs, Jobs),
     ( if
@@ -393,6 +390,7 @@ foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing, MakeTarget, Globals,
         have_job_ctl_ipc
     then
         % First pass.
+        MakeTarget = make_module_target(ExtraOpts),
         foldl2_maybe_stop_at_error_parallel_processes(KeepGoing, Jobs,
             MakeTarget, Globals, Targets, Succeeded0, !Info, !IO),
         % Second pass (sequential).
@@ -401,16 +399,18 @@ foldl2_maybe_stop_at_error_maybe_parallel(KeepGoing, MakeTarget, Globals,
             % Disable the `--rebuild' option during the sequential pass
             % otherwise all the targets will be built a second time.
             globals.set_option(rebuild, bool(no), Globals, NoRebuildGlobals),
-            foldl2_maybe_stop_at_error(KeepGoing, MakeTarget, NoRebuildGlobals,
-                Targets, Succeeded, !Info, !IO)
+            foldl2_make_module_targets(KeepGoing, ExtraOpts,
+                NoRebuildGlobals, Targets, Succeeded, !Info, !IO)
         ;
             Succeeded0 = did_not_succeed,
             Succeeded = did_not_succeed
         )
     else
-        foldl2_maybe_stop_at_error(KeepGoing, MakeTarget, Globals,
-            Targets, Succeeded, !Info, !IO)
+        foldl2_make_module_targets(KeepGoing, ExtraOpts,
+            Globals, Targets, Succeeded, !Info, !IO)
     ).
+
+%---------------------%
 
 :- pred foldl2_maybe_stop_at_error_parallel_processes(maybe_keep_going::in,
     int::in,
@@ -443,6 +443,8 @@ foldl2_maybe_stop_at_error_parallel_processes(KeepGoing, Jobs, MakeTarget,
         MaybeJobCtl = no,
         Succeeded = did_not_succeed
     ).
+
+%---------------------%
 
 :- pred start_worker_process(globals::in, maybe_keep_going::in,
     foldl2_pred_with_status(T, Info, io)::in(foldl2_pred_with_status),

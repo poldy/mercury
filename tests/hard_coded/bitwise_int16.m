@@ -1,5 +1,5 @@
 %---------------------------------------------------------------------------%
-% vim: ft=mercury ts=4 sw=4 et wm=0 tw=0
+% vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 
 % Test bitwise operations for signed 16-bit integers.
@@ -21,21 +21,17 @@
 :- import_module exception.
 :- import_module list.
 :- import_module string.
+:- import_module uint.
 
 %---------------------------------------------------------------------------%
 
 main(!IO) :-
     run_unop_test(int16.(\), "\\", !IO),
-    io.nl(!IO),
     run_binop_test(int16.(/\), "/\\", !IO),
-    io.nl(!IO),
     run_binop_test(int16.(\/), "\\/", !IO),
-    io.nl(!IO),
     run_binop_test((func(X, Y) = int16.xor(X, Y)), "xor", !IO),
-    io.nl(!IO),
-    run_shift_test(int16.(>>), ">>", !IO),
-    io.nl(!IO),
-    run_shift_test(int16.(<<), "<<", !IO).
+    run_shift_test(int16.(>>), ">>", int16.(>>u), ">>u", !IO),
+    run_shift_test(int16.(<<), "<<", int16.(<<u), "<<u", !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -58,9 +54,8 @@ run_unop_test_2(UnOpFunc, Desc, A, !IO) :-
     catch_any _ ->
         ResultStr = "<<exception>>"
     ),
-    io.format("%s %s =\n %s\n",
-        [s(Desc), s(to_binary_string_lz(A)), s(ResultStr)], !IO),
-    io.nl(!IO).
+    io.format("%s %s =\n  %s\n\n",
+        [s(Desc), s(to_binary_string_lz(A)), s(ResultStr)], !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -90,42 +85,70 @@ run_binop_test_3(BinOpFunc, Desc, A, B, !IO) :-
     catch_any _ ->
         ResultStr = "<<exception>>"
     ),
-    io.format("%s %s\n%s =\n%s\n",
+    io.format("%s %s\n%s =\n%s\n\n",
         [s(to_binary_string_lz(A)), s(Desc),
-        s(to_binary_string_lz(B)), s(ResultStr)], !IO),
-    io.nl(!IO).
+        s(to_binary_string_lz(B)), s(ResultStr)], !IO).
 
 %---------------------------------------------------------------------------%
 
-:- pred run_shift_test((func(int16, int) = int16)::in, string::in,
+:- pred run_shift_test(
+    (func(int16, int) = int16)::in, string::in,
+    (func(int16, uint) = int16)::in, string::in,
     io::di, io::uo) is cc_multi.
 
-run_shift_test(ShiftOpFunc, Desc, !IO) :-
-    io.format("*** Test binary operation '%s' ***\n\n", [s(Desc)], !IO),
+run_shift_test(ShiftOpFunc, Desc, UShiftOpFunc, UDesc, !IO) :-
+    io.format("*** Test shift operations '%s' and '%s' ***\n\n",
+        [s(Desc), s(UDesc)], !IO),
     As = numbers,
     Bs = shift_amounts,
-    list.foldl(run_shift_test_2(ShiftOpFunc, Desc, Bs), As, !IO).
+    list.foldl(run_shift_test_2(ShiftOpFunc, Desc, UShiftOpFunc, UDesc, Bs),
+        As, !IO).
 
-:- pred run_shift_test_2((func(int16, int) = int16)::in, string::in,
+:- pred run_shift_test_2(
+    (func(int16, int) = int16)::in, string::in,
+    (func(int16, uint) = int16)::in, string::in,
     list(int)::in, int16::in, io::di, io::uo) is cc_multi.
 
-run_shift_test_2(ShiftOpFunc, Desc, Bs, A, !IO) :-
-    list.foldl(run_shift_test_3(ShiftOpFunc, Desc, A), Bs, !IO).
+run_shift_test_2(ShiftOpFunc, Desc, UShiftOpFunc, UDesc, Bs, A, !IO) :-
+    list.foldl(run_shift_test_3(ShiftOpFunc, Desc, UShiftOpFunc, UDesc, A),
+        Bs, !IO).
 
-:- pred run_shift_test_3((func(int16, int) = int16)::in, string::in,
+:- pred run_shift_test_3(
+    (func(int16, int) = int16)::in, string::in,
+    (func(int16, uint) = int16)::in, string::in,
     int16::in, int::in, io::di, io::uo) is cc_multi.
 
-run_shift_test_3(ShiftOpFunc, Desc, A, B, !IO) :-
+run_shift_test_3(ShiftOpFunc, Desc, UShiftOpFunc, UDesc,
+        Number, Amount, !IO) :-
+    NumberStr = to_binary_string_lz(Number),
     ( try []
-        Result0 = ShiftOpFunc(A, B)
+        Result0 = ShiftOpFunc(Number, Amount)
     then
         ResultStr = to_binary_string_lz(Result0)
     catch_any _ ->
         ResultStr = "<<exception>>"
     ),
-    io.format("%s %s %d =\n%s\n",
-        [s(to_binary_string_lz(A)), s(Desc), i(B), s(ResultStr)], !IO),
-    io.nl(!IO).
+    io.format("%s %s %d =\n%s\n\n",
+        [s(NumberStr), s(Desc), i(Amount), s(ResultStr)], !IO),
+    ( if uint.from_int(Amount, UAmount) then
+        ( try []
+            UResult0 = UShiftOpFunc(Number, UAmount)
+        then
+            UResultStr = to_binary_string_lz(UResult0)
+        catch_any _ ->
+            UResultStr = "<<exception>>"
+        ),
+        ( if UResultStr = ResultStr then
+            true
+        else
+            io.format("%s vs %s difference:\n",
+                [s(Desc), s(UDesc)], !IO),
+            io.format("%s %s %u =\n%s\n\n",
+                [s(NumberStr), s(UDesc), u(UAmount), s(ResultStr)], !IO)
+        )
+    else
+        true
+    ).
 
 %---------------------------------------------------------------------------%
 

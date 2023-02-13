@@ -50,42 +50,44 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.instmap.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module map.
 :- import_module maybe.
 :- import_module require.
 :- import_module term.
-:- import_module varset.
 
 %-----------------------------------------------------------------------------%
 
 copy_clauses_to_proc_for_all_valid_procs(!ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.keys(PredTable0, PredIds),
-    list.foldl(copy_pred_clauses_to_procs_in_pred_table, PredIds,
-        PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    map.keys(PredIdTable0, PredIds),
+    list.foldl(copy_pred_clauses_to_procs_in_pred_id_table, PredIds,
+        PredIdTable0, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo).
 
 copy_clauses_to_procs_for_pred_in_module_info(PredId, !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    copy_pred_clauses_to_procs_in_pred_table(PredId, PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    copy_pred_clauses_to_procs_in_pred_id_table(PredId,
+        PredIdTable0, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo).
 
-:- pred copy_pred_clauses_to_procs_in_pred_table(pred_id::in,
-    pred_table::in, pred_table::out) is det.
+:- pred copy_pred_clauses_to_procs_in_pred_id_table(pred_id::in,
+    pred_id_table::in, pred_id_table::out) is det.
 
-copy_pred_clauses_to_procs_in_pred_table(PredId, !PredTable) :-
-    map.lookup(!.PredTable, PredId, PredInfo0),
+copy_pred_clauses_to_procs_in_pred_id_table(PredId, !PredIdTable) :-
+    map.lookup(!.PredIdTable, PredId, PredInfo0),
     copy_clauses_to_procs_in_pred_info(PredId, PredInfo0, PredInfo),
-    map.det_update(PredId, PredInfo, !PredTable).
+    map.det_update(PredId, PredInfo, !PredIdTable).
 
 :- pred copy_clauses_to_procs_in_pred_info(pred_id::in,
     pred_info::in, pred_info::out) is det.
@@ -121,12 +123,10 @@ copy_clauses_to_maybe_imported_proc_in_proc_info(PredInfo, ClausesInfo,
         % just pass the headvar vector directly to the proc_info.
         clauses_info_get_headvars(ClausesInfo, HeadVars),
         HeadVarList = proc_arg_vector_to_list(HeadVars),
-        clauses_info_get_varset(ClausesInfo, VarSet),
-        clauses_info_get_vartypes(ClausesInfo, VarTypes),
+        clauses_info_get_var_table(ClausesInfo, VarTable),
         clauses_info_get_rtti_varmaps(ClausesInfo, RttiVarMaps),
         proc_info_set_headvars(HeadVarList, !ProcInfo),
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo)
     else
         copy_clauses_to_proc_in_proc_info(PredInfo, ProcId, !ProcInfo)
@@ -136,22 +136,22 @@ copy_clauses_to_maybe_imported_proc_in_proc_info(PredInfo, ClausesInfo,
 
 copy_clauses_to_nonmethod_procs_for_preds_in_module_info(PredIds,
         !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    list.foldl(copy_pred_clauses_to_nonmethod_procs_in_pred_table, PredIds,
-        PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    list.foldl(copy_pred_clauses_to_nonmethod_procs_in_pred_id_table, PredIds,
+        PredIdTable0, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo).
 
     % For each mode of the given predicate, copy the clauses relevant
     % to the mode and the current backend to the proc_info.
     %
-:- pred copy_pred_clauses_to_nonmethod_procs_in_pred_table(pred_id::in,
-    pred_table::in, pred_table::out) is det.
+:- pred copy_pred_clauses_to_nonmethod_procs_in_pred_id_table(pred_id::in,
+    pred_id_table::in, pred_id_table::out) is det.
 
-copy_pred_clauses_to_nonmethod_procs_in_pred_table(PredId, !PredTable) :-
-    map.lookup(!.PredTable, PredId, PredInfo0),
+copy_pred_clauses_to_nonmethod_procs_in_pred_id_table(PredId, !PredIdTable) :-
+    map.lookup(!.PredIdTable, PredId, PredInfo0),
     ( if should_copy_clauses_to_procs(PredInfo0) then
         copy_clauses_to_procs_in_pred_info(PredId, PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, !PredTable)
+        map.det_update(PredId, PredInfo, !PredIdTable)
     else
         true
     ).
@@ -160,8 +160,8 @@ copy_pred_clauses_to_nonmethod_procs_in_pred_table(PredId, !PredTable) :-
 
 copy_clauses_to_proc_in_proc_info(PredInfo, ProcId, !ProcInfo) :-
     pred_info_get_clauses_info(PredInfo, ClausesInfo),
-    ClausesInfo = clauses_info(VarSet0, _, _, VarTypes, HeadVars, ClausesRep0,
-        _ItemNumbers, RttiInfo, _HaveForeignClauses, _HadSyntaxError),
+    ClausesInfo = clauses_info(_, _, VarTable0, RttiVarMaps, _, HeadVars,
+        ClausesRep0, _ItemNumbers, _HaveForeignClauses, _HadSyntaxError),
     % The "replacement" is the replacement of the pred_info's clauses_rep
     % with the goal in the proc_info; the clauses_rep won't be needed again.
     get_clause_list_for_replacement(ClausesRep0, Clauses),
@@ -183,7 +183,7 @@ copy_clauses_to_proc_in_proc_info(PredInfo, ProcId, !ProcInfo) :-
                 MaybeTraceRuntimeCond, _),
             % Use the original variable names for the headvars of foreign_proc
             % clauses, not the introduced `HeadVar__n' names.
-            list.foldl(set_arg_names, Args, VarSet0, VarSet),
+            list.foldl(set_arg_names, Args, VarTable0, VarTable),
             expect(unify(ExtraArgs, []), $pred, "extra_args"),
             expect(unify(MaybeTraceRuntimeCond, no), $pred,
                 "trace runtime cond")
@@ -199,7 +199,7 @@ copy_clauses_to_proc_in_proc_info(PredInfo, ProcId, !ProcInfo) :-
             ; SingleExpr = scope(_, _)
             ; SingleExpr = shorthand(_)
             ),
-            VarSet = VarSet0
+            VarTable = VarTable0
         ),
         Goal = SingleGoal
     ;
@@ -215,7 +215,7 @@ copy_clauses_to_proc_in_proc_info(PredInfo, ProcId, !ProcInfo) :-
             proc_info_get_context(!.ProcInfo, Context)
         ),
 
-        VarSet = VarSet0,
+        VarTable = VarTable0,
 
         % Convert the list of clauses into a disjunction,
         % and construct a goal_info for the disjunction.
@@ -241,8 +241,7 @@ copy_clauses_to_proc_in_proc_info(PredInfo, ProcId, !ProcInfo) :-
     % XXX ARGVEC - when the proc_info is converted to use proc_arg_vectors
     % we should just pass the headvar vector in directly.
     HeadVarList = proc_arg_vector_to_list(HeadVars),
-    proc_info_set_body(VarSet, VarTypes, HeadVarList, Goal, RttiInfo,
-        !ProcInfo).
+    proc_info_set_body(VarTable, HeadVarList, Goal, RttiVarMaps, !ProcInfo).
 
 %-----------------------------------------------------------------------------%
 
@@ -257,7 +256,9 @@ select_matching_clauses(PredInfo, ProcId, Clauses, MatchingClauses) :-
     % it processes to the *front* of the list of so-far-detected-to-be-matching
     % clauses, which computes the list of matching clauses in reverse.
     RevMatchingClauses0 = [],
-    ( if Origin = origin_special_pred(spec_pred_unify, _TypeCtor) then
+    ( if
+        Origin = origin_compiler(made_for_uci(spec_pred_unify, _TypeCtor))
+    then
         ( if hlds_pred.in_in_unification_proc_id(ProcId) then
             MaybeInInMode = in_in_mode
         else
@@ -349,15 +350,15 @@ get_clause_disjuncts_and_warnings([Clause | Clauses], Disjuncts, Warnings) :-
 
 %-----------------------------------------------------------------------------%
 
-:- pred set_arg_names(foreign_arg::in, prog_varset::in, prog_varset::out)
+:- pred set_arg_names(foreign_arg::in, var_table::in, var_table::out)
     is det.
 
-set_arg_names(Arg, !Vars) :-
+set_arg_names(Arg, !VarTable) :-
     Var = foreign_arg_var(Arg),
     MaybeNameMode = foreign_arg_maybe_name_mode(Arg),
     (
         MaybeNameMode = yes(foreign_arg_name_mode(Name, _)),
-        varset.name_var(Var, Name, !Vars)
+        update_var_name(Var, Name, !VarTable)
     ;
         MaybeNameMode = no
     ).

@@ -100,6 +100,7 @@
 :- import_module check_hlds.unify_proc.
 :- import_module hlds.add_pred.
 :- import_module hlds.hlds_clauses.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.special_pred.
 :- import_module mdbcomp.sym_name.
@@ -114,7 +115,7 @@
 :- import_module one_or_more.
 :- import_module pair.
 :- import_module require.
-:- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -124,8 +125,8 @@ add_special_pred_decl_defns_for_type_maybe_lazily(TypeCtor, TypeDefn,
     get_type_defn_body(TypeDefn, TypeBody),
     get_type_defn_status(TypeDefn, TypeStatus),
     ( if
-        special_pred_is_generated_lazily(!.ModuleInfo, TypeCtor, TypeBody,
-            TypeStatus)
+        special_pred_is_generated_lazily_for_defn(!.ModuleInfo, TypeCtor,
+            TypeBody, TypeStatus)
     then
         true
     else
@@ -198,8 +199,7 @@ add_special_pred_decl_defn(SpecialPredId, TVarSet, Type0, TypeCtor, TypeBody,
     module_info_get_special_pred_maps(!.ModuleInfo, SpecialPredMaps1),
     lookup_special_pred_maps(SpecialPredMaps1, SpecialPredId, TypeCtor,
         PredId),
-    module_info_get_preds(!.ModuleInfo, PredMap0),
-    map.lookup(PredMap0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     % If the type was imported, then the special preds for that type
     % should be imported too.
     % XXX There are several different shades of "imported", and in this case,
@@ -247,9 +247,7 @@ add_clauses_for_special_pred(SpecDefnInfo, !.PredInfo, !ModuleInfo) :-
     add_marker(marker_calls_are_fully_qualified, Markers0, Markers),
     pred_info_set_markers(Markers, !PredInfo),
     PredId = SpecDefnInfo ^ spdi_pred_id,
-    module_info_get_preds(!.ModuleInfo, PredMap0),
-    map.det_update(PredId, !.PredInfo, PredMap0, PredMap),
-    module_info_set_preds(PredMap, !ModuleInfo).
+    module_info_set_pred_info(PredId, !.PredInfo, !ModuleInfo).
 
     % These types need to have the builtin qualifier removed
     % so that their special predicates type check.
@@ -275,13 +273,17 @@ add_special_pred_decl(SpecialPredId, TVarSet, Type, TypeCtor, TypeStatus,
         Context, !ModuleInfo) :-
     module_info_get_name(!.ModuleInfo, ModuleName),
     special_pred_interface(SpecialPredId, Type, ArgTypes, ArgModes, Det),
-    PredBaseName = special_pred_name(SpecialPredId, TypeCtor),
-    PredName = unqualified(PredBaseName),
+    PredName = uci_pred_name(SpecialPredId, TypeCtor),
     PredArity = get_special_pred_id_arity(SpecialPredId),
+    PredFormArity = pred_form_arity(PredArity),
     % All current special_preds are predicates.
-    clauses_info_init(pf_predicate, PredArity,
+    clauses_info_init(pf_predicate, cit_types(ArgTypes),
         init_clause_item_numbers_comp_gen, ClausesInfo0),
-    Origin = origin_special_pred(SpecialPredId, TypeCtor),
+    clauses_info_get_varset(ClausesInfo0, VarSet0),
+    clauses_info_get_explicit_vartypes(ClausesInfo0, VarTypes0),
+    make_var_table(!.ModuleInfo, VarSet0, VarTypes0, VarTable),
+    clauses_info_set_var_table(VarTable, ClausesInfo0, ClausesInfo),
+    Origin = origin_compiler(made_for_uci(SpecialPredId, TypeCtor)),
     adjust_special_pred_status(SpecialPredId, TypeStatus, PredStatus),
     MaybeCurUserDecl = maybe.no,
     GoalType = goal_not_for_promise(np_goal_type_none),
@@ -293,17 +295,19 @@ add_special_pred_decl(SpecialPredId, TVarSet, Type, TypeCtor, TypeStatus,
     ClassContext = constraints([], []),
     ExistQVars = [],
     map.init(VarNameRemap),
-    pred_info_init(ModuleName, PredName, PredArity, pf_predicate, Context,
+    % XXX Why are we passing the name of the *current* module here,
+    % when it could be different from the module that defines TypeCtor?
+    pred_info_init(pf_predicate, ModuleName, PredName, PredFormArity, Context,
         Origin, PredStatus, MaybeCurUserDecl, GoalType, Markers, ArgTypes,
         TVarSet, ExistQVars, ClassContext, Proofs, ConstraintMap,
-        ClausesInfo0, VarNameRemap, PredInfo0),
+        ClausesInfo, VarNameRemap, PredInfo0),
     SeqNum = item_no_seq_num,
     varset.init(InstVarSet),
     ArgLives = no,
     % Should not be any inst vars here so it is ok to use a fresh inst_varset.
     % Before the simplification pass, HasParallelConj is not meaningful.
     HasParallelConj = has_no_parallel_conj,
-    add_new_proc(Context, SeqNum, PredArity,
+    add_new_proc(!.ModuleInfo, Context, SeqNum,
         InstVarSet, ArgModes, yes(ArgModes), ArgLives,
         detism_decl_implicit, yes(Det), address_is_not_taken,
         HasParallelConj, PredInfo0, PredInfo, _ProcId),
@@ -438,7 +442,8 @@ add_lazily_generated_special_pred(SpecialId, Item, TVarSet, Type, TypeCtor,
         PredInfo1 = PredInfo0
     ;
         Item = declaration_only,
-        setup_vartypes_in_clauses_for_imported_pred(PredInfo0, PredInfo1)
+        setup_var_table_in_clauses_for_imported_pred(!.ModuleInfo,
+            PredInfo0, PredInfo1)
     ),
     propagate_checked_types_into_pred_modes(!.ModuleInfo, ErrorProcs,
         _InstForTypeSpecs, PredInfo1, PredInfo),
@@ -469,8 +474,8 @@ collect_type_defn(ModuleInfo, TypeCtor, Type, TVarSet, TypeBody, Context) :-
     hlds_data.get_type_defn_context(TypeDefn, Context),
 
     expect(
-        special_pred_is_generated_lazily(ModuleInfo, TypeCtor, TypeBody,
-            TypeStatus),
+        special_pred_is_generated_lazily_for_defn(ModuleInfo, TypeCtor,
+            TypeBody, TypeStatus),
         $pred, "not generated lazily"),
     prog_type.var_list_to_type_list(KindMap, TypeParams, TypeArgs),
     construct_type(TypeCtor, TypeArgs, Type).
@@ -512,8 +517,7 @@ collect_type_defn_for_tuple(TypeCtor, Type, TVarSet, TypeBody, Context) :-
         MaybeCanonical, yes(Repn), IsForeign),
     TypeBody = hlds_du_type(TypeBodyDu),
     construct_type(TypeCtor, TupleArgTypes, Type),
-
-    term.context_init(Context).
+    Context = dummy_context.
 
 :- pred make_tuple_args_and_repns(prog_context::in, list(mer_type)::in,
     list(constructor_arg)::out, list(constructor_arg_repn)::out) is det.

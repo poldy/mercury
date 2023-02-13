@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-2011 The University of Melbourne.
-% Copyright (C) 2014-2016, 2018-2021 The Mercury team.
+% Copyright (C) 2014-2016, 2018-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -23,26 +23,61 @@
 :- import_module io.
 :- import_module maybe.
 
-    % `report_stats/0' is a non-logical procedure intended for use in profiling
-    % the performance of a program. It has the side-effect of reporting
-    % some memory and time usage statistics about the time period since
-    % the last call to report_stats to stderr.
-    %
-    % Note: in Java, this reports usage of the calling thread. You will get
-    % nonsensical results if the previous call to `report_stats' was
-    % from a different thread.
-    %
-:- impure pred report_stats is det.
-% NOTE_TO_IMPLEMENTORS :- pragma obsolete(report_stats/0,
-% NOTE_TO_IMPLEMENTORS [io.report_stats/3, io.report_stats/4]).
+%---------------------------------------------------------------------------%
+%
+% Predicates that report statistics about the execution of the current process
+% so far.
+%
 
-    % `report_full_memory_stats' is a non-logical procedure intended for use
-    % in profiling the memory usage of a program. It has the side-effect
-    % of reporting a full memory profile to stderr.
+    % report_stats(Stream, Selector, !IO):
+    % report_stats(Selector, !IO):
     %
-:- impure pred report_full_memory_stats is det.
-% NOTE_TO_IMPLEMENTORS :- pragma obsolete(report_full_memory_stats/0,
-% NOTE_TO_IMPLEMENTORS [io.report_full_memory_stats/3, io.report_full_memory_stats/4]).
+    % Write selected statistics to the specified stream, or to stderr.
+    % What statistics will be written is controlled by the Selector argument.
+    % What selector values cause what statistics to be printed is
+    % implementation defined.
+    %
+    % The Melbourne implementation supports the following selectors:
+    %
+    % "standard"
+    %   Writes memory/time usage statistics.
+    %
+    % "full_memory_stats"
+    %   Writes complete memory usage statistics, including information
+    %   about all procedures and types. Requires compilation with memory
+    %   profiling enabled.
+    %
+    % "tabling"
+    %   Writes statistics about the internals of the tabling system.
+    %   Requires the runtime to have been compiled with the macro
+    %   MR_TABLE_STATISTICS defined.
+    %
+:- pred report_stats(io.text_output_stream::in, string::in,
+    io::di, io::uo) is det.
+:- pred report_stats(string::in, io::di, io::uo) is det.
+
+    % Write standard memory/time usage statistics to the specified stream,
+    % or to stderr.
+    %
+:- pred report_standard_stats(io.text_output_stream::in,
+    io::di, io::uo) is det.
+:- pred report_standard_stats(io::di, io::uo) is det.
+
+    % report_full_memory_stats/3 reports a full memory profile
+    % to the specified output stream, or to stderr.
+    %
+:- pred report_full_memory_stats(io.text_output_stream::in,
+    io::di, io::uo) is det.
+:- pred report_full_memory_stats(io::di, io::uo) is det.
+
+    % report_tabling_statistics/3, as its name says, reports statistics
+    % about tabling to the specified output stream, or to stderr.
+    %
+    % XXX For now, these predicates work only with the C backend.
+    %
+:- pred report_tabling_statistics(io.text_output_stream::in,
+    io::di, io::uo) is det.
+:- pred report_tabling_statistics(io::di, io::uo) is det.
 
     % report_memory_attribution(Label, Collect, !IO) is a procedure intended
     % for use in profiling the memory usage by a program. It is supported in
@@ -61,6 +96,31 @@
     %
 :- pred report_memory_attribution(string::in, io::di, io::uo) is det.
 :- impure pred report_memory_attribution(string::in) is det.
+
+    % `report_stats/0' is a non-logical procedure intended for use in profiling
+    % the performance of a program. It has the side-effect of reporting
+    % some memory and time usage statistics about the time period since
+    % the last call to report_stats to stderr.
+    %
+    % Note: in Java, this reports usage of the calling thread. You will get
+    % nonsensical results if the previous call to `report_stats' was
+    % from a different thread.
+    %
+:- impure pred report_stats is det.
+:- pragma obsolete(pred(report_stats/0),
+    [benchmarking.report_stats/3,
+    benchmarking.report_stats/4]).
+
+    % `report_full_memory_stats' is a non-logical procedure intended for use
+    % in profiling the memory usage of a program. It has the side-effect
+    % of reporting a full memory profile to stderr.
+    %
+:- impure pred report_full_memory_stats is det.
+:- pragma obsolete(pred(report_full_memory_stats/0),
+    [benchmarking.report_full_memory_stats/3,
+    benchmarking.report_full_memory_stats/4]).
+
+%---------------------------------------------------------------------------%
 
     % benchmark_det(Pred, In, Out, Repeats, Time) is for benchmarking the det
     % predicate Pred. We call Pred with the input In and the output Out, and
@@ -169,7 +229,10 @@
 :- implementation.
 
 :- import_module int.
+:- import_module io.error_util.
+:- import_module list.
 :- import_module mutvar.
+:- import_module require.
 :- import_module string.
 
 %---------------------------------------------------------------------------%
@@ -178,21 +241,145 @@
 #include ""mercury_report_stats.h""
 ").
 
+%---------------------------------------------------------------------------%
+%
+% Predicates that report statistics about the current program execution.
+%
+
+report_stats(Stream, Selector, !IO) :-
+    ( if Selector = "standard" then
+        benchmarking.report_standard_stats(Stream, !IO)
+    else if Selector = "full_memory_stats" then
+        benchmarking.report_full_memory_stats(Stream, !IO)
+    else if Selector = "tabling" then
+        benchmarking.report_tabling_statistics(Stream, !IO)
+    else
+        string.format("unknown selector `%s'", [s(Selector)], Message),
+        unexpected($pred, Message)
+    ).
+
+report_stats(Selector, !IO) :-
+    io.stderr_stream(StdErr, !IO),
+    benchmarking.report_stats(StdErr, Selector, !IO).
+
 %---------------------%
 
-report_stats :-
-    trace [io(!IO)] (
-        io.report_standard_stats(!IO)
-    ),
-    impure impure_true.
+report_standard_stats(OutputStream, !IO) :-
+    Stream = output_stream_get_stream(OutputStream),
+    report_standard_stats_2(Stream, Error, !IO),
+    throw_on_output_error(Error, !IO).
+
+report_standard_stats(!IO) :-
+    io.stderr_stream(StdErr, !IO),
+    benchmarking.report_standard_stats(StdErr, !IO).
+
+:- pred report_standard_stats_2(io.stream::in, system_error::out,
+    io::di, io::uo) is det.
+
+:- pragma foreign_proc("C",
+    report_standard_stats_2(Stream::in, Error::out, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury, tabled_for_io,
+        does_not_affect_liveness],
+"
+    Error = MR_report_standard_stats(MR_file(*Stream),
+        &MR_line_number(*Stream));
+").
+
+:- pragma foreign_proc("C#",
+    report_standard_stats_2(Stream::in, Error::out, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury],
+"
+    try {
+        benchmarking.ML_report_standard_stats(Stream);
+        Error = null;
+    } catch (System.SystemException e) {
+        Error = e;
+    }
+").
+
+:- pragma foreign_proc("Java",
+    report_standard_stats_2(Stream::in, Error::out, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury],
+"
+    try {
+        jmercury.benchmarking.ML_report_standard_stats(
+            (jmercury.io__stream_ops.MR_TextOutputFile) Stream);
+        Error = null;
+    } catch (java.io.IOException e) {
+        Error = e;
+    }
+").
 
 %---------------------%
 
-report_full_memory_stats :-
-    trace [io(!IO)] (
-        io.report_full_memory_stats(!IO)
-    ),
-    impure impure_true.
+report_full_memory_stats(OutputStream, !IO) :-
+    Stream = output_stream_get_stream(OutputStream),
+    report_full_memory_stats_2(Stream, Error, !IO),
+    throw_on_output_error(Error, !IO).
+
+report_full_memory_stats(!IO) :-
+    io.stderr_stream(StdErr, !IO),
+    benchmarking.report_full_memory_stats(StdErr, !IO).
+
+:- pred report_full_memory_stats_2(io.stream::in, system_error::out,
+    io::di, io::uo) is det.
+
+:- pragma foreign_proc("C",
+    report_full_memory_stats_2(Stream::in, Error::out, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury, tabled_for_io,
+        does_not_affect_liveness],
+"
+    Error = MR_report_full_memory_stats(MR_file(*Stream),
+        &MR_line_number(*Stream));
+").
+
+:- pragma foreign_proc("C#",
+    report_full_memory_stats_2(Stream::in, Error::out, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury],
+"
+    try {
+        benchmarking.ML_report_full_memory_stats(Stream);
+        Error = null;
+    } catch (System.SystemException e) {
+        Error = e;
+    }
+").
+
+:- pragma foreign_proc("Java",
+    report_full_memory_stats_2(Stream::in, Error::out, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury],
+"
+    try {
+        jmercury.benchmarking.ML_report_full_memory_stats(
+            (jmercury.io__stream_ops.MR_TextOutputFile) Stream);
+        Error = null;
+    } catch (java.io.IOException e) {
+        Error = e;
+    }
+").
+
+%---------------------%
+
+report_tabling_statistics(OutputStream, !IO) :-
+    Stream = output_stream_get_stream(OutputStream),
+    report_tabling_statistics_2(Stream, !IO).
+
+report_tabling_statistics(!IO) :-
+    io.stderr_stream(StdErr, !IO),
+    benchmarking.report_tabling_statistics(StdErr, !IO).
+
+:- pred report_tabling_statistics_2(io.stream::in, io::di, io::uo) is det.
+
+:- pragma foreign_proc("C",
+    report_tabling_statistics_2(Stream::in, _IO0::di, _IO::uo),
+    [promise_pure, will_not_call_mercury, tabled_for_io,
+        does_not_affect_liveness],
+"
+    MR_table_report_statistics(MR_file(*Stream));
+").
+
+report_tabling_statistics_2(_Stream, !IO) :-
+    private_builtin.sorry("report_tabling_statistics").
 
 %---------------------------------------------------------------------------%
 
@@ -210,20 +397,45 @@ report_full_memory_stats :-
 ").
 
 report_memory_attribution(_, _, !IO).
+    % XXX We use this clause when targeting languages other than C.
+    % We should say something about this kind of statistics being available
+    % only when targeting C.
 
 report_memory_attribution(Label, Collect) :-
     trace [io(!IO)] (
-        report_memory_attribution(Label, Collect, !IO)
+        benchmarking.report_memory_attribution(Label, Collect, !IO)
     ),
     impure impure_true.
 
+%---------------------%
+
 report_memory_attribution(Label, !IO) :-
-    report_memory_attribution(Label, yes, !IO).
+    benchmarking.report_memory_attribution(Label, yes, !IO).
 
 report_memory_attribution(Label) :-
-    impure report_memory_attribution(Label, yes).
+    impure benchmarking.report_memory_attribution(Label, yes).
+
+%---------------------%
+
+report_stats :-
+    trace [io(!IO)] (
+        benchmarking.report_standard_stats(!IO)
+    ),
+    impure impure_true.
+
+%---------------------%
+
+report_full_memory_stats :-
+    trace [io(!IO)] (
+        benchmarking.report_full_memory_stats(!IO)
+    ),
+    impure impure_true.
 
 %---------------------------------------------------------------------------%
+
+:- pragma foreign_import_module("C#",   io.primitives_write).
+:- pragma foreign_import_module("C#",   io.stream_ops).
+:- pragma foreign_import_module("Java", io.stream_ops).
 
 :- pragma foreign_code("C#",
 "
@@ -237,7 +449,7 @@ private static long real_time_at_start
 private static long real_time_at_last_stat;
 
 public static void
-ML_report_standard_stats(io.MR_MercuryFileStruct stream)
+ML_report_standard_stats(mercury.io__stream_ops.MR_MercuryFileStruct stream)
 {
     double user_time_at_prev_stat = user_time_at_last_stat;
     user_time_at_last_stat = System.Diagnostics.Process.GetCurrentProcess()
@@ -246,26 +458,28 @@ ML_report_standard_stats(io.MR_MercuryFileStruct stream)
     long real_time_at_prev_stat = real_time_at_last_stat;
     real_time_at_last_stat = System.DateTime.Now.Ticks;
 
-    io.mercury_print_string(stream, System.String.Format(
-        ""[User time: +{0:F2}s, {1:F2}s Real time: +{2:F2}s, {3:F2}s]\\n"",
-        (user_time_at_last_stat - user_time_at_prev_stat),
-        (user_time_at_last_stat - user_time_at_start),
-        ((real_time_at_last_stat - real_time_at_prev_stat)
-            / (double) System.TimeSpan.TicksPerSecond),
-        ((real_time_at_last_stat - real_time_at_start)
-           / (double) System.TimeSpan.TicksPerSecond)
-    ));
+    mercury.io__primitives_write.mercury_print_string(stream,
+        System.String.Format(
+            ""[User time: +{0:F2}s, {1:F2}s Real time: +{2:F2}s, {3:F2}s]\\n"",
+            (user_time_at_last_stat - user_time_at_prev_stat),
+            (user_time_at_last_stat - user_time_at_start),
+            ((real_time_at_last_stat - real_time_at_prev_stat)
+                / (double) System.TimeSpan.TicksPerSecond),
+            ((real_time_at_last_stat - real_time_at_start)
+               / (double) System.TimeSpan.TicksPerSecond)
+            )
+        );
     // XXX At this point there should be a whole bunch of memory usage
     // statistics.
 }
 
 public static void
-ML_report_full_memory_stats(io.MR_MercuryFileStruct stream)
+ML_report_full_memory_stats(mercury.io__stream_ops.MR_MercuryFileStruct stream)
 {
     // XXX The support for this predicate is even worse. Since we don't have
     // access to memory usage statistics, all you get here is an apology.
     // But at least it doesn't just crash with an error.
-    io.mercury_print_string(stream,
+    mercury.io__primitives_write.mercury_print_string(stream,
         ""Sorry, report_full_memory_stats is not yet "" +
             ""implemented for the C# back-end.\\n"");
 }
@@ -289,7 +503,7 @@ ML_initialise()
 }
 
 public static void
-ML_report_standard_stats(jmercury.io.MR_TextOutputFile stream)
+ML_report_standard_stats(jmercury.io__stream_ops.MR_TextOutputFile stream)
     throws java.io.IOException
 {
     int user_time_at_prev_stat = user_time_at_last_stat;
@@ -318,7 +532,7 @@ ML_report_standard_stats(jmercury.io.MR_TextOutputFile stream)
 }
 
 public static void
-ML_report_full_memory_stats(jmercury.io.MR_TextOutputFile stream)
+ML_report_full_memory_stats(jmercury.io__stream_ops.MR_TextOutputFile stream)
     throws java.io.IOException
 {
     // XXX The support for this predicate is even worse. Since we don't have
@@ -347,7 +561,7 @@ benchmark_det(Pred, In, Out, Repeats, Time) :-
 
 benchmark_det_loop(Pred, In, Out, Repeats) :-
     % The call to do_nothing/1 here is to make sure the compiler
-    % doesn't optimize away the call to `Pred'.
+    % doesn't optimize away the call to Pred.
     Pred(In, Out0),
     impure do_nothing(Out0),
     ( if Repeats > 1 then
@@ -370,7 +584,7 @@ benchmark_func(Func, In, Out, Repeats, Time) :-
 
 benchmark_func_loop(Func, In, Out, Repeats) :-
     % The call to do_nothing/1 here is to make sure the compiler
-    % doesn't optimize away the call to `Func'.
+    % doesn't optimize away the call to Func.
     Out0 = Func(In),
     impure do_nothing(Out0),
     ( if Repeats > 1 then
@@ -395,7 +609,7 @@ benchmark_det_io(Pred, InA, OutA, InB, OutB, Repeats, Time) :-
 
 benchmark_det_loop_io(Pred, InA, OutA, InB, OutB, Repeats) :-
     % The call to do_nothing/1 here is to make sure the compiler
-    % doesn't optimize away the call to `Pred'.
+    % doesn't optimize away the call to Pred.
     Pred(InA, OutA0, InB, OutB0),
     impure do_nothing(OutA0),
     ( if Repeats > 1 then

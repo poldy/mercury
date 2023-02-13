@@ -26,7 +26,6 @@
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.instmap.
 :- import_module hlds.pred_table.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.prim_data.
@@ -35,12 +34,14 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
+:- import_module parse_tree.vartypes.
 
 :- import_module bool.
 :- import_module list.
 :- import_module maybe.
 :- import_module set.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -52,7 +53,7 @@
 :- pred update_instmap_goal_info(hlds_goal_info::in,
     instmap::in, instmap::out) is det.
 
-    % create_renaming(OutputVars, InstMapDelta, !VarTypes, !VarSet,
+    % create_renaming(OutputVars, InstMapDelta, !VarTable,
     %   UnifyGoals, NewVars, Renaming):
     %
     % This predicate is intended for use in program transformations
@@ -60,41 +61,58 @@
     % ( if Goal' then UnifyGoals, ... else ...), where Goal' has its output
     % variables (OutputVars) replaced with new variables (NewVars),
     % with the mapping from OutputVars to NewVars being Renaming.
-    % VarTypes and VarSet are updated for the new variables. The final
-    % insts of NewVar are taken from the insts of the corresponding
-    % OutputVar in InstMapDelta (the initial inst is free).
+    % VarTable is updated for the new variables. The final insts of NewVar
+    % are taken from the insts of the corresponding OutputVar in InstMapDelta
+    % (the initial inst is free).
     %
 :- pred create_renaming(list(prog_var)::in, instmap_delta::in,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
+    var_table::in, var_table::out,
     list(hlds_goal)::out, list(prog_var)::out, prog_var_renaming::out) is det.
 
-    % clone_variable(OldVar, OldVarSet, OldVarTypes,
-    %   !VarSet, !VarTypes, !Renaming, CloneVar):
+    % clone_variable(OldVar, OldVarTable, !VarTable, !Renaming, CloneVar):
     %
     % clone_variable typically takes an old variable OldVar, and creates a
-    % clone of it, adding the clone variable to !VarSet and !VarType, and
-    % adding a mapping from the old variable to its clone in !Renaming.
-    % The name and type of the clone are taken from OldVarSet and OldVarTypes.
+    % clone of it, adding the clone variable to !VarTable, and adding
+    % a mapping from the old variable to its clone to !Renaming.
+    % The name and type of the clone are taken from OldVarTable.
     % However, if OldVar already has a clone, as shown by it already being a
     % key in !.Renaming, clone_variable does nothing. Either way, the identity
     % of the clone variable is returned in CloneVar.
     %
-    % (This interface will not easily admit uniqueness in the varset and
-    % vartypes arguments; such is the sacrifice for generality.)
+    % (This interface will not easily admit uniqueness in the var_table
+    % arguments; such is the sacrifice for generality.)
     %
-:- pred clone_variable(prog_var::in, prog_varset::in, vartypes::in,
+:- pred clone_variable(prog_var::in, var_table::in,
+    var_table::in, var_table::out,
+    prog_var_renaming::in, prog_var_renaming::out, prog_var::out) is det.
+
+    % clone_variable_vs(OldVar, OldVarSet, OldVarTypes,
+    %   !VarSet, !VarTypes, !Renaming, CloneVar):
+    %
+    % A version of clone_variable using varsets and vartypes.
+    %
+:- pred clone_variable_vs(prog_var::in, prog_varset::in, vartypes::in,
     prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
     prog_var_renaming::in, prog_var_renaming::out, prog_var::out) is det.
 
-    % clone_variables(OldVars, OldVarSet, OldVarTypes,
-    %   !VarSet, !VarTypes, !Renaming):
+    % clone_variables(OldVars, OldVarTable, !VarTable, !Renaming):
     %
     % Invoke clone_variable on each variable in OldVars.
     %
     % The caller can find the identity of the clone of each variable in OldVars
     % by looking it up in !:Renaming.
     %
-:- pred clone_variables(list(prog_var)::in, prog_varset::in, vartypes::in,
+    %
+:- pred clone_variables(list(prog_var)::in,
+    var_table::in, var_table::in, var_table::out,
+    prog_var_renaming::in, prog_var_renaming::out) is det.
+
+    % clone_variables_vs(OldVars, OldVarSet, OldVarTypes,
+    %   !VarSet, !VarTypes, !Renaming):
+    %
+    % A version of clone_variables using varsets and vartypes.
+    %
+:- pred clone_variables_vs(list(prog_var)::in, prog_varset::in, vartypes::in,
     prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
     prog_var_renaming::in, prog_var_renaming::out) is det.
 
@@ -131,7 +149,7 @@
 :- mode attach_features_to_all_goals(in,
     in(bound(do_not_attach_in_from_ground_term)), in, out) is det.
 
-    % extra_nonlocal_typeinfos_typeclass_infos(TypeInfoMap, TypeClassInfoMap,
+    % extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps,
     %   VarTypes, ExistQVars, NonLocals, NonLocalTypeInfos):
     %
     % Compute which type-info and type-class-info variables may need to be
@@ -150,7 +168,7 @@
     % variable.
     %
 :- pred extra_nonlocal_typeinfos_typeclass_infos(rtti_varmaps::in,
-    vartypes::in, existq_tvars::in,
+    var_table::in, existq_tvars::in,
     set_of_progvar::in, set_of_progvar::out) is det.
 
 :- type is_leaf
@@ -260,22 +278,26 @@
 :- pred goal_is_atomic(hlds_goal::in, goal_is_atomic::out) is det.
 
 %-----------------------------------------------------------------------------%
+%
+% NOTE: Neither switch_to_disjunction nor case_to_disjunct is currently used,
+% but they could be useful in the future.
+%
 
-    % Convert a switch back into a disjunction. This is needed
-    % for the magic set transformation.
+    % Convert a switch back into a disjunction. This used to be needed
+    % by the Aditi backend for the magic set transformation.
     % This aborts if any of the constructors are existentially typed.
     %
 :- pred switch_to_disjunction(prog_var::in, list(case)::in,
-    instmap::in, list(hlds_goal)::out, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out, module_info::in, module_info::out) is det.
+    instmap::in, list(hlds_goal)::out, var_table::in, var_table::out,
+    module_info::in, module_info::out) is det.
 
     % Convert a case into a conjunction by adding a tag test
     % (deconstruction unification) to the case goal.
     % This aborts if the constructor is existentially typed.
     %
 :- pred case_to_disjunct(prog_var::in, hlds_goal::in, instmap::in,
-    cons_id::in, hlds_goal::out, prog_varset::in, prog_varset::out,
-    vartypes::in, vartypes::out, module_info::in, module_info::out) is det.
+    cons_id::in, hlds_goal::out, var_table::in, var_table::out,
+    module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
 
@@ -302,7 +324,7 @@
 :- pred create_conj_from_list(list(hlds_goal)::in, conj_type::in,
     hlds_goal::out) is det.
 
-    % can_reorder_goals_old(ModuleInfo, VarTypes, FullyStrict,
+    % can_reorder_goals_old(ModuleInfo, VarTable, FullyStrict,
     %   InstmapBeforeGoal1, Goal1, InstmapBeforeGoal2, Goal2).
     %
     % Goals can be reordered if
@@ -314,10 +336,14 @@
     % NOTE: this version is deprecated; new code should use the following
     %       version because it supports the intermodule-analysis framework.
     %
-:- pred can_reorder_goals_old(module_info::in, vartypes::in, bool::in,
+:- pred can_reorder_goals_old(module_info::in, var_table::in, bool::in,
     instmap::in, hlds_goal::in, instmap::in, hlds_goal::in) is semidet.
 
-    % can_reorder_goals(VarTypes, FullyStrict, InstmapBeforeGoal1, Goal1,
+:- type can_reorder_goals
+    --->    cannot_reorder_goals
+    ;       can_reorder_goals.
+
+    % can_reorder_goals(VarTable, FullyStrict, InstmapBeforeGoal1, Goal1,
     %   InstmapBeforeGoal2, Goal2, Result, !ModuleInfo).
     %
     % Result is `yes' if the goals can be reordered; no otherwise.
@@ -331,8 +357,8 @@
     % NOTE: new code should use this version as it supports the
     %       intermodule-analysis framework.
     %
-:- pred can_reorder_goals(vartypes::in, bool::in, instmap::in,
-    hlds_goal::in, instmap::in, hlds_goal::in, bool::out,
+:- pred can_reorder_goals(var_table::in, bool::in, instmap::in,
+    hlds_goal::in, instmap::in, hlds_goal::in, can_reorder_goals::out,
     module_info::in, module_info::out) is det.
 
     % reordering_maintains_termination_old(ModuleInfo, FullyStrict,
@@ -344,13 +370,17 @@
     % when making this decision.
     %
     % NOTE: this version is deprecated; new code should use the following
-    %       version because it supports the intermodule-analysis framework.
+    % version because it supports the intermodule-analysis framework.
     %
 :- pred reordering_maintains_termination_old(module_info::in, bool::in,
     hlds_goal::in, hlds_goal::in) is semidet.
 
+:- type reorder_maintains_termination
+    --->    reorder_maintains_termination
+    ;       reorder_does_not_maintain_termination.
+
     % reordering_maintains_termination(FullyStrict, Goal1, Goal2, Result,
-    %   !ModuleInfo, !IO).
+    %   !ModuleInfo).
     %
     % Result is `yes' if any possible change in termination behaviour from
     % reordering the goals is allowed according to the semantics options.
@@ -358,14 +388,15 @@
     % when making this decision.
     %
     % NOTE: new code should use this version as it supports the
-    %       intermodule-analysis framework.
+    % intermodule-analysis framework.
     %
-:- pred reordering_maintains_termination(bool::in, hlds_goal::in,
-    hlds_goal::in, bool::out, module_info::in, module_info::out) is det.
+:- pred reordering_maintains_termination(bool::in,
+    hlds_goal::in, hlds_goal::in, reorder_maintains_termination::out,
+    module_info::in, module_info::out) is det.
 
-    % generate_simple_call(ModuleInfo, ModuleName, ProcName, PredOrFunc,
-    %   ModeNo, Detism, Purity, Args, Features, InstMapDelta, Context,
-    %   CallGoal):
+    % generate_plain_call(ModuleInfo, PredOrFunc, ModuleName, ProcName,
+    %   TIArgVars, ArgVars, InstMapDelta, ModeNo, Detism, Purity, Features,
+    %   Context, CallGoal):
     %
     % Generate a call to a builtin procedure (e.g. from the private_builtin
     % or table_builtin module). This is used by HLDS->HLDS transformation
@@ -376,31 +407,29 @@
     %
     % If ModeNo = mode_no(N) then the Nth procedure is used, counting from 0.
     %
-:- pred generate_simple_call(module_info::in, module_name::in, string::in,
-    pred_or_func::in, mode_no::in, determinism::in, purity::in,
-    list(prog_var)::in, list(goal_feature)::in, instmap_delta::in,
-    term.context::in, hlds_goal::out) is det.
+:- pred generate_plain_call(module_info::in, pred_or_func::in,
+    module_name::in, string::in, list(prog_var)::in, list(prog_var)::in,
+    instmap_delta::in, mode_no::in, determinism::in, purity::in,
+    list(goal_feature)::in, term_context::in, hlds_goal::out) is det.
 
-    % generate_foreign_proc(ModuleInfo, ModuleName, ProcName, PredOrFunc,
-    %   ModeNo, Detism, Purity, Attributes, Args, ExtraArgs,
-    %   MaybeTraceRuntimeCond, Code, Features, InstMapDelta, Context,
-    %   CallGoal):
+    % generate_call_foreign_proc(ModuleInfo, PredOrFunc, ModuleName, ProcName,
+    %   TIArgs, Args, ExtraArgs, InstMapDelta, ModeNo, Detism, Purity,
+    %   Features, Attributes, MaybeTraceRuntimeCond, Code, Context, CallGoal):
     %
-    % generate_foreign_proc is similar to generate_simple_call,
+    % generate_call_foreign_proc is similar to generate_plain_call,
     % but also assumes that the called predicate is defined via a
     % foreign_proc, that the foreign_proc's arguments are as given in
-    % Args, its attributes are Attributes, and its code is Code.
+    % TIArgs and Args, its attributes are Attributes, and its code is Code.
     % As well as returning a foreign_code instead of a call, effectively
-    % inlining the call, generate_foreign_proc also passes ExtraArgs
-    % as well as Args.
+    % inlining the call, generate_call_foreign_proc also passes ExtraArgs
+    % as well as TIArgs and Args.
     %
-:- pred generate_foreign_proc(module_info::in, module_name::in, string::in,
-    pred_or_func::in, mode_no::in, determinism::in, purity::in,
-    pragma_foreign_proc_attributes::in,
-    list(foreign_arg)::in, list(foreign_arg)::in,
-    maybe(trace_expr(trace_runtime))::in, string::in,
-    list(goal_feature)::in, instmap_delta::in,
-    term.context::in, hlds_goal::out) is det.
+:- pred generate_call_foreign_proc(module_info::in, pred_or_func::in,
+    module_name::in, string::in, list(foreign_arg)::in, list(foreign_arg)::in,
+    list(foreign_arg)::in, instmap_delta::in, mode_no::in,
+    determinism::in, purity::in, list(goal_feature)::in,
+    pragma_foreign_proc_attributes::in, maybe(trace_expr(trace_runtime))::in,
+    string::in, term_context::in, hlds_goal::out) is det.
 
     % Generate a cast goal. The input and output insts are just ground.
     %
@@ -493,26 +522,25 @@ update_instmap_goal_info(GoalInfo0, !InstMap) :-
 
 %-----------------------------------------------------------------------------%
 
-create_renaming(OrigVars, InstMapDelta, !VarSet, !VarTypes, Unifies, NewVars,
+create_renaming(OrigVars, InstMapDelta, !VarTable, Unifies, NewVars,
         Renaming) :-
-    create_renaming_2(OrigVars, InstMapDelta, !VarSet, !VarTypes,
+    create_renaming_2(OrigVars, InstMapDelta, !VarTable,
         [], RevUnifies, [], RevNewVars, map.init, Renaming),
     list.reverse(RevNewVars, NewVars),
     list.reverse(RevUnifies, Unifies).
 
 :- pred create_renaming_2(list(prog_var)::in, instmap_delta::in,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    list(hlds_goal)::in, list(hlds_goal)::out,
+    var_table::in, var_table::out, list(hlds_goal)::in, list(hlds_goal)::out,
     list(prog_var)::in, list(prog_var)::out,
     prog_var_renaming::in, prog_var_renaming::out) is det.
 
-create_renaming_2([], _, !VarSet, !VarTypes, !RevUnifies, !RevNewVars,
-        !Renaming).
-create_renaming_2([OrigVar | OrigVars], InstMapDelta, !VarSet, !VarTypes,
+create_renaming_2([], _, !VarTable, !RevUnifies, !RevNewVars, !Renaming).
+create_renaming_2([OrigVar | OrigVars], InstMapDelta, !VarTable,
         !RevUnifies, !RevNewVars, !Renaming) :-
-    varset.new_var(NewVar, !VarSet),
-    lookup_var_type(!.VarTypes, OrigVar, Type),
-    add_var_type(NewVar, Type, !VarTypes),
+    lookup_var_entry(!.VarTable, OrigVar, OrigEntry),
+    OrigEntry = vte(_, OrigType, OrigTypeIsDummy),
+    NewEntry = vte("", OrigType, OrigTypeIsDummy),
+    add_var_entry(NewEntry, NewVar, !VarTable),
     instmap_delta_lookup_var(InstMapDelta, OrigVar, NewInst),
     UnifyMode = unify_modes_li_lf_ri_rf(NewInst, NewInst, free, NewInst),
     Unification = assign(OrigVar, NewVar),
@@ -522,17 +550,26 @@ create_renaming_2([OrigVar | OrigVars], InstMapDelta, !VarSet, !VarTypes,
     set_of_var.list_to_set([OrigVar, NewVar], NonLocals),
     UnifyInstMapDelta = instmap_delta_from_assoc_list([OrigVar - NewInst]),
     goal_info_init(NonLocals, UnifyInstMapDelta, detism_det, purity_pure,
-        term.context_init, GoalInfo),
+        dummy_context, GoalInfo),
     Goal = hlds_goal(GoalExpr, GoalInfo),
     !:RevUnifies = [Goal | !.RevUnifies],
     map.det_insert(OrigVar, NewVar, !Renaming),
     !:RevNewVars = [NewVar | !.RevNewVars],
-    create_renaming_2(OrigVars, InstMapDelta, !VarSet, !VarTypes,
+    create_renaming_2(OrigVars, InstMapDelta, !VarTable,
         !RevUnifies, !RevNewVars, !Renaming).
 
 %-----------------------------------------------------------------------------%
 
-clone_variable(Var, OldVarNames, OldVarTypes, !VarSet, !VarTypes, !Renaming,
+clone_variable(Var, OldVarTable, !VarTable, !Renaming, CloneVar) :-
+    ( if map.search(!.Renaming, Var, CloneVarPrime) then
+        CloneVar = CloneVarPrime
+    else
+        lookup_var_entry(OldVarTable, Var, Entry),
+        add_var_entry(Entry, CloneVar, !VarTable),
+        map.det_insert(Var, CloneVar, !Renaming)
+    ).
+
+clone_variable_vs(Var, OldVarNames, OldVarTypes, !VarSet, !VarTypes, !Renaming,
         CloneVar) :-
     ( if map.search(!.Renaming, Var, CloneVarPrime) then
         CloneVar = CloneVarPrime
@@ -552,12 +589,17 @@ clone_variable(Var, OldVarNames, OldVarTypes, !VarSet, !VarTypes, !Renaming,
         )
     ).
 
-clone_variables([], _, _, !VarSet, !VarTypes, !Renaming).
-clone_variables([Var | Vars], OldVarNames, OldVarTypes, !VarSet, !VarTypes,
+clone_variables([], _, !VarTable, !Renaming).
+clone_variables([Var | Vars], OldVarTable, !VarTable, !Renaming) :-
+    clone_variable(Var, OldVarTable, !VarTable, !Renaming, _Clone),
+    clone_variables(Vars, OldVarTable, !VarTable, !Renaming).
+
+clone_variables_vs([], _, _, !VarSet, !VarTypes, !Renaming).
+clone_variables_vs([Var | Vars], OldVarNames, OldVarTypes, !VarSet, !VarTypes,
         !Renaming) :-
-    clone_variable(Var, OldVarNames, OldVarTypes, !VarSet, !VarTypes,
+    clone_variable_vs(Var, OldVarNames, OldVarTypes, !VarSet, !VarTypes,
         !Renaming, _CloneVar),
-    clone_variables(Vars, OldVarNames, OldVarTypes, !VarSet, !VarTypes,
+    clone_variables_vs(Vars, OldVarNames, OldVarTypes, !VarSet, !VarTypes,
         !Renaming).
 
 %-----------------------------------------------------------------------------%
@@ -845,14 +887,21 @@ attach_features_to_goal_expr(Features, InFromGroundTerm,
 
 %-----------------------------------------------------------------------------%
 
-extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, VarTypes, ExistQVars,
-        NonLocals, NonLocalTypeInfos) :-
+extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, VarTable, ExistQVars,
+        NonLocals, NonLocalTiTciVars) :-
     % Find all non-local type vars. That is, type vars that are existentially
     % quantified or type vars that appear in the type of a non-local prog_var.
-
     set_of_var.to_sorted_list(NonLocals, NonLocalsList),
-    lookup_var_types(VarTypes, NonLocalsList, NonLocalsTypes),
-    type_vars_list(NonLocalsTypes, NonLocalTypeVarsList0),
+    lookup_var_types(VarTable, NonLocalsList, NonLocalsTypes),
+    do_extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, NonLocalsTypes,
+        ExistQVars, NonLocalTiTciVars).
+
+:- pred do_extra_nonlocal_typeinfos_typeclass_infos(rtti_varmaps::in,
+    list(mer_type)::in, existq_tvars::in, set_of_progvar::out) is det.
+
+do_extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, NonLocalsTypes,
+        ExistQVars, NonLocalTiTciVars) :-
+    type_vars_in_types(NonLocalsTypes, NonLocalTypeVarsList0),
     NonLocalTypeVarsList = ExistQVars ++ NonLocalTypeVarsList0,
     set_of_var.list_to_set(NonLocalTypeVarsList, NonLocalTypeVars),
 
@@ -885,8 +934,8 @@ extra_nonlocal_typeinfos_typeclass_infos(RttiVarMaps, VarTypes, ExistQVars,
         ), NonLocalTypeClassInfoVarsList),
     set_of_var.sorted_list_to_set(NonLocalTypeClassInfoVarsList,
         NonLocalTypeClassInfoVars),
-    NonLocalTypeInfos = set_of_var.union(NonLocalTypeInfoVars,
-        NonLocalTypeClassInfoVars).
+    set_of_var.union(NonLocalTypeInfoVars, NonLocalTypeClassInfoVars,
+        NonLocalTiTciVars).
 
 %-----------------------------------------------------------------------------%
 
@@ -1690,25 +1739,30 @@ goal_is_atomic(Goal, GoalIsAtomic) :-
 
 %-----------------------------------------------------------------------------%
 
-switch_to_disjunction(_, [], _, [], !VarSet, !VarTypes, !ModuleInfo).
+switch_to_disjunction(_, [], _, [], !VarTable, !ModuleInfo).
 switch_to_disjunction(Var, [Case | Cases], InstMap, Goals,
-        !VarSet, !VarTypes, !ModuleInfo) :-
+        !VarTable, !ModuleInfo) :-
     Case = case(MainConsId, OtherConsIds, CaseGoal),
     case_to_disjunct(Var, CaseGoal, InstMap, MainConsId, MainDisjunctGoal,
-        !VarSet, !VarTypes, !ModuleInfo),
-    list.map_foldl3(case_to_disjunct(Var, CaseGoal, InstMap),
-        OtherConsIds, OtherDisjunctGoals, !VarSet, !VarTypes, !ModuleInfo),
-    switch_to_disjunction(Var, Cases, InstMap, CasesGoals, !VarSet, !VarTypes,
+        !VarTable, !ModuleInfo),
+    list.map_foldl2(case_to_disjunct(Var, CaseGoal, InstMap),
+        OtherConsIds, OtherDisjunctGoals, !VarTable, !ModuleInfo),
+    switch_to_disjunction(Var, Cases, InstMap, CasesGoals, !VarTable,
         !ModuleInfo),
     Goals = [MainDisjunctGoal | OtherDisjunctGoals] ++ CasesGoals.
 
-case_to_disjunct(Var, CaseGoal, InstMap, ConsId, Disjunct, !VarSet, !VarTypes,
-        !ModuleInfo) :-
+case_to_disjunct(Var, CaseGoal, InstMap, ConsId, Disjunct,
+        !VarTable, !ModuleInfo) :-
     ConsArity = cons_id_arity(ConsId),
-    varset.new_vars(ConsArity, ArgVars, !VarSet),
-    lookup_var_type(!.VarTypes, Var, VarType),
+    lookup_var_type(!.VarTable, Var, VarType),
     type_util.get_cons_id_arg_types(!.ModuleInfo, VarType, ConsId, ArgTypes),
-    vartypes_add_corresponding_lists(ArgVars, ArgTypes, !VarTypes),
+    MakeArgEntry =
+        ( pred(T::in, vte("", T, IsDummy)::out) is det :-
+            IsDummy = is_type_a_dummy(!.ModuleInfo, T)
+        ),
+    list.map(MakeArgEntry, ArgTypes, ArgEntries),
+    list.map_foldl(add_var_entry, ArgEntries, ArgVars, !VarTable),
+
     instmap_lookup_var(InstMap, Var, Inst0),
     ( if
         inst_expand(!.ModuleInfo, Inst0, Inst1),
@@ -1811,7 +1865,7 @@ create_conj_from_list(Conjuncts, ConjType, ConjGoal) :-
 
 %-----------------------------------------------------------------------------%
 
-can_reorder_goals_old(ModuleInfo, VarTypes, FullyStrict,
+can_reorder_goals_old(ModuleInfo, VarTable, FullyStrict,
         InstmapBeforeEarlierGoal, EarlierGoal,
         InstmapBeforeLaterGoal, LaterGoal) :-
     % The logic here is mostly duplicated in can_reorder_goals below
@@ -1833,17 +1887,17 @@ can_reorder_goals_old(ModuleInfo, VarTypes, FullyStrict,
 
     % Don't reorder the goals if the later goal depends on the outputs
     % of the current goal.
-    not goal_depends_on_earlier_goal(LaterGoal, EarlierGoal,
-        InstmapBeforeEarlierGoal, VarTypes, ModuleInfo),
+    not goal_depends_on_earlier_goal(ModuleInfo, VarTable,
+        LaterGoal, EarlierGoal, InstmapBeforeEarlierGoal),
 
     % Don't reorder the goals if the later goal changes the instantiatedness
     % of any of the non-locals of the earlier goal. This is necessary if the
     % later goal clobbers any of the non-locals of the earlier goal, and
     % avoids rerunning full mode analysis in other cases.
-    not goal_depends_on_earlier_goal(EarlierGoal, LaterGoal,
-        InstmapBeforeLaterGoal, VarTypes, ModuleInfo).
+    not goal_depends_on_earlier_goal(ModuleInfo, VarTable,
+        EarlierGoal, LaterGoal, InstmapBeforeLaterGoal).
 
-can_reorder_goals(VarTypes, FullyStrict, InstmapBeforeEarlierGoal,
+can_reorder_goals(VarTable, FullyStrict, InstmapBeforeEarlierGoal,
         EarlierGoal, InstmapBeforeLaterGoal, LaterGoal, CanReorder,
         !ModuleInfo) :-
     % The logic here is mostly duplicated in can_reorder_goals_old above
@@ -1862,23 +1916,23 @@ can_reorder_goals(VarTypes, FullyStrict, InstmapBeforeEarlierGoal,
         ; LaterTrace = contains_trace_goal
         )
     then
-        CanReorder = no
+        CanReorder = cannot_reorder_goals
     else
         reordering_maintains_termination(FullyStrict,
             EarlierGoal, LaterGoal, MaintainsTermination, !ModuleInfo),
         (
-            MaintainsTermination = no,
-            CanReorder = no
+            MaintainsTermination = reorder_does_not_maintain_termination,
+            CanReorder = cannot_reorder_goals
         ;
-            MaintainsTermination = yes,
+            MaintainsTermination = reorder_maintains_termination,
             ( if
                 % Don't reorder the goals if the later goal depends on the
                 % outputs of the current goal.
                 %
-                goal_depends_on_earlier_goal(LaterGoal, EarlierGoal,
-                    InstmapBeforeEarlierGoal, VarTypes, !.ModuleInfo)
+                goal_depends_on_earlier_goal(!.ModuleInfo, VarTable,
+                    LaterGoal, EarlierGoal, InstmapBeforeEarlierGoal)
             then
-                CanReorder = no
+                CanReorder = cannot_reorder_goals
             else if
                 % Don't reorder the goals if the later goal changes the
                 % instantiatedness of any of the non-locals of the earlier
@@ -1886,12 +1940,12 @@ can_reorder_goals(VarTypes, FullyStrict, InstmapBeforeEarlierGoal,
                 % the non-locals of the earlier goal, and avoids rerunning
                 % full mode analysis in other cases.
                 %
-                goal_depends_on_earlier_goal(EarlierGoal, LaterGoal,
-                    InstmapBeforeLaterGoal, VarTypes, !.ModuleInfo)
+                goal_depends_on_earlier_goal(!.ModuleInfo, VarTable,
+                    EarlierGoal, LaterGoal, InstmapBeforeLaterGoal)
             then
-                CanReorder = no
+                CanReorder = cannot_reorder_goals
             else
-                CanReorder = yes
+                CanReorder = can_reorder_goals
             )
         )
     ).
@@ -1920,7 +1974,7 @@ reordering_maintains_termination_old(ModuleInfo, FullyStrict,
     % this could worsen the termination properties of the program.
     (
         EarlierCanFail = can_fail,
-        goal_cannot_loop_or_throw(ModuleInfo, LaterGoal)
+        goal_cannot_loop_or_throw_term_info(ModuleInfo, LaterGoal)
     ;
         EarlierCanFail = cannot_fail
     ).
@@ -1937,26 +1991,26 @@ reordering_maintains_termination(FullyStrict, EarlierGoal, LaterGoal,
 
     % If --fully-strict was specified, don't convert (can_loop, can_fail) into
     % (can_fail, can_loop).
-    goal_can_loop_or_throw(EarlierGoal, EarlierCanLoopOrThrow, !ModuleInfo),
+    goal_can_loop_or_throw_imaf(EarlierGoal, EarlierCanLoopOrThrow,
+        !ModuleInfo),
     ( if
         FullyStrict = yes,
         EarlierCanLoopOrThrow = can_loop_or_throw,
         LaterCanFail = can_fail
     then
-        MaintainsTermination = no
+        MaintainsTermination = reorder_does_not_maintain_termination
     else
         % Don't convert (can_fail, can_loop) into (can_loop, can_fail), since
         % this could worsen the termination properties of the program.
-        %
-        goal_can_loop_or_throw(LaterGoal, LaterCanLoopOrThrow,
+        goal_can_loop_or_throw_imaf(LaterGoal, LaterCanLoopOrThrow,
             !ModuleInfo),
         ( if
             EarlierCanFail = can_fail,
             LaterCanLoopOrThrow = can_loop_or_throw
         then
-            MaintainsTermination = no
+            MaintainsTermination = reorder_does_not_maintain_termination
         else
-            MaintainsTermination = yes
+            MaintainsTermination = reorder_maintains_termination
         )
     ).
 
@@ -1966,31 +2020,32 @@ reordering_maintains_termination(FullyStrict, EarlierGoal, LaterGoal,
     %
     % This code does work on the alias branch.
     %
-:- pred goal_depends_on_earlier_goal(hlds_goal::in, hlds_goal::in, instmap::in,
-    vartypes::in, module_info::in) is semidet.
+:- pred goal_depends_on_earlier_goal(module_info::in, var_table::in,
+    hlds_goal::in, hlds_goal::in, instmap::in) is semidet.
 
-goal_depends_on_earlier_goal(LaterGoal, EarlierGoal, InstMapBeforeEarlierGoal,
-        VarTypes, ModuleInfo) :-
+goal_depends_on_earlier_goal(ModuleInfo, VarTable,
+        LaterGoal, EarlierGoal, InstMapBeforeEarlierGoal) :-
     LaterGoal = hlds_goal(_, LaterGoalInfo),
     EarlierGoal = hlds_goal(_, EarlierGoalInfo),
     EarlierInstMapDelta = goal_info_get_instmap_delta(EarlierGoalInfo),
     apply_instmap_delta(EarlierInstMapDelta,
         InstMapBeforeEarlierGoal, InstMapAfterEarlierGoal),
-
-    instmap_changed_vars(ModuleInfo, VarTypes,
-        InstMapBeforeEarlierGoal, InstMapAfterEarlierGoal, EarlierChangedVars),
-
+    instmap_changed_vars(ModuleInfo, VarTable,
+        InstMapBeforeEarlierGoal, InstMapAfterEarlierGoal,
+        EarlierChangedVars),
     LaterGoalNonLocals = goal_info_get_nonlocals(LaterGoalInfo),
     set_of_var.intersect(EarlierChangedVars, LaterGoalNonLocals, Intersection),
     not set_of_var.is_empty(Intersection).
 
 %-----------------------------------------------------------------------------%
 
-generate_simple_call(ModuleInfo, ModuleName, ProcName, PredOrFunc, ModeNo,
-        Detism, Purity, Args, Features, InstMapDelta0, Context, Goal) :-
-    list.length(Args, Arity),
+generate_plain_call(ModuleInfo, PredOrFunc, ModuleName, ProcName,
+        TIArgVars, NonTIArgVars, InstMapDelta0, ModeNo, Detism, Purity,
+        Features, Context, Goal) :-
+    PredFormArity = arg_list_arity(NonTIArgVars),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     lookup_builtin_pred_proc_id(ModuleInfo, ModuleName, ProcName,
-        PredOrFunc, Arity, ModeNo, PredId, ProcId),
+        PredOrFunc, UserArity, ModeNo, PredId, ProcId),
 
     % builtin_state only uses this to work out whether
     % this is the "recursive" clause generated for the compiler
@@ -1998,9 +2053,10 @@ generate_simple_call(ModuleInfo, ModuleName, ProcName, PredOrFunc, ModeNo,
     InvalidPredId = invalid_pred_id,
     BuiltinState = builtin_state(ModuleInfo, InvalidPredId, PredId, ProcId),
 
-    GoalExpr = plain_call(PredId, ProcId, Args, BuiltinState, no,
+    ArgVars = TIArgVars ++ NonTIArgVars,
+    GoalExpr = plain_call(PredId, ProcId, ArgVars, BuiltinState, no,
         qualified(ModuleName, ProcName)),
-    set_of_var.list_to_set(Args, NonLocals),
+    set_of_var.list_to_set(ArgVars, NonLocals),
     determinism_components(Detism, _CanFail, NumSolns),
     (
         NumSolns = at_most_zero,
@@ -2020,13 +2076,15 @@ generate_simple_call(ModuleInfo, ModuleName, ProcName, PredOrFunc, ModeNo,
     list.foldl(goal_info_add_feature, Features, GoalInfo0, GoalInfo),
     Goal = hlds_goal(GoalExpr, GoalInfo).
 
-generate_foreign_proc(ModuleInfo, ModuleName, ProcName, PredOrFunc, ModeNo,
-        Detism, Purity, Attributes, Args, ExtraArgs, MaybeTraceRuntimeCond,
-        Code, Features, InstMapDelta0, Context, Goal) :-
-    list.length(Args, Arity),
+generate_call_foreign_proc(ModuleInfo, PredOrFunc, ModuleName, ProcName,
+        TIArgs, NonTIArgs, ExtraArgs, InstMapDelta0, ModeNo, Detism, Purity,
+        Features, Attributes, MaybeTraceRuntimeCond, Code, Context, Goal) :-
+    PredFormArity = arg_list_arity(NonTIArgs),
+    user_arity_pred_form_arity(PredOrFunc, UserArity, PredFormArity),
     lookup_builtin_pred_proc_id(ModuleInfo, ModuleName, ProcName,
-        PredOrFunc, Arity, ModeNo, PredId, ProcId),
+        PredOrFunc, UserArity, ModeNo, PredId, ProcId),
 
+    Args = TIArgs ++ NonTIArgs,
     GoalExpr = call_foreign_proc(Attributes, PredId, ProcId, Args, ExtraArgs,
         MaybeTraceRuntimeCond, fp_impl_ordinary(Code, no)),
     ArgVars = list.map(foreign_arg_var, Args),

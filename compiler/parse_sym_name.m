@@ -26,7 +26,7 @@
 
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.maybe_error.
 :- import_module parse_tree.prog_data.
 
@@ -53,7 +53,7 @@
     % list of its argument terms, and if successful return them in Result.
     % However, in case it does not succeed, parse_sym_name_and_args
     % also takes as input Varset (from which the variables in Term are taken),
-    % and a format_component list describing the context from which it was
+    % and a format_piece list describing the context from which it was
     % called, e.g. "In clause head:".
     %
     % Note: parse_sym_name_and_args is intended for places where a symbol
@@ -61,7 +61,7 @@
     % For places where a symbol is _defined_, use the related predicate
     % parse_implicitly_qualified_sym_name_and_args.
     %
-:- pred parse_sym_name_and_args(varset::in, cord(format_component)::in,
+:- pred parse_sym_name_and_args(varset::in, cord(format_piece)::in,
     term(T)::in, maybe_functor(T)::out) is det.
 :- pred try_parse_sym_name_and_args(term(T)::in,
     sym_name::out, list(term(T))::out) is semidet.
@@ -78,40 +78,33 @@
     % Versions of parse_sym_name_and_args and try_parse_sym_name_and_args
     % that require the given term to have no arguments.
     %
-:- pred parse_sym_name_and_no_args(varset::in, cord(format_component)::in,
+:- pred parse_sym_name_and_no_args(varset::in, cord(format_piece)::in,
     term(T)::in, maybe1(sym_name)::out) is det.
 :- pred try_parse_sym_name_and_no_args(term(T)::in, sym_name::out) is semidet.
 
-    % parse_implicitly_qualified_sym_name_and_args(ModuleName, Term,
-    %   VarSet, ContextPieces, Result):
+    % parse_implicitly_qualified_sym_name_and_args(DefaultModuleName,
+    %   VarSet, ContextPieces, Term, Result):
     %
     % Parse Term into a sym_name that is its top function symbol and a
     % list of its argument terms, and if successful return them in Result.
     % This predicate thus does almost the same job as the predicate
     % parse_sym_name_and_args above, the difference being that
     % if the sym_name is qualified, then we check whether it is qualified
-    % with ModuleName, and if it isn't qualified, then we qualify it with
-    % ModuleName (unless ModuleName is root_module_name). This is the
-    % right thing to do for clause heads, which is the intended job of
+    % with (possibly a part of) DefaultModuleName, and if it isn't qualified,
+    % then we qualify it with DefaultModuleName . This is the right thing
+    % to do for clause heads, which is the intended job of
     % parse_implicitly_qualified_sym_name_and_args.
     %
 :- pred parse_implicitly_qualified_sym_name_and_args(module_name::in,
-    term(T)::in, varset::in, cord(format_component)::in,
+    varset::in, cord(format_piece)::in, term(T)::in,
     maybe_functor(T)::out) is det.
 :- pred parse_implicitly_qualified_sym_name_and_no_args(module_name::in,
-    term(T)::in, varset::in, cord(format_component)::in,
+    varset::in, cord(format_piece)::in, term(T)::in,
     maybe1(sym_name)::out) is det.
-:- pred try_parse_implicitly_qualified_sym_name_and_args(module_name::in,
-    term(T)::in, sym_name::out, list(term(T))::out) is semidet.
-:- pred try_parse_implicitly_qualified_sym_name_and_no_args(module_name::in,
-    term(T)::in, sym_name::out) is semidet.
 
     % These predicates do just the "implicitly qualifying" part of the
     % job of the predicates above.
     %
-:- pred implicitly_qualify_sym_name_and_args(module_name::in, term(T)::in,
-    sym_name::in, list(term(T))::in, maybe2(sym_name, list(term(T)))::out)
-    is det.
 :- pred implicitly_qualify_sym_name(module_name::in, term(T)::in,
     sym_name::in, maybe1(sym_name)::out) is det.
 :- pred try_to_implicitly_qualify_sym_name(module_name::in,
@@ -135,6 +128,10 @@
 :- pred parse_implicitly_qualified_symbol_name(module_name::in, varset::in,
     term::in, maybe1(sym_name)::out) is det.
 
+:- type sym_name_specifier
+    --->    sym_name_specifier_name(sym_name)
+    ;       sym_name_specifier_name_arity(sym_name, user_arity).
+
     % A SymbolNameSpecifier is one of
     %   SymbolName
     %   SymbolName/Arity
@@ -143,15 +140,6 @@
 :- pred parse_symbol_name_specifier(varset::in, term::in,
     maybe1(sym_name_specifier)::out) is det.
 
-:- pred parse_implicitly_qualified_symbol_name_specifier(module_name::in,
-    varset::in, term::in, maybe1(sym_name_specifier)::out) is det.
-
-    % We use the empty module name ('') as the "root" module name; when adding
-    % default module qualifiers in parse_implicitly_qualified_*,
-    % if the default module is the root module then we don't add any qualifier.
-    %
-:- func root_module_name = module_name.
-
 %-----------------------------------------------------------------------------e
 
 :- implementation.
@@ -159,6 +147,7 @@
 :- import_module parse_tree.parse_tree_out_term.
 
 :- import_module int.
+:- import_module term_int.
 
 parse_sym_name_and_args(VarSet, ContextPieces, Term, MaybeSymNameAndArgs) :-
     ( if
@@ -177,7 +166,7 @@ parse_sym_name_and_args(VarSet, ContextPieces, Term, MaybeSymNameAndArgs) :-
                 ModuleTermStr = describe_error_term(GenericVarSet, ModuleTerm),
                 Pieces = cord.list(ContextPieces) ++
                     [lower_case_next_if_not_first,
-                    words("Error: module name expected before '.'"),
+                    words("Error: expected module name before '.'"),
                     words("in qualified symbol name, got"),
                     words(ModuleTermStr), suffix("."), nl],
                 Spec = simplest_spec($pred, severity_error,
@@ -188,7 +177,7 @@ parse_sym_name_and_args(VarSet, ContextPieces, Term, MaybeSymNameAndArgs) :-
             varset.coerce(VarSet, GenericVarSet),
             TermStr = describe_error_term(GenericVarSet, Term),
             Pieces = cord.list(ContextPieces) ++ [lower_case_next_if_not_first,
-                words("Error: identifier expected after '.'"),
+                words("Error: expected identifier after '.'"),
                 words("in qualified symbol name, got"),
                 words(TermStr), suffix("."), nl],
             Spec = simplest_spec($pred, severity_error,
@@ -285,7 +274,7 @@ parse_sym_name_and_no_args(VarSet, ContextPieces, Term, MaybeSymName) :-
         )
     ).
 
-:- pred insist_on_no_args(cord(format_component)::in, term(T)::in,
+:- pred insist_on_no_args(cord(format_piece)::in, term(T)::in,
     sym_name::in, list(term(T))::in, maybe1(sym_name)::out) is det.
 
 insist_on_no_args(ContextPieces, Term, SymName, Args, MaybeSymName) :-
@@ -321,8 +310,8 @@ try_parse_sym_name_and_no_args(Term, SymName) :-
 
 %-----------------------------------------------------------------------------e
 
-parse_implicitly_qualified_sym_name_and_args(DefaultModuleName, Term,
-        VarSet, ContextPieces, MaybeSymNameAndArgs) :-
+parse_implicitly_qualified_sym_name_and_args(DefaultModuleName, VarSet,
+        ContextPieces, Term, MaybeSymNameAndArgs) :-
     parse_sym_name_and_args(VarSet, ContextPieces, Term, MaybeSymNameAndArgs0),
     (
         MaybeSymNameAndArgs0 = ok2(SymName0, Args),
@@ -333,8 +322,8 @@ parse_implicitly_qualified_sym_name_and_args(DefaultModuleName, Term,
         MaybeSymNameAndArgs = MaybeSymNameAndArgs0
     ).
 
-parse_implicitly_qualified_sym_name_and_no_args(DefaultModuleName, Term,
-        VarSet, ContextPieces, MaybeSymName) :-
+parse_implicitly_qualified_sym_name_and_no_args(DefaultModuleName, VarSet,
+        ContextPieces, Term, MaybeSymName) :-
     parse_sym_name_and_args(VarSet, ContextPieces, Term, MaybeSymNameAndArgs0),
     (
         MaybeSymNameAndArgs0 = ok2(SymName0, Args0),
@@ -365,17 +354,11 @@ parse_implicitly_qualified_sym_name_and_no_args(DefaultModuleName, Term,
         MaybeSymName = error1(Specs)
     ).
 
-try_parse_implicitly_qualified_sym_name_and_args(DefaultModuleName, Term,
-        SymName, Args) :-
-    try_parse_sym_name_and_args(Term, SymName0, Args),
-    try_to_implicitly_qualify_sym_name(DefaultModuleName, SymName0, SymName).
-
-try_parse_implicitly_qualified_sym_name_and_no_args(DefaultModuleName, Term,
-        SymName) :-
-    try_parse_sym_name_and_no_args(Term, SymName0),
-    try_to_implicitly_qualify_sym_name(DefaultModuleName, SymName0, SymName).
-
 %-----------------------------------------------------------------------------e
+
+:- pred implicitly_qualify_sym_name_and_args(module_name::in, term(T)::in,
+    sym_name::in, list(term(T))::in, maybe2(sym_name, list(term(T)))::out)
+    is det.
 
 implicitly_qualify_sym_name_and_args(DefaultModuleName, Term, SymName0, Args,
         MaybeSymNameAndArgs) :-
@@ -385,9 +368,9 @@ implicitly_qualify_sym_name_and_args(DefaultModuleName, Term, SymName0, Args,
     then
         MaybeSymNameAndArgs = ok2(SymName, Args)
     else
-        Pieces = [words("Error: module qualifier in definition"),
-            words("does not match preceding"), decl("module"),
-            words("declaration."), nl],
+        Pieces = [words("Error: the module qualifier in"),
+            qual_sym_name(SymName0), words("does not match"),
+            words("the preceding"), decl("module"), words("declaration."), nl],
         Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
             get_term_context(Term), Pieces),
         MaybeSymNameAndArgs = error2([Spec])
@@ -400,27 +383,25 @@ implicitly_qualify_sym_name(DefaultModuleName, Term, SymName0, MaybeSymName) :-
     then
         MaybeSymName = ok1(SymName)
     else
-        Pieces = [words("Error: module qualifier in definition"),
-            words("does not match preceding"), decl("module"),
-            words("declaration."), nl],
+        Pieces = [words("Error: the module qualifier in"),
+            qual_sym_name(SymName0), words("does not match"),
+            words("the preceding"), decl("module"), words("declaration."), nl],
         Spec = simplest_spec($pred, severity_error, phase_term_to_parse_tree,
             get_term_context(Term), Pieces),
         MaybeSymName = error1([Spec])
     ).
 
 try_to_implicitly_qualify_sym_name(DefaultModuleName, SymName0, SymName) :-
-    ( if DefaultModuleName = root_module_name then
-        SymName = SymName0
-    else
-        ( if
-            SymName0 = qualified(ModuleName, _),
-            not partial_sym_name_matches_full(ModuleName, DefaultModuleName)
-        then
-            fail
+    (
+        SymName0 = qualified(ModuleName0, Name0),
+        ( if partial_sym_name_matches_full(ModuleName0, DefaultModuleName) then
+            SymName = qualified(DefaultModuleName, Name0)
         else
-            UnqualName = unqualify_name(SymName0),
-            SymName = qualified(DefaultModuleName, UnqualName)
+            fail
         )
+    ;
+        SymName0 = unqualified(Name0),
+        SymName = qualified(DefaultModuleName, Name0)
     ).
 
 %-----------------------------------------------------------------------------e
@@ -492,25 +473,9 @@ parse_implicitly_qualified_symbol_name(DefaultModuleName, VarSet, Term,
         MaybeSymName) :-
     parse_symbol_name(VarSet, Term, MaybeSymName0),
     (
-        MaybeSymName0 = ok1(SymName),
-        ( if
-            DefaultModuleName = root_module_name
-        then
-            MaybeSymName = MaybeSymName0
-        else if
-            SymName = qualified(ModuleName, _),
-            not partial_sym_name_matches_full(ModuleName, DefaultModuleName)
-        then
-            Pieces = [words("Error: module qualifier in definition"),
-                words("does not match preceding"), decl("module"),
-                words("declaration."), nl],
-            Spec = simplest_spec($pred, severity_error,
-                phase_term_to_parse_tree, get_term_context(Term), Pieces),
-            MaybeSymName = error1([Spec])
-        else
-            UnqualName = unqualify_name(SymName),
-            MaybeSymName = ok1(qualified(DefaultModuleName, UnqualName))
-        )
+        MaybeSymName0 = ok1(SymName0),
+        implicitly_qualify_sym_name(DefaultModuleName, Term,
+            SymName0, MaybeSymName)
     ;
         MaybeSymName0 = error1(_),
         MaybeSymName = MaybeSymName0
@@ -519,23 +484,18 @@ parse_implicitly_qualified_symbol_name(DefaultModuleName, VarSet, Term,
 %-----------------------------------------------------------------------------e
 
 parse_symbol_name_specifier(VarSet, Term, MaybeSymNameSpecifier) :-
-    parse_implicitly_qualified_symbol_name_specifier(root_module_name, VarSet,
-        Term, MaybeSymNameSpecifier).
-
-parse_implicitly_qualified_symbol_name_specifier(DefaultModule, VarSet, Term,
-        MaybeSymNameSpecifier) :-
     ( if Term = term.functor(term.atom("/"), [NameTerm, ArityTerm], _) then
-        ( if decimal_term_to_int(ArityTerm, Arity) then
+        ( if term_int.decimal_term_to_int(ArityTerm, Arity) then
             ( if Arity >= 0 then
-                parse_implicitly_qualified_symbol_name(DefaultModule, VarSet,
-                    NameTerm, MaybeName),
+                parse_symbol_name(VarSet, NameTerm, MaybeName),
                 (
                     MaybeName = error1(Specs),
                     MaybeSymNameSpecifier = error1(Specs)
                 ;
                     MaybeName = ok1(Name),
+                    UserArity = user_arity(Arity),
                     MaybeSymNameSpecifier =
-                        ok1(sym_name_specifier_name_arity(Name, Arity))
+                        ok1(sym_name_specifier_name_arity(Name, UserArity))
                 )
             else
                 Pieces = [words("Error: arity in symbol name specifier"),
@@ -552,8 +512,7 @@ parse_implicitly_qualified_symbol_name_specifier(DefaultModule, VarSet, Term,
             MaybeSymNameSpecifier = error1([Spec])
         )
     else
-        parse_implicitly_qualified_symbol_name(DefaultModule, VarSet, Term,
-            MaybeSymbolName),
+        parse_symbol_name(VarSet, Term, MaybeSymbolName),
         (
             MaybeSymbolName = error1(Specs),
             MaybeSymNameSpecifier = error1(Specs)
@@ -562,10 +521,6 @@ parse_implicitly_qualified_symbol_name_specifier(DefaultModule, VarSet, Term,
             MaybeSymNameSpecifier = ok1(sym_name_specifier_name(SymbolName))
         )
     ).
-
-%-----------------------------------------------------------------------------e
-
-root_module_name = unqualified("").
 
 %-----------------------------------------------------------------------------e
 :- end_module parse_tree.parse_sym_name.

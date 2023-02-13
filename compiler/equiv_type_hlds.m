@@ -26,7 +26,7 @@
 
 %-----------------------------------------------------------------------------%
 
-:- pred replace_in_hlds(module_info::in, module_info::out) is det.
+:- pred replace_equiv_types_in_hlds(module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -34,8 +34,8 @@
 :- implementation.
 
 :- import_module check_hlds.
-:- import_module check_hlds.recompute_instmap_deltas.
 :- import_module check_hlds.polymorphism_type_info.
+:- import_module check_hlds.recompute_instmap_deltas.
 :- import_module check_hlds.type_util.
 :- import_module hlds.hlds_cons.
 :- import_module hlds.hlds_data.
@@ -46,7 +46,6 @@
 :- import_module hlds.instmap.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
@@ -55,6 +54,7 @@
 :- import_module parse_tree.prog_rename.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_type_subst.
+:- import_module parse_tree.var_table.
 :- import_module recompilation.
 
 :- import_module assoc_list.
@@ -65,12 +65,12 @@
 :- import_module pair.
 :- import_module require.
 :- import_module set.
-:- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %-----------------------------------------------------------------------------%
 
-replace_in_hlds(!ModuleInfo) :-
+replace_equiv_types_in_hlds(!ModuleInfo) :-
     module_info_get_type_table(!.ModuleInfo, TypeTable0),
     foldl2_over_type_ctor_defns(add_type_to_eqv_map, TypeTable0,
         map.init, TypeEqvMap, set.init, EqvExportTypes),
@@ -165,7 +165,7 @@ replace_in_type_defn(ModuleName, TypeEqvMap, TypeCtor, !Defn,
     hlds_data.get_type_defn_tvarset(!.Defn, TVarSet0),
     hlds_data.get_type_defn_body(!.Defn, Body0),
     TypeCtor = type_ctor(TypeCtorSymName, _TypeCtorArity),
-    TypeCtorItem = type_ctor_to_item_name(TypeCtor),
+    TypeCtorItem = type_ctor_to_recomp_item_name(TypeCtor),
     maybe_start_recording_expanded_items(ModuleName, TypeCtorSymName,
         !.MaybeRecompInfo, EquivTypeInfo0),
     (
@@ -230,7 +230,7 @@ replace_in_type_defn(ModuleName, TypeEqvMap, TypeCtor, !Defn,
         Body = Body0,
         TVarSet = TVarSet0
     ),
-    ItemId = item_id(type_defn_item, TypeCtorItem),
+    ItemId = recomp_item_id(recomp_type_defn, TypeCtorItem),
     finish_recording_expanded_items(ItemId, EquivTypeInfo, !MaybeRecompInfo),
     hlds_data.set_type_defn_body(Body, !Defn),
     hlds_data.set_type_defn_tvarset(TVarSet, !Defn).
@@ -293,7 +293,7 @@ replace_in_inst_table(TypeEqvMap, !InstTable, !Cache) :-
 %
 %   inst_table_get_user_insts(!.InstTable, UserInsts0),
 %   map.map_values(
-%       (pred(_::in, Defn0::in, Defn::out) is det :-
+%       ( pred(_::in, Defn0::in, Defn::out) is det :-
 %           Body0 = Defn0 ^ inst_body,
 %           (
 %               Body0 = abstract_inst,
@@ -615,10 +615,13 @@ replace_in_pred(TypeEqvMap, PredId, !ModuleInfo, !Cache) :-
         pred_info_set_class_context(ClassContext, !PredInfo),
         pred_info_set_arg_types(ArgTVarSet, ExistQVars, ArgTypes, !PredInfo),
 
-        ItemId = item_id(pred_or_func_to_item_type(
-            pred_info_is_pred_or_func(!.PredInfo)),
-            item_name(qualified(pred_info_module(!.PredInfo), PredName),
-                pred_info_orig_arity(!.PredInfo))),
+        PredOrFunc = pred_info_is_pred_or_func(!.PredInfo),
+        ItemType = pred_or_func_to_recomp_item_type(PredOrFunc),
+        PredModuleName = pred_info_module(!.PredInfo),
+        PredSymName = qualified(PredModuleName, PredName),
+        PredFormArity = pred_info_orig_arity(!.PredInfo),
+        ItemName = recomp_item_name(PredSymName, PredFormArity),
+        ItemId = recomp_item_id(ItemType, ItemName),
         finish_recording_expanded_items(ItemId, !.EquivTypeInfo,
             MaybeRecompInfo0, MaybeRecompInfo),
         module_info_set_maybe_recompilation_info(MaybeRecompInfo, !ModuleInfo),
@@ -652,15 +655,16 @@ replace_in_proc(TypeEqvMap, !ProcInfo, !ModuleInfo, !PredInfo, !Cache) :-
             MaybeDeclModes0 = no
         ),
 
-        proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-        transform_foldl_var_types(hlds_replace_in_type(TypeEqvMap),
-            VarTypes0, VarTypes, !TVarSet),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_get_var_table(!.ProcInfo, VarTable0),
+        transform_foldl_var_table(
+            hlds_replace_in_var_table_entry(!.ModuleInfo, TypeEqvMap),
+            VarTable0, VarTable, !TVarSet),
+        proc_info_set_var_table(VarTable, !ProcInfo),
 
         proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
         rtti_varmaps_types(RttiVarMaps0, AllTypes),
         list.foldl2(
-            (pred(OldType::in, !.TMap::in, !:TMap::out,
+            ( pred(OldType::in, !.TMap::in, !:TMap::out,
                     !.TVarSet::in, !:TVarSet::out) is det :-
                 hlds_replace_in_type(TypeEqvMap, OldType, NewType, !TVarSet),
                 map.set(OldType, NewType, !TMap)
@@ -684,9 +688,9 @@ replace_in_proc(TypeEqvMap, !ProcInfo, !ModuleInfo, !PredInfo, !Cache) :-
         ),
         (
             Recompute = yes,
-            requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
-            recompute_instmap_delta_proc(
-                do_not_recompute_atomic_instmap_deltas, !ProcInfo, !ModuleInfo)
+            requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+            recompute_instmap_delta_proc(no_recomp_atomics,
+                !ProcInfo, !ModuleInfo)
         ;
             Recompute = no
         ),
@@ -695,20 +699,33 @@ replace_in_proc(TypeEqvMap, !ProcInfo, !ModuleInfo, !PredInfo, !Cache) :-
 
 %-----------------------------------------------------------------------------%
 
+    % Replace equivalence types in a var_table_entry.
+    %
+:- pred hlds_replace_in_var_table_entry(module_info::in, type_eqv_map::in,
+    var_table_entry::in, var_table_entry::out,
+    tvarset::in, tvarset::out) is det.
+
+hlds_replace_in_var_table_entry(ModuleInfo, TypeEqvMap, Entry0, Entry,
+        !TVarSet) :-
+    Entry0 = vte(Name, Type0, _IsDummy),
+    hlds_replace_in_type(TypeEqvMap, Type0, Type, !TVarSet),
+    IsDummy = is_type_a_dummy(ModuleInfo, Type),
+    Entry = vte(Name, Type, IsDummy).
+
     % Replace equivalence types in a given type.
     %
 :- pred hlds_replace_in_type(type_eqv_map::in, mer_type::in, mer_type::out,
     tvarset::in, tvarset::out) is det.
 
-hlds_replace_in_type(TypeEqvMap, Type0, Type, !VarSet) :-
-    hlds_replace_in_type_2(TypeEqvMap, [], Type0, Type, _Changed, !VarSet).
+hlds_replace_in_type(TypeEqvMap, Type0, Type, !TVarSet) :-
+    hlds_replace_in_type_2(TypeEqvMap, [], Type0, Type, _Changed, !TVarSet).
 
 :- pred hlds_replace_in_type_2(type_eqv_map::in, list(type_ctor)::in,
     mer_type::in, mer_type::out, maybe_changed::out,
     tvarset::in, tvarset::out) is det.
 
 hlds_replace_in_type_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-        Type0, Type, Changed, !VarSet) :-
+        Type0, Type, Changed, !TVarSet) :-
     (
         ( Type0 = type_variable(_, _)
         ; Type0 = builtin_type(_)
@@ -718,18 +735,18 @@ hlds_replace_in_type_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
     ;
         Type0 = defined_type(SymName, TypeArgs0, Kind),
         hlds_replace_in_type_list_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-            TypeArgs0, TypeArgs, no_change, ArgsChanged, !VarSet),
+            TypeArgs0, TypeArgs, no_change, ArgsChanged, !TVarSet),
         Arity = list.length(TypeArgs),
         TypeCtor = type_ctor(SymName, Arity),
         hlds_replace_type_ctor(TypeEqvMap, TypeCtorsAlreadyExpanded, Type0,
-            TypeCtor, TypeArgs, Kind, Type, ArgsChanged, Changed, !VarSet)
+            TypeCtor, TypeArgs, Kind, Type, ArgsChanged, Changed, !TVarSet)
     ;
         Type0 = higher_order_type(PorF, ArgTypes0, HOInstInfo, Purity,
             EvalMethod),
         % XXX replace in HOInstInfo
         HOInstInfoChanged = no_change,
         hlds_replace_in_type_list_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-            ArgTypes0, ArgTypes, HOInstInfoChanged, Changed, !VarSet),
+            ArgTypes0, ArgTypes, HOInstInfoChanged, Changed, !TVarSet),
         (
             Changed = no_change,
             Type = Type0
@@ -741,21 +758,21 @@ hlds_replace_in_type_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
     ;
         Type0 = tuple_type(Args0, Kind),
         hlds_replace_in_type_list_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-            Args0, Args, no_change, Changed, !VarSet),
+            Args0, Args, no_change, Changed, !TVarSet),
         ( Changed = no_change, Type = Type0
         ; Changed = changed, Type = tuple_type(Args, Kind)
         )
     ;
         Type0 = apply_n_type(Var, Args0, Kind),
         hlds_replace_in_type_list_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-            Args0, Args, no_change, Changed, !VarSet),
+            Args0, Args, no_change, Changed, !TVarSet),
         ( Changed = no_change, Type = Type0
         ; Changed = changed, Type = apply_n_type(Var, Args, Kind)
         )
     ;
         Type0 = kinded_type(RawType0, Kind),
         hlds_replace_in_type_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-            RawType0, RawType, Changed, !VarSet),
+            RawType0, RawType, Changed, !TVarSet),
         ( Changed = no_change, Type = Type0
         ; Changed = changed, Type = kinded_type(RawType, Kind)
         )
@@ -765,11 +782,11 @@ hlds_replace_in_type_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
     list(mer_type)::in, list(mer_type)::out,
     maybe_changed::in, maybe_changed::out, tvarset::in, tvarset::out) is det.
 
-hlds_replace_in_type_list_2(_EqvMap, _Seen, [], [], !Changed, !VarSet).
+hlds_replace_in_type_list_2(_EqvMap, _Seen, [], [], !Changed, !TVarSet).
 hlds_replace_in_type_list_2(TypeEqvMap, Seen, [Type0 | Types0], [Type | Types],
-        !Changed, !VarSet) :-
+        !Changed, !TVarSet) :-
     hlds_replace_in_type_2(TypeEqvMap, Seen, Type0, Type, TypeChanged,
-        !VarSet),
+        !TVarSet),
     (
         TypeChanged = changed,
         !:Changed = changed
@@ -777,14 +794,14 @@ hlds_replace_in_type_list_2(TypeEqvMap, Seen, [Type0 | Types0], [Type | Types],
         TypeChanged = no_change
     ),
     hlds_replace_in_type_list_2(TypeEqvMap, Seen, Types0, Types,
-        !Changed, !VarSet).
+        !Changed, !TVarSet).
 
 :- pred hlds_replace_type_ctor(type_eqv_map::in, list(type_ctor)::in,
     mer_type::in, type_ctor::in, list(mer_type)::in, kind::in, mer_type::out,
     maybe_changed::in, maybe_changed::out, tvarset::in, tvarset::out) is det.
 
 hlds_replace_type_ctor(TypeEqvMap, TypeCtorsAlreadyExpanded0, Type0,
-        TypeCtor, ArgTypes, Kind, Type, !Changed, !VarSet) :-
+        TypeCtor, ArgTypes, Kind, Type, !Changed, !TVarSet) :-
     ( if list.member(TypeCtor, TypeCtorsAlreadyExpanded0) then
         AlreadyExpanded = yes
     else
@@ -802,7 +819,7 @@ hlds_replace_type_ctor(TypeEqvMap, TypeCtorsAlreadyExpanded0, Type0,
         % qualifications with the type variables in the predicate's
         % declaration.
 
-        tvarset_merge_renaming_without_names(!.VarSet, EqvVarSet, !:VarSet,
+        tvarset_merge_renaming_without_names(!.TVarSet, EqvVarSet, !:TVarSet,
             Renaming),
         AlreadyExpanded = no
     then
@@ -812,7 +829,7 @@ hlds_replace_type_ctor(TypeEqvMap, TypeCtorsAlreadyExpanded0, Type0,
         apply_subst_to_type(Subst, Body1, Body),
         TypeCtorsAlreadyExpanded = [TypeCtor | TypeCtorsAlreadyExpanded0],
         hlds_replace_in_type_2(TypeEqvMap, TypeCtorsAlreadyExpanded,
-            Body, Type, _BodyChanged, !VarSet),
+            Body, Type, _BodyChanged, !TVarSet),
         !:Changed = changed
     else
         (
@@ -1600,16 +1617,17 @@ replace_in_goal_expr(TypeEqvMap, GoalExpr0, GoalExpr, Changed, !Info) :-
         )
     ;
         GoalExpr0 = unify(Var, _, _, _, _),
-        module_info_get_type_table(!.Info ^ ethri_module_info, TypeTable),
-        proc_info_get_vartypes(!.Info ^ ethri_proc_info, VarTypes),
-        proc_info_get_rtti_varmaps(!.Info ^ ethri_proc_info, RttiVarMaps),
-        lookup_var_type(VarTypes, Var, VarType),
-        TypeCtorCat = classify_type(!.Info ^ ethri_module_info, VarType),
+        ModuleInfo0 = !.Info ^ ethri_module_info,
+        ProcInfo0 = !.Info ^ ethri_proc_info,
+        module_info_get_type_table(ModuleInfo0, TypeTable),
+        proc_info_get_var_table(ProcInfo0, VarTable),
+        proc_info_get_rtti_varmaps(ProcInfo0, RttiVarMaps),
+        lookup_var_type(VarTable, Var, VarType),
+        TypeCtorCat = classify_type(ModuleInfo0, VarType),
         ( if
             % If this goal constructs a type_info for an equivalence type,
             % we need to expand that to make the type_info for the expanded
             % type. It is simpler to just recreate the type_info from scratch.
-
             GoalExpr0 ^ unify_kind = construct(_, ConsId, _, _, _, _, _),
             ConsId = type_info_cell_constructor(TypeCtor),
             TypeCtorCat = ctor_cat_system(cat_system_type_info),
@@ -1618,9 +1636,7 @@ replace_in_goal_expr(TypeEqvMap, GoalExpr0, GoalExpr, Changed, !Info) :-
             Body = hlds_eqv_type(_)
         then
             Changed = changed,
-            ModuleInfo0 = !.Info ^ ethri_module_info,
             PredInfo0 = !.Info ^ ethri_pred_info,
-            ProcInfo0 = !.Info ^ ethri_proc_info,
             TVarSet0 = !.Info ^ ethri_tvarset,
             pred_info_set_typevarset(TVarSet0, PredInfo0, PredInfo1),
             rtti_varmaps_var_info(RttiVarMaps, Var, VarInfo),
@@ -1633,9 +1649,8 @@ replace_in_goal_expr(TypeEqvMap, GoalExpr0, GoalExpr, Changed, !Info) :-
                 ),
                 unexpected($pred, "info not found")
             ),
-            polymorphism_make_type_info_var_raw(TypeInfoType,
-                term.context_init, TypeInfoVar, Goals0,
-                ModuleInfo0, ModuleInfo,
+            polymorphism_make_type_info_var_mi(TypeInfoType, dummy_context,
+                TypeInfoVar, Goals0, ModuleInfo0, ModuleInfo,
                 PredInfo1, PredInfo, ProcInfo0, ProcInfo),
             pred_info_get_typevarset(PredInfo, TVarSet),
             !Info ^ ethri_module_info := ModuleInfo,
@@ -1653,9 +1668,8 @@ replace_in_goal_expr(TypeEqvMap, GoalExpr0, GoalExpr, Changed, !Info) :-
             !Info ^ ethri_recompute := yes
         else if
             % Check for a type_ctor_info for an equivalence type. We can just
-            % remove these because after the code above to fix up type_infos
+            % remove these, because after the code above to fix up type_infos
             % for equivalence types they can't be used.
-
             GoalExpr0 ^ unify_kind = construct(_, ConsId, _, _, _, _, _),
             ConsId = type_info_cell_constructor(TypeCtor),
             TypeCtorCat = ctor_cat_system(cat_system_type_ctor_info),
@@ -1788,9 +1802,9 @@ replace_in_unification(TypeEqvMap, Uni0, Uni, Changed, !Info) :-
     tvarset::in, tvarset::out,
     eqv_expand_info::in, eqv_expand_info::out) is det.
 
-replace_in_foreign_arg(TypeEqvMap, Arg0, Arg, Changed, !VarSet, !Info) :-
+replace_in_foreign_arg(TypeEqvMap, Arg0, Arg, Changed, !TVarSet, !Info) :-
     Arg0 = foreign_arg(Var, NameMode, Type0, BoxPolicy),
-    replace_in_type(TypeEqvMap, Type0, Type, Changed, !VarSet, !Info),
+    replace_in_type(TypeEqvMap, Type0, Type, Changed, !TVarSet, !Info),
     ( Changed = changed, Arg = foreign_arg(Var, NameMode, Type, BoxPolicy)
     ; Changed = no_change, Arg = Arg0
     ).
@@ -1800,12 +1814,13 @@ replace_in_foreign_arg(TypeEqvMap, Arg0, Arg, Changed, !VarSet, !Info) :-
     tvarset::in, tvarset::out, eqv_expand_info::in, eqv_expand_info::out)
     is det.
 
-replace_in_foreign_arg_list(_EqvMap, [], [], no_change, !VarSet, !Info).
+replace_in_foreign_arg_list(_EqvMap, [], [], no_change, !TVarSet, !Info).
 replace_in_foreign_arg_list(TypeEqvMap, List0 @ [Arg0 | Args0], List,
-        Changed, !VarSet, !Info) :-
-    replace_in_foreign_arg(TypeEqvMap, Arg0, Arg, HeadChanged, !VarSet, !Info),
+        Changed, !TVarSet, !Info) :-
+    replace_in_foreign_arg(TypeEqvMap, Arg0, Arg, HeadChanged,
+        !TVarSet, !Info),
     replace_in_foreign_arg_list(TypeEqvMap, Args0, Args, TailChanged,
-        !VarSet, !Info),
+        !TVarSet, !Info),
     ( if HeadChanged = no_change, TailChanged = no_change then
         Changed = no_change,
         List = [Arg | Args]

@@ -65,13 +65,9 @@
 
 :- import_module backend_libs.
 :- import_module backend_libs.builtin_ops.
-:- import_module check_hlds.
-:- import_module check_hlds.type_util.
 :- import_module hlds.arg_info.
-:- import_module hlds.hlds_desc.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.vartypes.
 :- import_module libs.globals.
 :- import_module libs.optimization_options.
 :- import_module libs.trace_params.
@@ -79,8 +75,9 @@
 :- import_module ll_backend.opt_debug.
 :- import_module ll_backend.trace_gen.
 :- import_module ll_backend.var_locn.
-:- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_data_foreign.
+:- import_module parse_tree.prog_type.
+:- import_module parse_tree.var_table.
 
 :- import_module cord.
 :- import_module int.
@@ -187,15 +184,13 @@
 
 code_loc_dep_init(FollowVars, ResumePoint, !CI, !:CLD) :-
     get_module_info(!.CI, ModuleInfo),
-    get_pred_info(!.CI, PredInfo),
     get_proc_info(!.CI, ProcInfo),
     module_info_get_globals(ModuleInfo, Globals),
     proc_info_get_initial_instmap(ModuleInfo, ProcInfo, InstMap),
     proc_info_get_liveness_info(ProcInfo, Liveness),
     CodeModel = proc_info_interface_code_model(ProcInfo),
     build_input_arg_list(ProcInfo, ArgList),
-    proc_info_get_varset(ProcInfo, VarSet),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    get_var_table(!.CI, VarTable),
     proc_info_get_stack_slots(ProcInfo, StackSlots),
     globals.lookup_bool_option(Globals, use_float_registers, UseFloatRegs),
     (
@@ -205,9 +200,8 @@ code_loc_dep_init(FollowVars, ResumePoint, !CI, !:CLD) :-
         UseFloatRegs = no,
         FloatRegType = reg_r
     ),
-    globals.get_trace_level(Globals, TraceLevel),
-    TraceEnabled = is_exec_trace_enabled_at_eff_trace_level(ModuleInfo,
-        PredInfo, ProcInfo, TraceLevel),
+    get_eff_trace_level(!.CI, EffTraceLevel),
+    TraceEnabled = is_exec_trace_enabled_at_eff_trace_level(EffTraceLevel),
     (
         TraceEnabled = exec_trace_is_enabled,
         trace_fail_vars(ModuleInfo, ProcInfo, FailVars),
@@ -218,8 +212,8 @@ code_loc_dep_init(FollowVars, ResumePoint, !CI, !:CLD) :-
         MaybeFailVars = no,
         EffLiveness = Liveness
     ),
-    init_var_locn_state(ModuleInfo, ArgList, EffLiveness, VarSet, VarTypes,
-        FloatRegType, StackSlots, FollowVars, VarLocnInfo),
+    init_var_locn_state(VarTable, FloatRegType, StackSlots, FollowVars,
+        EffLiveness, ArgList, VarLocnInfo),
     stack.init(ResumePoints),
     globals.get_opt_tuple(Globals, OptTuple),
     AllowHijack = OptTuple ^ ot_allow_hijacks,
@@ -2128,9 +2122,9 @@ make_resume_point(ResumeVars, ResumeLocs, FullMap, ResumePoint, !CI) :-
         trace [compiletime(flag("codegen_goal")), io(!IO)] (
             ( if should_trace_code_gen(!.CI) then
                 io.output_stream(Stream, !IO),
-                code_info.get_varset(!.CI, VarSet),
+                code_info.get_var_table(!.CI, VarTable),
                 io.write_string(Stream, "make_resume_point orig_only\n", !IO),
-                output_resume_map(Stream, VarSet, "orig:",
+                output_resume_map(Stream, VarTable, "orig:",
                     OrigMap, OrigLabel, !IO),
                 io.flush_output(Stream, !IO)
             else
@@ -2146,10 +2140,10 @@ make_resume_point(ResumeVars, ResumeLocs, FullMap, ResumePoint, !CI) :-
         trace [compiletime(flag("codegen_goal")), io(!IO)] (
             ( if should_trace_code_gen(!.CI) then
                 io.output_stream(Stream, !IO),
-                code_info.get_varset(!.CI, VarSet),
+                code_info.get_var_table(!.CI, VarTable),
                 io.write_string(Stream,
                     "make_resume_point stack_only\n", !IO),
-                output_resume_map(Stream, VarSet, "stack:",
+                output_resume_map(Stream, VarTable, "stack:",
                     StackMap, StackLabel, !IO),
                 io.flush_output(Stream, !IO)
             else
@@ -2167,12 +2161,12 @@ make_resume_point(ResumeVars, ResumeLocs, FullMap, ResumePoint, !CI) :-
         trace [compiletime(flag("codegen_goal")), io(!IO)] (
             ( if should_trace_code_gen(!.CI) then
                 io.output_stream(Stream, !IO),
-                code_info.get_varset(!.CI, VarSet),
+                code_info.get_var_table(!.CI, VarTable),
                 io.write_string(Stream,
                     "make_resume_point orig_then_stack\n", !IO),
-                output_resume_map(Stream, VarSet, "orig:",
+                output_resume_map(Stream, VarTable, "orig:",
                     OrigMap, OrigLabel, !IO),
-                output_resume_map(Stream, VarSet, "stack:",
+                output_resume_map(Stream, VarTable, "stack:",
                     StackMap, StackLabel, !IO),
                 io.flush_output(Stream, !IO)
             else
@@ -2189,13 +2183,13 @@ make_resume_point(ResumeVars, ResumeLocs, FullMap, ResumePoint, !CI) :-
         ResumePoint = stack_then_orig(StackMap, StackAddr, OrigMap, OrigAddr),
         trace [compiletime(flag("codegen_goal")), io(!IO)] (
             ( if should_trace_code_gen(!.CI) then
-                code_info.get_varset(!.CI, VarSet),
+                code_info.get_var_table(!.CI, VarTable),
                 io.output_stream(Stream, !IO),
                 io.write_string(Stream,
                     "make_resume_point stack_then_orig\n", !IO),
-                output_resume_map(Stream, VarSet, "stack:",
+                output_resume_map(Stream, VarTable, "stack:",
                     StackMap, StackLabel, !IO),
-                output_resume_map(Stream, VarSet, "orig:",
+                output_resume_map(Stream, VarTable, "orig:",
                     OrigMap, OrigLabel, !IO),
                 io.flush_output(Stream, !IO)
             else
@@ -3283,8 +3277,7 @@ setup_call(GoalInfo, ArgInfos, LiveLocs, Code, CI, !CLD) :-
     set.list_to_set(OutVars, OutVarSet),
     Detism = goal_info_get_determinism(GoalInfo),
     get_opt_no_return_calls(CI, OptNoReturnCalls),
-    get_module_info(CI, ModuleInfo),
-    get_vartypes(CI, VarTypes),
+    get_var_table(CI, VarTable),
     ( if
         Detism = detism_erroneous,
         OptNoReturnCalls = yes
@@ -3313,15 +3306,15 @@ setup_call(GoalInfo, ArgInfos, LiveLocs, Code, CI, !CLD) :-
             ),
             StackVarLocs = ForwardVarLocs
         ),
-        list.filter(valid_stack_slot(ModuleInfo, VarTypes), StackVarLocs,
+        list.filter(valid_stack_slot(VarTable), StackVarLocs,
             RealStackVarLocs, DummyStackVarLocs)
     ),
-    get_var_locn_info(!.CLD, VarLocnInfo0),
-    list.filter(key_var_is_of_non_dummy_type(ModuleInfo, VarTypes),
+    list.filter(key_var_is_of_non_dummy_type(VarTable),
         InArgInfos, RealInArgInfos),
     var_arg_info_to_lval(RealInArgInfos, RealInArgLocs),
     AllRealLocs = RealStackVarLocs ++ RealInArgLocs,
     AllLocs = DummyStackVarLocs ++ AllRealLocs,
+    get_var_locn_info(!.CLD, VarLocnInfo0),
     var_locn_place_vars(AllLocs, Code, VarLocnInfo0, VarLocnInfo),
     set_var_locn_info(VarLocnInfo, !CLD),
     assoc_list.values(AllRealLocs, LiveLocList),
@@ -3330,18 +3323,17 @@ setup_call(GoalInfo, ArgInfos, LiveLocs, Code, CI, !CLD) :-
 setup_return(VarArgInfos, OutLocs, Code, !CLD) :-
     setup_call_args(VarArgInfos, callee, OutLocs, Code, !CLD).
 
-:- pred key_var_is_of_non_dummy_type(module_info::in, vartypes::in,
+:- pred key_var_is_of_non_dummy_type(var_table::in,
     pair(prog_var, arg_info)::in) is semidet.
 
-key_var_is_of_non_dummy_type(ModuleInfo, VarTypes, Var - _ArgInfo) :-
-    var_is_of_non_dummy_type(ModuleInfo, VarTypes, Var).
+key_var_is_of_non_dummy_type(VarTable, Var - _ArgInfo) :-
+    var_has_non_dummy_type(VarTable, Var).
 
-:- pred valid_stack_slot(module_info::in, vartypes::in,
-    pair(prog_var, lval)::in) is semidet.
+:- pred valid_stack_slot(var_table::in, pair(prog_var, lval)::in) is semidet.
 
-valid_stack_slot(ModuleInfo, VarTypes, Var - Lval) :-
-    lookup_var_type(VarTypes, Var, Type),
-    is_type_a_dummy(ModuleInfo, Type) = is_not_dummy_type,
+valid_stack_slot(VarTable, Var - Lval) :-
+    lookup_var_entry(VarTable, Var, Entry),
+    Entry ^ vte_is_dummy = is_not_dummy_type,
     ( if
         ( Lval = stackvar(N)
         ; Lval = parent_stackvar(N)
@@ -3446,11 +3438,11 @@ compute_forward_live_var_saves(CI, CLD, OutArgs, VarLocs) :-
     get_known_variables(CLD, Variables0),
     Vars0 = set_of_var.list_to_set(Variables0),
     TypeInfoLiveness = body_typeinfo_liveness(CI),
+    get_var_table(CI, VarTable),
     get_proc_info(CI, ProcInfo),
-    proc_info_get_vartypes(ProcInfo, VarTypes),
     proc_info_get_rtti_varmaps(ProcInfo, RttiVarMaps),
-    maybe_complete_with_typeinfo_vars(Vars0, TypeInfoLiveness, VarTypes,
-        RttiVarMaps, Vars1),
+    maybe_complete_with_typeinfo_vars(VarTable, RttiVarMaps,
+        TypeInfoLiveness, Vars0, Vars1),
     set_of_var.difference(Vars1, OutArgs, Vars),
     Variables = set_of_var.to_sorted_list(Vars),
     list.map(associate_stack_slot(CI), Variables, VarLocs).
@@ -3503,10 +3495,8 @@ generate_call_vn_livevals(CI, CLD, InputArgLocs, OutputArgs, LiveVals) :-
 
 generate_call_stack_vn_livevals(CI, CLD, OutputArgs, LiveVals) :-
     get_known_variables(CLD, KnownVarList0),
-    get_module_info(CI, ModuleInfo),
-    get_vartypes(CI, VarTypes),
-    list.filter(var_is_of_non_dummy_type(ModuleInfo, VarTypes),
-        KnownVarList0, KnownVarList),
+    get_var_table(CI, VarTable),
+    list.filter(var_has_non_dummy_type(VarTable), KnownVarList0, KnownVarList),
     set_of_var.list_to_set(KnownVarList, KnownVars),
     set_of_var.difference(KnownVars, OutputArgs, LiveVars),
     set_of_var.to_sorted_list(LiveVars, LiveVarList),
@@ -3544,17 +3534,23 @@ generate_input_var_vn([InputArgLoc | InputArgLocs], !Vals) :-
 
 generate_return_live_lvalues(CI, CLD, OutputArgLocs, ReturnInstMap,
         OkToDeleteAny, LiveLvalues) :-
+    get_globals(CI, Globals),
+    get_proc_info(CI, ProcInfo),
+    get_eff_trace_level(CI, EffTraceLevel),
     variable_locations(CLD, VarLocs),
     get_known_variables(CLD, Vars0),
-    get_module_info(CI, ModuleInfo),
-    get_vartypes(CI, VarTypes),
-    list.filter(var_is_of_non_dummy_type(ModuleInfo, VarTypes), Vars0, Vars),
+    get_var_table(CI, VarTable),
+    list.filter(var_has_non_dummy_type(VarTable), Vars0, Vars),
     get_active_temps_data(CI, CLD, Temps),
-    get_proc_info(CI, ProcInfo),
-    get_globals(CI, Globals),
-    continuation_info.generate_return_live_lvalues(OutputArgLocs,
-        ReturnInstMap, Vars, VarLocs, Temps, ProcInfo, ModuleInfo,
-        Globals, OkToDeleteAny, LiveLvalues).
+    cont_info_generate_return_live_lvalues(Globals, ProcInfo, EffTraceLevel,
+        OutputArgLocs, ReturnInstMap, Vars, VarLocs, Temps,
+        OkToDeleteAny, LiveLvalues).
+
+:- pred var_has_non_dummy_type(var_table::in, prog_var::in) is semidet.
+
+var_has_non_dummy_type(VarTable, Var) :-
+    lookup_var_entry(VarTable, Var, Entry),
+    Entry ^ vte_is_dummy = is_not_dummy_type.
 
 :- pred maybe_generate_resume_layout(label::in, resume_map::in,
     code_info::in, code_info::out, code_loc_dep::in) is det.
@@ -3567,9 +3563,8 @@ maybe_generate_resume_layout(Label, ResumeMap, !CI, CLD) :-
         get_active_temps_data(!.CI, CLD, Temps),
         get_instmap(CLD, InstMap),
         get_proc_info(!.CI, ProcInfo),
-        get_module_info(!.CI, ModuleInfo),
-        continuation_info.generate_resume_layout(ResumeMap, Temps, InstMap,
-            ProcInfo, ModuleInfo, Layout),
+        continuation_info.generate_resume_layout(ProcInfo, InstMap,
+            ResumeMap, Temps, Layout),
         add_resume_layout_for_label(Label, Layout, !CI)
     ;
         AgcStackLayout = no
@@ -3904,22 +3899,24 @@ should_trace_code_gen(CI) :-
     PredIdInt = DebugPredIdInt.
 
 output_code_info(Stream, Components, CI, CLD, !IO) :-
-    get_varset(CI, VarSet),
+    get_var_table(CI, VarTable),
     CLD = code_loc_dep(ForwardLiveVars, _InstMap, Zombies,
         _VarLocnInfo, TempsInUse, _FailInfo, ParConjDepth),
     ( if list.member(cic_forward_live_vars, Components) then
-        io.write_string(Stream, "forward live vars: ", !IO),
-        mercury_output_vars(VarSet, print_name_and_num,
-            set_of_var.to_sorted_list(ForwardLiveVars), Stream, !IO),
-        io.nl(Stream, !IO)
+        ForwardLiveVarNames = list.map(
+            var_table_entry_name_and_number(VarTable),
+            set_of_var.to_sorted_list(ForwardLiveVars)),
+        io.format(Stream, "forward live vars: %s\n",
+            [s(string.join_list(", ", ForwardLiveVarNames))], !IO)
     else
         true
     ),
     ( if list.member(cic_zombies, Components) then
-        io.write_string(Stream, "zombies: ", !IO),
-        mercury_output_vars(VarSet, print_name_and_num,
-            set_of_var.to_sorted_list(Zombies), Stream, !IO),
-        io.nl(Stream, !IO)
+        ZombieVarNames = list.map(
+            var_table_entry_name_and_number(VarTable),
+            set_of_var.to_sorted_list(Zombies)),
+        io.format(Stream, "zombies: %s\n",
+            [s(string.join_list(", ", ZombieVarNames))], !IO)
     else
         true
     ),
@@ -3937,11 +3934,11 @@ output_code_info(Stream, Components, CI, CLD, !IO) :-
         true
     ).
 
-:- pred output_resume_map(io.text_output_stream::in, prog_varset::in,
+:- pred output_resume_map(io.text_output_stream::in, var_table::in,
     string::in, map(prog_var, set(lval))::in, label::in,
     io::di, io::uo) is det.
 
-output_resume_map(Stream, VarSet, Desc, ResumeMap, ResumeLabel, !IO) :-
+output_resume_map(Stream, VarTable, Desc, ResumeMap, ResumeLabel, !IO) :-
     (
         ResumeLabel = internal_label(LabelNumber, _ProcLabel)
     ;
@@ -3951,13 +3948,15 @@ output_resume_map(Stream, VarSet, Desc, ResumeMap, ResumeLabel, !IO) :-
     io.format(Stream, "  %-6s local label %d\n",
         [s(Desc), i(LabelNumber)], !IO),
     map.to_assoc_list(ResumeMap, ResumeAssocList),
-    list.foldl(output_resume_map_element(Stream, VarSet), ResumeAssocList, !IO).
+    list.foldl(output_resume_map_element(Stream, VarTable),
+        ResumeAssocList, !IO).
 
-:- pred output_resume_map_element(io.text_output_stream::in, prog_varset::in,
+:- pred output_resume_map_element(io.text_output_stream::in, var_table::in,
     pair(prog_var, set(lval))::in, io::di, io::uo) is det.
 
-output_resume_map_element(Stream, VarSet, Var - LvalSet, !IO) :-
-    VarDesc = describe_var(VarSet, Var),
+output_resume_map_element(Stream, VarTable, Var - LvalSet, !IO) :-
+    lookup_var_entry(VarTable, Var, Entry),
+    VarDesc = var_entry_name_and_number(Var, Entry),
     Lvals = set.to_sorted_list(LvalSet),
     LvalDescs = list.map(dump_lval(no), Lvals),
     LvalsDesc = string.join_list(" ", LvalDescs),

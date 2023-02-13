@@ -24,9 +24,9 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.term_errors.
 :- import_module transform_hlds.term_norm.
 :- import_module transform_hlds.term_util.
@@ -104,7 +104,7 @@
 :- type term_traversal_params.
 
 :- pred init_term_traversal_params(functor_info::in,
-    pred_proc_id::in, prog_context::in, vartypes::in,
+    pred_proc_id::in, prog_context::in, var_table::in,
     used_args::in, used_args::in, int::in, int::in,
     term_traversal_params::out) is det.
 
@@ -190,7 +190,7 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
         % Handle existing paths.
         (
             CallArgSizeInfo = yes(finite(CallGamma, OutputSuppliers)),
-            remove_unused_args(InVars, Args, OutputSuppliers, UsedInVars),
+            remove_unused_args(Args, OutputSuppliers, InVars, UsedInVars),
             record_change(UsedInVars, OutVars, CallGamma, [], !Info)
         ;
             CallArgSizeInfo = yes(infinite(_)),
@@ -203,7 +203,7 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
             % a runtime abort in map.lookup.
             params_get_output_suppliers(Params, OutputSuppliersMap),
             map.lookup(OutputSuppliersMap, CallPPId, OutputSuppliers),
-            remove_unused_args(InVars, Args, OutputSuppliers, UsedInVars),
+            remove_unused_args(Args, OutputSuppliers, InVars, UsedInVars),
             record_change(UsedInVars, OutVars, 0, [CallPPId], !Info)
         ),
 
@@ -219,10 +219,10 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
         ( if
             % XXX This is an overapproximation, since it includes
             % higher order outputs.
-            params_get_var_types(Params, VarTypes),
-            horder_vars(Args, VarTypes)
+            params_get_var_table(Params, VarTable),
+            some_var_is_higher_order(VarTable, Args)
         then
-            add_error(Params, Context, horder_args(PPId, CallPPId), !Info)
+            add_term_error(Params, Context, horder_args(PPId, CallPPId), !Info)
         else
             true
         ),
@@ -262,14 +262,15 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
         then
             error_if_intersect(OutVars, Context, pragma_foreign_code, !Info)
         else
-            add_error(Params, Context, does_not_term_pragma(CallPredId), !Info)
+            add_term_error(Params, Context, does_not_term_pragma(CallPredId),
+                !Info)
         )
     ;
         GoalExpr = generic_call(Details, Args, ArgModes, _, _),
         Context = goal_info_get_context(GoalInfo),
         (
             Details = higher_order(Var, _, _, _),
-            ClosureValueMap = goal_info_get_ho_values(GoalInfo),
+            ClosureValueMap = goal_info_get_higher_order_value_map(GoalInfo),
 
             % If closure analysis has identified a set of values this
             % higher-order variable can take, then we can check if they all
@@ -292,10 +293,10 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
                     NonTerminating = [_ | _],
                     % XXX We should tell the user what the
                     % non-terminating closures are.
-                    add_error(Params, Context, horder_call, !Info)
+                    add_term_error(Params, Context, horder_call, !Info)
                 )
             else
-                add_error(Params, Context, horder_call, !Info)
+                add_term_error(Params, Context, horder_call, !Info)
             )
         ;
             Details = class_method(_, _, _, _),
@@ -303,7 +304,7 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
             % than this, since we know that the method being called must
             % come from one of the instance declarations, and we could
             % potentially (globally) analyse these.
-            add_error(Params, Context, method_call, !Info)
+            add_term_error(Params, Context, method_call, !Info)
         ;
             Details = event_call(_)
         ;
@@ -341,6 +342,35 @@ term_traverse_goal(ModuleInfo, Params, Goal, !Info) :-
         GoalExpr = shorthand(_),
         % These should have been expanded out by now.
         unexpected($pred, "shorthand")
+    ).
+
+    % remove_unused_args(VarList, BoolList, !InVarBag):
+    %
+    % VarList and BoolList are corresponding lists. Any variable in VarList
+    % that has a `no' in the corresponding place in the BoolList is removed
+    % from !InVarBag.
+    %
+    % XXX Replace the bools with a bespoke type.
+    %
+:- pred remove_unused_args(list(prog_var)::in, list(bool)::in,
+    bag(prog_var)::in, bag(prog_var)::out) is det.
+
+remove_unused_args([], [], !Vars).
+remove_unused_args([], [_ | _], !Vars) :-
+    unexpected($pred, "unmatched variables").
+remove_unused_args([_ | _], [], !Vars) :-
+    unexpected($pred, "unmatched variables").
+remove_unused_args([Arg | Args], [UsedVar | UsedVars], !Vars) :-
+    (
+        % The variable is used, so leave it.
+        UsedVar = yes,
+        remove_unused_args(Args, UsedVars, !Vars)
+    ;
+        % The variable is not used in producing output vars, so don't include
+        % it as an input variable.
+        UsedVar = no,
+        bag.delete(Arg, !Vars),
+        remove_unused_args(Args, UsedVars, !Vars)
     ).
 
 %-----------------------------------------------------------------------------%
@@ -404,11 +434,11 @@ add_path(Path, Info0, Info) :-
         Info = term_traversal_ok(Paths, CanLoop)
     ).
 
-:- pred add_error(term_traversal_params::in,
+:- pred add_term_error(term_traversal_params::in,
     prog_context::in, term_error_kind::in,
     term_traversal_info::in, term_traversal_info::out) is det.
 
-add_error(Params, Context, ErrorKind, Info0, Info) :-
+add_term_error(Params, Context, ErrorKind, Info0, Info) :-
     (
         Info0 = term_traversal_error(Errors0, CanLoop),
         Errors1 = [term_error(Context, ErrorKind) | Errors0],
@@ -524,8 +554,8 @@ compute_rec_start_vars([Var | Vars], [RecInputSupplier | RecInputSuppliers],
 unify_change(ModuleInfo, OutVar, ConsId, Args0, Modes0, Params, Gamma,
         InVars, OutVars) :-
     params_get_functor_info(Params, FunctorInfo),
-    params_get_var_types(Params, VarTypes),
-    lookup_var_type(VarTypes, OutVar, Type),
+    params_get_var_table(Params, VarTable),
+    lookup_var_type(VarTable, OutVar, Type),
     not type_is_higher_order(Type),
     not (
         ConsId = type_info_const(_)
@@ -534,14 +564,14 @@ unify_change(ModuleInfo, OutVar, ConsId, Args0, Modes0, Params, Gamma,
     ),
     require_det (
         type_to_ctor_det(Type, TypeCtor),
-        filter_typeinfos_from_args_and_modes(VarTypes, Args0, Args1,
+        filter_typeinfos_from_args_and_modes(VarTable, Args0, Args1,
             Modes0, Modes1),
         functor_norm(ModuleInfo, FunctorInfo, TypeCtor, ConsId, Gamma,
             Args1, Args, Modes1, Modes),
         split_unification_vars(ModuleInfo, Args, Modes, InVars, OutVars)
     ).
 
-:- pred filter_typeinfos_from_args_and_modes(vartypes::in,
+:- pred filter_typeinfos_from_args_and_modes(var_table::in,
     list(prog_var)::in, list(prog_var)::out,
     list(unify_mode)::in, list(unify_mode)::out) is det.
 
@@ -550,11 +580,11 @@ filter_typeinfos_from_args_and_modes(_, [], _, [_ | _], _) :-
     unexpected($pred, "list length mismatch").
 filter_typeinfos_from_args_and_modes(_, [_ | _], _, [], _) :-
     unexpected($pred, "list length mismatch").
-filter_typeinfos_from_args_and_modes(VarTypes, [Arg0 | Args0], Args,
+filter_typeinfos_from_args_and_modes(VarTable, [Arg0 | Args0], Args,
         [Mode0 | Modes0], Modes) :-
-    filter_typeinfos_from_args_and_modes(VarTypes, Args0, TailArgs,
+    filter_typeinfos_from_args_and_modes(VarTable, Args0, TailArgs,
         Modes0, TailModes),
-    lookup_var_type(VarTypes, Arg0, Type),
+    lookup_var_type(VarTable, Arg0, Type),
     ( if is_introduced_type_info_type(Type) then
         Args = TailArgs,
         Modes = TailModes
@@ -658,7 +688,7 @@ upper_bound_active_vars([Path | Paths], ActiveVars) :-
                 % The context of the procedure.
                 term_trav_context           :: prog_context,
 
-                term_trav_vartypes          :: vartypes,
+                term_trav_var_table         :: var_table,
 
                 % Output suppliers of each procedure.
                 % Empty during pass 2.
@@ -675,11 +705,11 @@ upper_bound_active_vars([Path | Paths], ActiveVars) :-
                 term_trav_max_paths         :: int
         ).
 
-init_term_traversal_params(FunctorInfo, PredProcId, Context, VarTypes,
+init_term_traversal_params(FunctorInfo, PredProcId, Context, VarTable,
         OutputSuppliers, RecInputSuppliers, MaxErrors, MaxPaths,
         Params) :-
     Params = term_traversal_params(FunctorInfo, PredProcId, Context,
-        VarTypes, OutputSuppliers, RecInputSuppliers,
+        VarTable, OutputSuppliers, RecInputSuppliers,
         MaxErrors, MaxPaths).
 
 :- pred params_get_functor_info(term_traversal_params::in, functor_info::out)
@@ -688,7 +718,7 @@ init_term_traversal_params(FunctorInfo, PredProcId, Context, VarTypes,
     is det.
 :- pred params_get_context(term_traversal_params::in, prog_context::out)
     is det.
-:- pred params_get_var_types(term_traversal_params::in, vartypes::out)
+:- pred params_get_var_table(term_traversal_params::in, var_table::out)
     is det.
 :- pred params_get_output_suppliers(term_traversal_params::in,
     map(pred_proc_id, list(bool))::out) is det.
@@ -703,8 +733,8 @@ params_get_ppid(Params, X) :-
     X = Params ^ term_trav_ppid.
 params_get_context(Params, X) :-
     X = Params ^ term_trav_context.
-params_get_var_types(Params, X) :-
-    X = Params ^ term_trav_vartypes.
+params_get_var_table(Params, X) :-
+    X = Params ^ term_trav_var_table.
 params_get_output_suppliers(Params, X) :-
     X = Params ^ term_trav_output_suppliers.
 params_get_rec_input_suppliers(Params, X) :-

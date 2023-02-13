@@ -1,17 +1,17 @@
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 % Copyright (C) 2005-2007, 2010-2011 The University of Melbourne.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % File rbmm.live_variable_analysis.m.
 % Main author: Quan Phan.
 %
 % This module implements the live variable analysis.
 %
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- module transform_hlds.rbmm.live_variable_analysis.
 :- interface.
@@ -26,16 +26,16 @@
     proc_pp_varset_table::out, proc_pp_varset_table::out,
     proc_pp_varset_table::out) is det.
 
-%-----------------------------------------------------------------------------%
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 
 :- implementation.
 
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_pred.
 :- import_module parse_tree.
-:- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.smm_common.
 
 :- import_module assoc_list.
@@ -47,9 +47,8 @@
 :- import_module set.
 :- import_module string.
 :- import_module term.
-:- import_module varset.
 
-%-----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 %
 % Live variable analysis
 %
@@ -372,25 +371,25 @@ collect_void_vars(ProgPoint, ProducedSet, ProcInfo, !ProcVoidVar) :-
     ( if map.search(!.ProcVoidVar, ProgPoint, _DeadVars) then
         true
     else
-        proc_info_get_varset(ProcInfo, VarSet),
-        set.fold(void_var(VarSet), ProducedSet, set.init, VoidVars),
+        proc_info_get_var_table(ProcInfo, VarTable),
+        set.fold(void_var(VarTable), ProducedSet, set.init, VoidVars),
         map.set(ProgPoint, VoidVars, !ProcVoidVar)
     ).
 
     % To be used with the fold above: if Var is a void variable,
     % add it to VoidVars set.
     %
-:- pred void_var(prog_varset::in, prog_var::in,
+:- pred void_var(var_table::in, prog_var::in,
     variable_set::in, variable_set::out) is det.
 
-void_var(VarSet, Var, !VoidVars) :-
-    VarName = mercury_var_to_name_only(VarSet, Var),
-    ( if string.index(VarName, 0, '_') then
+void_var(VarTable, Var, !VoidVars) :-
+    lookup_var_entry(VarTable, Var, VarEntry),
+    ( if string.index(VarEntry ^ vte_name, 0, '_') then
         set.insert(Var, !VoidVars)
     else
         true
     ).
 
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%
 :- end_module transform_hlds.rbmm.live_variable_analysis.
-%----------------------------------------------------------------------------%
+%---------------------------------------------------------------------------%

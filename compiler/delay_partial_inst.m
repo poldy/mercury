@@ -12,15 +12,20 @@
 %
 % This module runs just after mode analysis on mode-correct procedures and
 % tries to transform procedures to avoid intermediate partially instantiated
-% data structures. The Erlang backend in particular could not handle partially
-% instantiated data structures (we cannot use destructive update to further
-% instantiate data structures since all values are immutable).
+% data structures. The original impetus for this pass was the Erlang backend,
+% which could not handle partially instantiated data structures at all,
+% because, due to all Erlang data structures being immutable, it could not
+% further instantiate any originally partially instantiated data structures.
+% However, even on other backends, constructing a ground data structure
+% directly is simpler and more efficient than creating a partially instantiated
+% data structure and then filling it in.
 %
-% There are two situations. An implied mode call, e.g.
+% There are two situations we look for. The first is an implied mode call
+% such as
 %
 %       p(f(_, _))
 %
-% looks like this after mode checking:
+% which after mode checking looks like this:
 %
 %       X := f(V_1, V_2),       % partially instantiated
 %       p(Y),
@@ -32,7 +37,7 @@
 %       p(Y),
 %       Y ?= f(_, _)
 %
-% The other situation is if the user writes code that constructs data
+% The other situation occurs when the user writes code that constructs data
 % structures with free variables, e.g.
 %
 %       :- type t
@@ -113,11 +118,13 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 
+:- import_module io.
 :- import_module list.
 
 %-----------------------------------------------------------------------------%
 
-:- pred delay_partial_inst_preds(list(pred_id)::in, list(pred_id)::out,
+:- pred delay_partial_inst_preds(io.text_output_stream::in,
+    list(pred_id)::in, list(pred_id)::out,
     module_info::in, module_info::out) is det.
 
 %-----------------------------------------------------------------------------%
@@ -134,14 +141,14 @@
 :- import_module hlds.make_goal.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_rename.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
-:- import_module io.
 :- import_module map.
 :- import_module pair.
 :- import_module require.
@@ -155,8 +162,7 @@
                 dpi_module_info :: module_info,
 
                 % Read-write.
-                dpi_varset      :: prog_varset,
-                dpi_vartypes    :: vartypes,
+                dpi_var_table   :: var_table,
                 dpi_changed     :: bool
             ).
 
@@ -186,24 +192,28 @@
 
 %-----------------------------------------------------------------------------%
 
-delay_partial_inst_preds(PredIds, ChangedPredIds, !ModuleInfo) :-
-    delay_partial_inst_preds_acc(PredIds, [], RevChangedPredIds, !ModuleInfo),
+delay_partial_inst_preds(ProgressStream, PredIds, ChangedPredIds,
+        !ModuleInfo) :-
+    delay_partial_inst_preds_acc(ProgressStream, PredIds,
+        [], RevChangedPredIds, !ModuleInfo),
     list.reverse(RevChangedPredIds, ChangedPredIds).
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
-:- pred delay_partial_inst_preds_acc(list(pred_id)::in,
-    list(pred_id)::in, list(pred_id)::out,
+:- pred delay_partial_inst_preds_acc(io.text_output_stream::in,
+    list(pred_id)::in, list(pred_id)::in, list(pred_id)::out,
     module_info::in, module_info::out) is det.
 
-delay_partial_inst_preds_acc([], !RevChangedPredIds, !ModuleInfo).
-delay_partial_inst_preds_acc([PredId | PredIds], !RevChangedPredIds,
-        !ModuleInfo) :-
+delay_partial_inst_preds_acc(_, [], !RevChangedPredIds, !ModuleInfo).
+delay_partial_inst_preds_acc(ProgressStream, [PredId | PredIds],
+        !RevChangedPredIds, !ModuleInfo) :-
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
     ProcIds = pred_info_valid_non_imported_procids(PredInfo0),
-    list.foldl(delay_partial_inst_proc(!.ModuleInfo, PredId, ProcTable0),
+    list.foldl(
+        delay_partial_inst_proc(ProgressStream, !.ModuleInfo, PredId,
+            ProcTable0),
         ProcIds, [], ChangedProcs),
     (
         ChangedProcs = [_ | _],
@@ -214,53 +224,49 @@ delay_partial_inst_preds_acc([PredId | PredIds], !RevChangedPredIds,
     ;
         ChangedProcs = []
     ),
-    delay_partial_inst_preds_acc(PredIds, !RevChangedPredIds, !ModuleInfo).
+    delay_partial_inst_preds_acc(ProgressStream, PredIds,
+        !RevChangedPredIds, !ModuleInfo).
 
-:- pred delay_partial_inst_proc(module_info::in, pred_id::in,
-    proc_table::in, proc_id::in,
+:- pred delay_partial_inst_proc(io.text_output_stream::in, module_info::in,
+    pred_id::in, proc_table::in, proc_id::in,
     assoc_list(proc_id, proc_info)::in, assoc_list(proc_id, proc_info)::out)
     is det.
 
-delay_partial_inst_proc(ModuleInfo, PredId, ProcTable, ProcId,
+delay_partial_inst_proc(ProgressStream, ModuleInfo, PredId, ProcTable, ProcId,
         !ChangedProcs) :-
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
-            "Delaying partial instantiations in", PredId, ProcId, !IO)
+        maybe_write_proc_progress_message(ProgressStream, ModuleInfo,
+            "Delaying partial instantiations in", proc(PredId, ProcId), !IO)
     ),
     some [!ProcInfo] (
         map.lookup(ProcTable, ProcId, !:ProcInfo),
-        proc_info_get_varset(!.ProcInfo, VarSet0),
-        proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+        proc_info_get_var_table(!.ProcInfo, VarTable0),
         proc_info_get_initial_instmap(ModuleInfo, !.ProcInfo, InstMap0),
         proc_info_get_goal(!.ProcInfo, Goal0),
 
         Changed0 = no,
-        DelayInfo0 = delay_partial_inst_info(ModuleInfo,
-            VarSet0, VarTypes0, Changed0),
+        DelayInfo0 = delay_partial_inst_info(ModuleInfo, VarTable0, Changed0),
         delay_partial_inst_in_goal(InstMap0, Goal0, Goal,
             map.init, _ConstructMap, DelayInfo0, DelayInfo),
-        DelayInfo = delay_partial_inst_info(_,
-            VarSet, VarTypes, Changed),
+        DelayInfo = delay_partial_inst_info(_, VarTable, Changed),
 
         (
             Changed = yes,
             proc_info_set_goal(Goal, !ProcInfo),
-            proc_info_set_varset(VarSet, !ProcInfo),
-            proc_info_set_vartypes(VarTypes, !ProcInfo),
-            requantify_proc_general(ordinary_nonlocals_maybe_lambda,
-                !ProcInfo),
+            proc_info_set_var_table(VarTable, !ProcInfo),
+            requantify_proc_general(ord_nl_maybe_lambda, !ProcInfo),
             !:ChangedProcs = [ProcId - !.ProcInfo | !.ChangedProcs],
 
             trace [compiletime(flag("debug_delay_partial_inst")), io(!IO)] (
                 io.output_stream(Stream, !IO),
                 io.write_string(Stream,
                     "predicate body BEFORE delay_partial_inst:\n", !IO),
-                dump_goal(Stream, ModuleInfo, VarSet0, Goal0, !IO),
-                io.nl(Stream, !IO),
+                dump_goal_nl(Stream, ModuleInfo, vns_var_table(VarTable0),
+                    Goal0, !IO),
                 io.write_string(Stream,
                     "predicate body AFTER delay_partial_inst:\n", !IO),
-                dump_goal(Stream, ModuleInfo, VarSet, Goal, !IO),
-                io.nl(Stream, !IO)
+                dump_goal_nl(Stream, ModuleInfo, vns_var_table(VarTable),
+                    Goal, !IO)
             )
         ;
             Changed = no
@@ -518,13 +524,11 @@ delay_partial_inst_in_partial_construct(GoalInfo0, Unify, Goal,
     delay_partial_inst_info::in, delay_partial_inst_info::out) is det.
 
 create_canonical_variables(OrigVars, CanonVars, !DelayInfo) :-
-    VarSet0 = !.DelayInfo ^ dpi_varset,
-    VarTypes0 = !.DelayInfo ^ dpi_vartypes,
-    clone_variables(OrigVars, VarSet0, VarTypes0,
-        VarSet0, VarSet, VarTypes0, VarTypes, map.init, Renaming),
+    VarTable0 = !.DelayInfo ^ dpi_var_table,
+    clone_variables(OrigVars, VarTable0, VarTable0, VarTable,
+        map.init, Renaming),
     rename_var_list(must_rename, Renaming, OrigVars, CanonVars),
-    !DelayInfo ^ dpi_varset := VarSet,
-    !DelayInfo ^ dpi_vartypes := VarTypes.
+    !DelayInfo ^ dpi_var_table := VarTable.
 
 :- pred add_to_construct_map(prog_var::in, cons_id::in, prog_vars::in,
     construct_map::in, construct_map::out) is det.

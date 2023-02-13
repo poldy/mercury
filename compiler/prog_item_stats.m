@@ -132,6 +132,7 @@ gather_and_write_item_stats(Stream, AugCompUnit, !IO) :-
     % Initialize an item_stats structure.
     %
 :- func init_item_stats = item_stats.
+:- pragma consider_used(func(init_item_stats/0)).
 
 init_item_stats =
     item_stats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -140,6 +141,7 @@ init_item_stats =
     % Initialize a goal_stats structure.
     %
 :- func init_goal_stats = goal_stats.
+:- pragma consider_used(func(init_goal_stats/0)).
 
 init_goal_stats =
     goal_stats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -189,35 +191,35 @@ gather_stats_in_aug_comp_unit(AugCompUnit, !:CompUnitStats) :-
 
 %-----------------------------------------------------------------------------%
 
-    % Update an item_stats structure based on the contents of the given
-    % item block.
-    %
-:- pred gather_stats_in_item_blocks((func(MS) = string)::in,
-    list(item_block(MS))::in,
-    comp_unit_stats::in, comp_unit_stats::out) is det.
-:- pragma consider_used(pred(gather_stats_in_item_blocks/4)).
-
-gather_stats_in_item_blocks(_, [], !CompUnitStats).
-gather_stats_in_item_blocks(SectionFunc, [ItemBlock | ItemBlocks],
-        !CompUnitStats) :-
-    ItemBlock = item_block(_, Section, _, _, _, Items),
-    SectionName = SectionFunc(Section),
-    ( if map.search(!.CompUnitStats, SectionName, SectionStats0) then
-        SectionStats0 = section_stats(ItemStats0, GoalStats0),
-        gather_stats_in_items(Items,
-            ItemStats0, ItemStats, GoalStats0, GoalStats),
-        SectionStats = section_stats(ItemStats, GoalStats),
-        map.det_update(SectionName, SectionStats, !CompUnitStats)
-    else
-        gather_stats_in_items(Items,
-            init_item_stats, ItemStats, init_goal_stats, GoalStats),
-        SectionStats = section_stats(ItemStats, GoalStats),
-        map.det_insert(SectionName, SectionStats, !CompUnitStats)
-    ),
-    gather_stats_in_item_blocks(SectionFunc, ItemBlocks, !CompUnitStats).
+%     % Update an item_stats structure based on the contents of the given
+%     % item block.
+%     %
+% :- pred gather_stats_in_item_blocks((func(MS) = string)::in,
+%     list(item_block(MS))::in,
+%     comp_unit_stats::in, comp_unit_stats::out) is det.
+% 
+% gather_stats_in_item_blocks(_, [], !CompUnitStats).
+% gather_stats_in_item_blocks(SectionFunc, [ItemBlock | ItemBlocks],
+%         !CompUnitStats) :-
+%     ItemBlock = item_block(_, Section, _, _, _, Items),
+%     SectionName = SectionFunc(Section),
+%     ( if map.search(!.CompUnitStats, SectionName, SectionStats0) then
+%         SectionStats0 = section_stats(ItemStats0, GoalStats0),
+%         gather_stats_in_items(Items,
+%             ItemStats0, ItemStats, GoalStats0, GoalStats),
+%         SectionStats = section_stats(ItemStats, GoalStats),
+%         map.det_update(SectionName, SectionStats, !CompUnitStats)
+%     else
+%         gather_stats_in_items(Items,
+%             init_item_stats, ItemStats, init_goal_stats, GoalStats),
+%         SectionStats = section_stats(ItemStats, GoalStats),
+%         map.det_insert(SectionName, SectionStats, !CompUnitStats)
+%     ),
+%     gather_stats_in_item_blocks(SectionFunc, ItemBlocks, !CompUnitStats).
 
 :- pred gather_stats_in_items(list(item)::in,
     item_stats::in, item_stats::out, goal_stats::in, goal_stats::out) is det.
+:- pragma consider_used(pred(gather_stats_in_items/5)).
 
 gather_stats_in_items([], !ItemStats, !GoalStats).
 gather_stats_in_items([Item | Items], !ItemStats, !GoalStats) :-
@@ -311,7 +313,8 @@ gather_stats_in_item_decl_pragma(ItemDeclPragmaInfo, !ItemStats) :-
         !ItemStats ^ item_num_pragma_term2 :=
             !.ItemStats ^ item_num_pragma_term2 + 1
     ;
-        ( Pragma = decl_pragma_type_spec(_)
+        ( Pragma = decl_pragma_format_call(_)
+        ; Pragma = decl_pragma_type_spec(_)
         ; Pragma = decl_pragma_obsolete_pred(_)
         ; Pragma = decl_pragma_obsolete_proc(_)
         ; Pragma = decl_pragma_oisu(_)
@@ -362,23 +365,24 @@ gather_stats_in_goals([Goal | Goals], !GoalStats) :-
 
 gather_stats_in_goal(Goal, !GoalStats) :-
     (
-        Goal = conj_expr(_, SubGoalA, SubGoalB),
+        Goal = conj_expr(_, SubGoalA, SubGoalsB),
         !GoalStats ^ goal_num_conj := !.GoalStats ^ goal_num_conj + 1,
         gather_stats_in_goal(SubGoalA, !GoalStats),
-        gather_stats_in_goal(SubGoalB, !GoalStats)
+        gather_stats_in_goals(SubGoalsB, !GoalStats)
     ;
-        Goal = par_conj_expr(_, SubGoalA, SubGoalB),
+        Goal = par_conj_expr(_, SubGoalA, SubGoalsB),
         !GoalStats ^ goal_num_par_conj := !.GoalStats ^ goal_num_par_conj + 1,
         gather_stats_in_goal(SubGoalA, !GoalStats),
-        gather_stats_in_goal(SubGoalB, !GoalStats)
+        gather_stats_in_goals(SubGoalsB, !GoalStats)
     ;
         Goal = true_expr(_),
         !GoalStats ^ goal_num_true := !.GoalStats ^ goal_num_true + 1
     ;
-        Goal = disj_expr(_, SubGoalA, SubGoalB),
+        Goal = disj_expr(_, SubGoal1, SubGoal2, SubGoals),
         !GoalStats ^ goal_num_disj := !.GoalStats ^ goal_num_disj + 1,
-        gather_stats_in_goal(SubGoalA, !GoalStats),
-        gather_stats_in_goal(SubGoalB, !GoalStats)
+        gather_stats_in_goal(SubGoal1, !GoalStats),
+        gather_stats_in_goal(SubGoal2, !GoalStats),
+        gather_stats_in_goals(SubGoals, !GoalStats)
     ;
         Goal = fail_expr(_),
         !GoalStats ^ goal_num_fail := !.GoalStats ^ goal_num_fail + 1

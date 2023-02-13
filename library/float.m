@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-1998,2001-2008,2010, 2012 The University of Melbourne.
-% Copyright (C) 2013-2016, 2018-2020 The Mercury team.
+% Copyright (C) 2013-2016, 2018-2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -318,6 +318,7 @@
     % Convert a float to a pretty_printer.doc for formatting.
     %
 :- func float_to_doc(float) = doc.
+:- pragma obsolete(func(float_to_doc/1), [pretty_printer.float_to_doc/1]).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -346,7 +347,6 @@
 
 :- import_module exception.
 :- import_module int.
-:- import_module string.
 
 %
 % Header files of mathematical significance.
@@ -1160,9 +1160,7 @@ min_exponent = -1021.
 %
 max_exponent = 1024.
 
-    % Convert a float to a pretty_printer.doc.
-    %
-float_to_doc(X) = str(string.float_to_string(X)).
+float_to_doc(F) = pretty_printer.float_to_doc(F).
 
 %---------------------------------------------------------------------------%
 
@@ -1212,14 +1210,7 @@ float_to_doc(X) = str(string.float_to_string(X)).
         char buf[64];
 
         u.f = (double) Flt;
-        #if defined(MR_MSVC)
-            // The I64 size prefix is specific to the Microsoft C library
-            // -- we use it here since MSVC does not support the standard
-            // ll size prefix.
-            sprintf(buf, ""%I64d"", u.i);
-        #else
-            sprintf(buf, ""%"" MR_INT_LEAST64_LENGTH_MODIFIER ""d"", u.i);
-        #endif
+        sprintf(buf, ""%"" MR_INT_LEAST64_LENGTH_MODIFIER ""d"", u.i);
         MR_make_aligned_string_copy(Str, buf);
     #else
         MR_fatal_error(

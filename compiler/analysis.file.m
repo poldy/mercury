@@ -123,10 +123,12 @@
 :- import_module char.
 :- import_module dir.
 :- import_module exception.
+:- import_module io.file.
 :- import_module mercury_term_parser.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
+:- import_module term_int.
 :- import_module term_io.
 :- import_module type_desc.
 :- import_module univ.
@@ -316,9 +318,10 @@ read_module_analysis_results(Info, Globals, ModuleName, ModuleResults, !IO) :-
                 ModuleResults, !IO)
         else
             CacheFileName = make_cache_filename(CacheDir, AnalysisFileName),
-            io.file_modification_time(AnalysisFileName, AnalysisTimeResult,
-                !IO),
-            io.file_modification_time(CacheFileName, CacheTimeResult, !IO),
+            io.file.file_modification_time(AnalysisFileName,
+                AnalysisTimeResult, !IO),
+            io.file.file_modification_time(CacheFileName,
+                CacheTimeResult, !IO),
             ( if
                 AnalysisTimeResult = ok(AnalysisTime),
                 CacheTimeResult = ok(CacheTime),
@@ -413,7 +416,7 @@ parse_result_entry(Compiler, Term, !Results) :-
     then
         ( if
             VersionNumber = analysis_version_number(_ : Call, _ : Answer),
-            decimal_term_to_int(VersionNumberTerm, VersionNumber)
+            term_int.decimal_term_to_int(VersionNumberTerm, VersionNumber)
         then
             Result = 'new some_analysis_result'(CallPattern, AnswerPattern,
                 Status),
@@ -512,7 +515,7 @@ parse_request_entry(Compiler, Term, !Requests) :-
     then
         ( if
             VersionNumber = analysis_version_number(_ : Call, _ : Answer),
-            decimal_term_to_int(VersionNumberTerm, VersionNumber)
+            term_int.decimal_term_to_int(VersionNumberTerm, VersionNumber)
         then
             Result = 'new analysis_request'(CallPattern, CallerModule),
             ( if map.search(!.Requests, AnalysisName, AnalysisRequests0) then
@@ -560,7 +563,7 @@ write_module_analysis_requests(Info, Globals, ModuleName, ModuleRequests,
         io.close_input(InputStream, !IO),
         ( if
             VersionResult = term(_, NumberTerm),
-            decimal_term_to_int(NumberTerm, version_number)
+            term_int.decimal_term_to_int(NumberTerm, version_number)
         then
             io.open_append(AnalysisFileName, AppendResult, !IO),
             (
@@ -639,7 +642,7 @@ parse_imdg_arc(Compiler, Term, !Arcs) :-
     then
         ( if
             VersionNumber = analysis_version_number(_ : Call, _ : Answer),
-            decimal_term_to_int(VersionNumberTerm, VersionNumber)
+            term_int.decimal_term_to_int(VersionNumberTerm, VersionNumber)
         then
             Arc = 'new imdg_arc'(CallPattern, DependentModule),
             ( if map.search(!.Arcs, AnalysisName, AnalysisArcs0) then
@@ -701,7 +704,7 @@ write_imdg_arc(Compiler, AnalysisName, FuncId, Arc, !IO) :-
 :- pred parse_func_id(term::in, func_id::out) is semidet.
 
 parse_func_id(Term, FuncId) :-
-    Term = functor(atom(PF), [NameTerm, ArityTerm, ProcTerm], _),
+    Term = term.functor(term.atom(PF), [NameTerm, ArityTerm, ProcTerm], _),
     (
         PF = "p",
         PredOrFunc = pf_predicate
@@ -709,11 +712,11 @@ parse_func_id(Term, FuncId) :-
         PF = "f",
         PredOrFunc = pf_function
     ),
-    NameTerm = functor(atom(Name), [], _),
-    decimal_term_to_int(ArityTerm, Arity),
-    decimal_term_to_int(ProcTerm, ProcInt),
-    proc_id_to_int(ProcId, ProcInt),
-    FuncId = func_id(PredOrFunc, Name, Arity, ProcId).
+    NameTerm = term.functor(term.atom(Name), [], _),
+    term_int.decimal_term_to_int(ArityTerm, Arity),
+    term_int.decimal_term_to_int(ProcTerm, ProcIdInt),
+    proc_id_to_int(ProcId, ProcIdInt),
+    FuncId = func_id(PredOrFunc, Name, pred_form_arity(Arity), ProcId).
 
 %---------------------%
 
@@ -794,7 +797,7 @@ check_analysis_file_version_number(Stream, !IO) :-
     mercury_term_parser.read_term(Stream, TermResult : read_term, !IO),
     ( if
         TermResult  = term(_, NumberTerm),
-        decimal_term_to_int(NumberTerm, version_number)
+        term_int.decimal_term_to_int(NumberTerm, version_number)
     then
         true
     else
@@ -826,7 +829,8 @@ read_analysis_file_2(Stream, ParseEntry, Results0, Results, !IO) :-
 
 :- func func_id_to_string(func_id) = string.
 
-func_id_to_string(func_id(PredOrFunc, Name, Arity, ProcId)) = String :-
+func_id_to_string(FuncId) = String :-
+    FuncId = func_id(PredOrFunc, Name, PredFormArity, ProcId),
     (
         PredOrFunc = pf_predicate,
         PFStr = "p"
@@ -834,6 +838,7 @@ func_id_to_string(func_id(PredOrFunc, Name, Arity, ProcId)) = String :-
         PredOrFunc = pf_function,
         PFStr = "f"
     ),
+    PredFormArity = pred_form_arity(Arity),
     NameStr = term_io.quoted_atom(Name),
     string.format("%s(%s, %d, %d)",
         [s(PFStr), s(NameStr), i(Arity), i(proc_id_to_int(ProcId))], String).
@@ -917,7 +922,7 @@ empty_request_file(Info, Globals, ModuleName, !IO) :-
             io.write_string(RequestFileName, !IO),
             io.nl(!IO)
         ), !IO),
-    io.remove_file(RequestFileName, _, !IO).
+    io.file.remove_file(RequestFileName, _, !IO).
 
 %---------------------------------------------------------------------------%
 %
@@ -955,14 +960,14 @@ write_analysis_cache_file(CacheFileName, ModuleResults, !IO) :-
         TmpFileResult = ok(TmpFileStream),
         pickle(TmpFileStream, init_analysis_picklers, ModuleResults, !IO),
         io.close_binary_output(TmpFileStream, !IO),
-        io.rename_file(TmpFileName, CacheFileName, RenameRes, !IO),
+        io.file.rename_file(TmpFileName, CacheFileName, RenameRes, !IO),
         (
             RenameRes = ok
         ;
             RenameRes = error(Error),
             io.format("Error renaming %s: %s\n",
                 [s(CacheFileName), s(io.error_message(Error))], !IO),
-            io.remove_file(TmpFileName, _, !IO)
+            io.file.remove_file(TmpFileName, _, !IO)
         )
     ;
         TmpFileResult = error(Error),
@@ -1039,7 +1044,7 @@ unpickle_analysis_result(Compiler, Unpicklers, Handle, _Type, Univ, !State) :-
 ].
 :- instance to_term(dummy_answer) where [
     ( to_term(dummy_answer) = Term :-
-        Term = term.functor(atom("dummy"), [], context_init)
+        Term = term.functor(atom("dummy"), [], dummy_context)
     ),
     ( from_term(Term, dummy_answer) :-
         Term = term.functor(atom("dummy"), [], _)

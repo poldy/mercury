@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %-----------------------------------------------------------------------------%
 % Copyright (C) 2008-2012 The University of Melbourne.
+% Copyright (C) 2013-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %-----------------------------------------------------------------------------%
@@ -16,16 +17,16 @@
 :- module parse_tree.module_cmds.
 :- interface.
 
-:- import_module mdbcomp.
-:- import_module mdbcomp.sym_name.
 :- import_module libs.
 :- import_module libs.file_util.
 :- import_module libs.globals.
 :- import_module libs.maybe_succeeded.
+:- import_module mdbcomp.
+:- import_module mdbcomp.sym_name.
 :- import_module parse_tree.file_names.
 
-:- import_module list.
 :- import_module io.
+:- import_module list.
 :- import_module maybe.
 
 %-----------------------------------------------------------------------------%
@@ -142,7 +143,7 @@
     %
     % Invoke an executable. Progress messages, error output and output from the
     % invoked command will go to the specified output streams. It is expected
-    % that on most invocationbs, ErrorStream and CmdOutputStream will be the
+    % that on most invocations, ErrorStream and CmdOutputStream will be the
     % same stream.
     %
 :- pred invoke_system_command(globals::in, io.text_output_stream::in,
@@ -230,6 +231,9 @@
 :- import_module bool.
 :- import_module dir.
 :- import_module int.
+:- import_module io.call_system.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module require.
 :- import_module set.
 :- import_module string.
@@ -244,46 +248,29 @@ update_interface_return_changed(Globals, ModuleName, OutputFileName,
     maybe_write_string(ProgressStream, Verbose,
         "% Updating interface:\n", !IO),
     TmpOutputFileName = OutputFileName ++ ".tmp",
-    io.open_binary_input(OutputFileName, OutputFileRes, !IO),
+    io.read_named_file_as_string(OutputFileName, OutputFileRes, !IO),
     (
-        OutputFileRes = ok(OutputFileStream),
-        io.open_binary_input(TmpOutputFileName, TmpOutputFileRes, !IO),
+        OutputFileRes = ok(OutputFileStr),
+        io.read_named_file_as_string(TmpOutputFileName, TmpOutputFileRes, !IO),
         (
-            TmpOutputFileRes = ok(TmpOutputFileStream),
-            binary_input_stream_cmp(OutputFileStream, TmpOutputFileStream,
-                FilesDiffer, !IO),
-            io.close_binary_input(OutputFileStream, !IO),
-            io.close_binary_input(TmpOutputFileStream, !IO),
-            (
-                FilesDiffer = ok(ok(no)),
+            TmpOutputFileRes = ok(TmpOutputFileStr),
+            ( if OutputFileStr = TmpOutputFileStr then
                 Result = interface_unchanged,
                 string.format("%% `%s' has not changed.\n",
                     [s(OutputFileName)], NoChangeMsg),
                 maybe_write_string(ProgressStream, Verbose, NoChangeMsg, !IO),
-                io.remove_file(TmpOutputFileName, _, !IO)
-            ;
-                FilesDiffer = ok(ok(yes)),
+                io.file.remove_file(TmpOutputFileName, _, !IO)
+            else
                 update_interface_create_file(Globals,
                     ProgressStream, ErrorStream, "CHANGED",
                     OutputFileName, TmpOutputFileName, Result, !IO)
-            ;
-                FilesDiffer = ok(error(TmpFileError)),
-                io.error_message(TmpFileError, TmpFileErrorMsg),
-                Result = interface_error,
-                io.format(ErrorStream, "Error reading `%s': %s\n",
-                    [s(TmpOutputFileName), s(TmpFileErrorMsg)], !IO)
-            ;
-                FilesDiffer = error(_, _),
-                update_interface_create_file(Globals,
-                    ProgressStream, ErrorStream, "been CREATED",
-                    OutputFileName, TmpOutputFileName, Result, !IO)
             )
         ;
-
             TmpOutputFileRes = error(TmpOutputFileError),
             io.error_message(TmpOutputFileError, TmpOutputFileErrorMsg),
             Result = interface_error,
-            io.close_binary_input(OutputFileStream, !IO),
+            % The error message is about TmpOutputFileName, but the
+            % message we print does not mention that file name.
             io.format(ErrorStream, "Error creating `%s': %s\n",
                 [s(OutputFileName), s(TmpOutputFileErrorMsg)], !IO)
         )
@@ -344,59 +331,7 @@ update_interface_create_file(Globals, ProgressStream, ErrorStream,
         io.format(ErrorStream, "Error creating `%s': %s\n",
             [s(OutputFileName), s(io.error_message(MoveError))], !IO)
     ),
-    io.remove_file(TmpOutputFileName, _, !IO).
-
-:- pred binary_input_stream_cmp(io.binary_input_stream::in,
-    io.binary_input_stream::in, io.maybe_partial_res(io.res(bool))::out,
-    io::di, io::uo) is det.
-
-binary_input_stream_cmp(OutputFileStream, TmpOutputFileStream, FilesDiffer,
-        !IO) :-
-    io.binary_input_stream_foldl2_io_maybe_stop(OutputFileStream,
-        binary_input_stream_cmp_2(TmpOutputFileStream),
-        ok(no), FilesDiffer0, !IO),
-
-    % Check whether there is anything left in TmpOutputFileStream
-    ( if FilesDiffer0 = ok(ok(no)) then
-        io.read_byte(TmpOutputFileStream, TmpByteResult2, !IO),
-        (
-            TmpByteResult2 = ok(_),
-            FilesDiffer = ok(ok(yes))
-        ;
-            TmpByteResult2 = eof,
-            FilesDiffer = FilesDiffer0
-        ;
-            TmpByteResult2 = error(Error),
-            FilesDiffer = ok(error(Error))
-        )
-    else
-        FilesDiffer = FilesDiffer0
-    ).
-
-:- pred binary_input_stream_cmp_2(io.binary_input_stream::in, int::in,
-    bool::out, io.res(bool)::in, io.res(bool)::out, io::di, io::uo) is det.
-
-binary_input_stream_cmp_2(TmpOutputFileStream, Byte, Continue, _, Differ,
-        !IO) :-
-    io.read_byte(TmpOutputFileStream, TmpByteResult, !IO),
-    (
-        TmpByteResult = ok(TmpByte),
-        ( if TmpByte = Byte then
-            Differ = ok(no),
-            Continue = yes
-        else
-            Differ = ok(yes),
-            Continue = no
-        )
-    ;
-        TmpByteResult = eof,
-        Differ = ok(yes),
-        Continue = no
-    ;
-        TmpByteResult = error(TmpByteError),
-        Differ = error(TmpByteError) : io.res(bool),
-        Continue = no
-    ).
+    io.file.remove_file(TmpOutputFileName, _, !IO).
 
 %-----------------------------------------------------------------------------%
 
@@ -411,26 +346,141 @@ copy_file(Globals, ProgressStream, ErrorStream, Source, Destination,
         Res = ok
     ;
         Succeeded = did_not_succeed,
-        io.open_binary_input(Source, SourceRes, !IO),
+        do_copy_file(Source, Destination, Res, !IO)
+    ).
+
+    % XXX TODO: copying the file byte-by-byte is inefficient.
+    % If the OS or platform we are on provides a system call for copying files,
+    % we should use that in preference to the code below.
+    % When the standard library has a byte_array type, the code below should be
+    % change the code below to read the file being copied into a byte_array and
+    % then write out that array using a single system call.
+    %
+:- pred do_copy_file(file_name::in, file_name::in, io.res::out,
+    io::di, io::uo) is det.
+
+do_copy_file(Source, Destination, Res, !IO) :-
+    io.open_binary_input(Source, SourceRes, !IO),
+    (
+        SourceRes = ok(SourceStream),
+        io.open_binary_output(Destination, DestRes, !IO),
         (
-            SourceRes = ok(SourceStream),
-            io.open_binary_output(Destination, DestRes, !IO),
-            (
-                DestRes = ok(DestStream),
-                WriteByte = io.write_byte(DestStream),
-                io.binary_input_stream_foldl_io(SourceStream, WriteByte, Res,
-                    !IO),
-                io.close_binary_input(SourceStream, !IO),
-                io.close_binary_output(DestStream, !IO)
-            ;
-                DestRes = error(Error),
-                Res = error(Error)
-            )
+            DestRes = ok(DestStream),
+            copy_bytes(SourceStream, DestStream, Res, !IO),
+            io.close_binary_input(SourceStream, !IO),
+            io.close_binary_output(DestStream, !IO)
         ;
-            SourceRes = error(Error),
+            DestRes = error(Error),
             Res = error(Error)
         )
+    ;
+        SourceRes = error(Error),
+        Res = error(Error)
     ).
+
+:- pred copy_bytes(io.binary_input_stream::in, io.binary_output_stream::in,
+    io.res::out, io::di, io::uo) is det.
+
+copy_bytes(Source, Destination, Res, !IO) :-
+    should_reduce_stack_usage(ShouldReduce),
+    (
+        ShouldReduce = no,
+        copy_bytes_plain(Source, Destination, Res, !IO)
+    ;
+        ShouldReduce = yes,
+        copy_bytes_chunk(Source, Destination, Res, !IO)
+    ).
+
+:- pred copy_bytes_plain(io.binary_input_stream::in,
+    io.binary_output_stream::in, io.res::out, io::di, io::uo) is det.
+
+copy_bytes_plain(Source, Destination, Res, !IO) :-
+    io.read_binary_uint8_unboxed(Source, ByteResult, Byte, !IO),
+    (
+        ByteResult = ok,
+        io.write_binary_uint8(Destination, Byte, !IO),
+        copy_bytes_plain(Source, Destination, Res, !IO)
+    ;
+        ByteResult = eof,
+        Res = ok
+    ;
+        ByteResult = error(Error),
+        Res = error(Error)
+    ).
+
+:- type copy_chunk_inner_res0
+    --->    ccir0_ok
+    ;       ccir0_error(io.error)
+    ;       ccir0_more.
+
+:- pred copy_bytes_chunk(io.binary_input_stream::in,
+    io.binary_output_stream::in, io.res::out, io::di, io::uo) is det.
+
+copy_bytes_chunk(Source, Destination, Res, !IO) :-
+    % ChunkSize gives the maximum number of recursive calls we want to allow in
+    % the copy_bytes_inner predicate. Without such a limit, the depth of
+    % recursion, which depends on the size of the file they read, will cause
+    % exhaustion of the det stack in debug grades, since there is no tail
+    % recursion in such grades.
+    %
+    % With this arrangement, the maximum number of stack frames needed to
+    % process a file of size N is N/1000 + 1000, the former being the number of
+    % frames of copy_bytes_chunk predicate, the latter being the max number of
+    % frames of the copy_bytes_inner predicate.
+    %
+    ChunkSize = 1000,
+    copy_bytes_inner(ChunkSize, Source, Destination, InnerRes, !IO),
+    (
+        InnerRes = ccir0_ok,
+        Res = ok
+    ;
+        InnerRes = ccir0_error(Error),
+        Res = error(Error)
+    ;
+        InnerRes = ccir0_more,
+        copy_bytes_chunk(Source, Destination, Res, !IO)
+    ).
+
+:- pred copy_bytes_inner(int::in, io.binary_input_stream::in,
+    io.binary_output_stream::in, copy_chunk_inner_res0::out,
+    io::di, io::uo) is det.
+
+copy_bytes_inner(Left, Source, Destination, Res, !IO) :-
+    ( if Left > 0 then
+        io.read_binary_uint8_unboxed(Source, ByteResult, Byte, !IO),
+        (
+            ByteResult = ok,
+            io.write_binary_uint8(Destination, Byte, !IO),
+            copy_bytes_inner(Left - 1, Source, Destination, Res, !IO)
+        ;
+            ByteResult = eof,
+            Res = ccir0_ok
+        ;
+            ByteResult = error(Error),
+            Res = ccir0_error(Error)
+        )
+    else
+        Res = ccir0_more
+    ).
+
+:- pred should_reduce_stack_usage(bool::out) is det.
+
+% For non-C backends.
+should_reduce_stack_usage(yes).
+
+:- pragma foreign_proc("C",
+    should_reduce_stack_usage(ShouldReduce::out),
+    [will_not_call_mercury, promise_pure, thread_safe,
+        does_not_affect_liveness],
+"
+#ifdef  MR_EXEC_TRACE
+    ShouldReduce = MR_YES;
+#else
+    ShouldReduce = MR_NO;
+#endif
+").
+
+%-----------------------------------------------------------------------------%
 
 :- pred copy_dir(globals::in,
     io.text_output_stream::in, io.text_output_stream::in,
@@ -446,8 +496,8 @@ maybe_make_symlink(Globals, LinkTarget, LinkName, Result, !IO) :-
     globals.lookup_bool_option(Globals, use_symlinks, UseSymLinks),
     (
         UseSymLinks = yes,
-        io.remove_file_recursively(LinkName, _, !IO),
-        io.make_symlink(LinkTarget, LinkName, LinkResult, !IO),
+        io.file.remove_file_recursively(LinkName, _, !IO),
+        io.file.make_symlink(LinkTarget, LinkName, LinkResult, !IO),
         Result = ( if LinkResult = ok then succeeded else did_not_succeed )
     ;
         UseSymLinks = no,
@@ -469,7 +519,7 @@ make_symlink_or_copy_file(Globals, ProgressStream, ErrorStream,
         ;
             PrintCommand = no
         ),
-        io.make_symlink(SourceFileName, DestinationFileName, Result, !IO)
+        io.file.make_symlink(SourceFileName, DestinationFileName, Result, !IO)
     ;
         UseSymLinks = no,
         LinkOrCopy = "copying",
@@ -503,7 +553,7 @@ make_symlink_or_copy_dir(Globals, ProgressStream, ErrorStream,
     globals.lookup_bool_option(Globals, use_symlinks, UseSymLinks),
     (
         UseSymLinks = yes,
-        io.make_symlink(SourceDirName, DestinationDirName, Result, !IO),
+        io.file.make_symlink(SourceDirName, DestinationDirName, Result, !IO),
         (
             Result = ok,
             Succeeded = succeeded
@@ -604,7 +654,7 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
     % the output from the command would go to the current C output
     % and error streams.
 
-    io.make_temp_file(TmpFileResult, !IO),
+    io.file.make_temp_file(TmpFileResult, !IO),
     (
         TmpFileResult = ok(TmpFile),
         ( if use_dotnet then
@@ -620,9 +670,10 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
             CommandRedirected = string.format("%s > %s 2>&1",
                 [s(Command), s(TmpFile)])
         ),
-        io.call_system_return_signal(CommandRedirected, Result, !IO),
+        io.call_system.call_system_return_signal(CommandRedirected,
+            CmdResult, !IO),
         (
-            Result = ok(exited(Status)),
+            CmdResult = ok(exited(Status)),
             maybe_write_string(ProgressStream, PrintCommand, "% done.\n", !IO),
             ( if Status = 0 then
                 CommandSucceeded = succeeded
@@ -631,7 +682,7 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
                 CommandSucceeded = did_not_succeed
             )
         ;
-            Result = ok(signalled(Signal)),
+            CmdResult = ok(signalled(Signal)),
             string.format("system command received signal %d.", [i(Signal)],
                 ErrorMsg),
             report_error(ErrorStream, ErrorMsg, !IO),
@@ -646,7 +697,7 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
             raise_signal(Signal, !IO),
             CommandSucceeded = did_not_succeed
         ;
-            Result = error(Error),
+            CmdResult = error(Error),
             report_error(ErrorStream, io.error_message(Error), !IO),
             CommandSucceeded = did_not_succeed
         )
@@ -663,7 +714,7 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
         % We can't do bash style redirection on .NET.
         not use_dotnet
     then
-        io.make_temp_file(ProcessedTmpFileResult, !IO),
+        io.file.make_temp_file(ProcessedTmpFileResult, !IO),
         (
             ProcessedTmpFileResult = ok(ProcessedTmpFile),
 
@@ -684,9 +735,18 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
                 ProcessOutputRedirected = string.format("%s < %s > %s 2>&1",
                     [s(ProcessOutput), s(TmpFile), s(ProcessedTmpFile)])
             ),
-            io.call_system_return_signal(ProcessOutputRedirected,
+            (
+                PrintCommand = yes,
+                io.format(ProgressStream,
+                    "%% Invoking system command `%s'...\n",
+                        [s(ProcessOutputRedirected)], !IO),
+                io.flush_output(ProgressStream, !IO)
+            ;
+                PrintCommand = no
+            ),
+            io.call_system.call_system_return_signal(ProcessOutputRedirected,
                 ProcessOutputResult, !IO),
-            io.remove_file(TmpFile, _, !IO),
+            io.file.remove_file(TmpFile, _, !IO),
             (
                 ProcessOutputResult = ok(exited(ProcessOutputStatus)),
                 maybe_write_string(ProgressStream, PrintCommand,
@@ -700,9 +760,8 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
                 )
             ;
                 ProcessOutputResult = ok(signalled(ProcessOutputSignal)),
-                % Make sure the current process gets the signal. Some
-                % systems (e.g. Linux) ignore SIGINT during a call to
-                % system().
+                % Make sure the current process gets the signal. Some systems
+                % (e.g. Linux) ignore SIGINT during a call to system().
                 raise_signal(ProcessOutputSignal, !IO),
                 report_error(ErrorStream,
                     "system command received signal "
@@ -740,7 +799,7 @@ invoke_system_command_maybe_filter_output(Globals, ProgressStream, ErrorStream,
             "error opening command output: " ++ io.error_message(TmpFileError),
             !IO)
     ),
-    io.remove_file(ProcessedTmpFile, _, !IO),
+    io.file.remove_file(ProcessedTmpFile, _, !IO),
     io.set_exit_status(OldStatus, !IO).
 
 make_command_string(String0, QuoteType, String) :-
@@ -832,8 +891,8 @@ create_java_shell_script(Globals, MainModuleName, Succeeded, !IO) :-
     file_name::in, io.text_output_stream::in, io::di, io::uo) is det.
 
 write_java_shell_script(Globals, MainModuleName, JarFileName, Stream, !IO) :-
-    io.get_environment_var("MERCURY_STAGE2_LAUNCHER_BASE", MaybeStage2Base,
-        !IO),
+    io.environment.get_environment_var("MERCURY_STAGE2_LAUNCHER_BASE",
+        MaybeStage2Base, !IO),
     (
         MaybeStage2Base = no,
         get_mercury_std_libs_for_java(Globals, MercuryStdLibs)
@@ -851,6 +910,11 @@ write_java_shell_script(Globals, MainModuleName, JarFileName, Stream, !IO) :-
         MercuryStdLibs ++ ["$CLASSPATH" | UserClasspath],
     ClassPath = string.join_list("${SEP}", Java_Incl_Dirs),
 
+    globals.lookup_accumulating_option(Globals, java_runtime_flags,
+        RuntimeFlags),
+    RuntimeOpts0 = string.join_list(" ", RuntimeFlags),
+    RuntimeOpts = escape_single_quotes_for_shell_script(RuntimeOpts0),
+
     globals.lookup_string_option(Globals, java_interpreter, Java),
     mangle_sym_name_for_java(MainModuleName, module_qual, ".", ClassName),
 
@@ -864,8 +928,10 @@ write_java_shell_script(Globals, MainModuleName, JarFileName, Stream, !IO) :-
         "esac\n",
         "CLASSPATH=", ClassPath, "\n",
         "export CLASSPATH\n",
-        "JAVA=${JAVA:-", Java, "}\n",
-        "exec \"$JAVA\" jmercury.", ClassName, " \"$@\"\n"
+        "MERCURY_JAVA=${MERCURY_JAVA:-'", Java, "'}\n",
+        "MERCURY_JAVA_OPTIONS=${MERCURY_JAVA_OPTIONS:-'", RuntimeOpts, "'}\n",
+        "exec \"$MERCURY_JAVA\" $MERCURY_JAVA_OPTIONS jmercury.", ClassName,
+            " \"$@\"\n"
     ], !IO).
 
     % For the MSYS version of the Java launcher script, there are a few
@@ -900,6 +966,11 @@ write_java_msys_shell_script(Globals, MainModuleName, JarFileName, Stream,
         Java_Incl_Dirs0),
     ClassPath = string.join_list("\\;", Java_Incl_Dirs),
 
+    globals.lookup_accumulating_option(Globals, java_runtime_flags,
+        RuntimeFlags),
+    RuntimeOpts0 = string.join_list(" ", RuntimeFlags),
+    RuntimeOpts = escape_single_quotes_for_shell_script(RuntimeOpts0),
+
     globals.lookup_string_option(Globals, java_interpreter, Java),
     mangle_sym_name_for_java(MainModuleName, module_qual, ".", ClassName),
 
@@ -909,9 +980,20 @@ write_java_msys_shell_script(Globals, MainModuleName, JarFileName, Stream,
         "DIR=$( cd \"${DIR}\" && pwd -W )\n",
         "CLASSPATH=", ClassPath, "\n",
         "export CLASSPATH\n",
-        "JAVA=${JAVA:-", Java, "}\n",
-        "exec \"$JAVA\" jmercury.", ClassName, " \"$@\"\n"
+        "MERCURY_JAVA=${MERCURY_JAVA:-'", Java, "'}\n",
+        "MERCURY_JAVA_OPTIONS=${MERCURY_JAVA_OPTIONS:-'", RuntimeOpts, "'}\n",
+        "exec \"$MERCURY_JAVA\" $MERCURY_JAVA_OPTIONS jmercury.", ClassName,
+            " \"$@\"\n"
     ], !IO).
+
+:- func escape_single_quotes_for_shell_script(string) = string.
+
+escape_single_quotes_for_shell_script(S) =
+    ( if string.contains_char(S, '\'') then
+        string.replace_all(S, "'", "'\\''")
+    else
+        S
+    ).
 
 :- pred write_java_batch_file(globals::in, module_name::in, file_name::in,
     io.text_output_stream::in, io::di, io::uo) is det.
@@ -925,16 +1007,22 @@ write_java_batch_file(Globals, MainModuleName, JarFileName, Stream, !IO) :-
         ["%CLASSPATH%" | UserClasspath],
     ClassPath = string.join_list(";", Java_Incl_Dirs),
 
+    globals.lookup_accumulating_option(Globals, java_runtime_flags,
+        RuntimeFlags),
+    RuntimeOpts = string.join_list(" ", RuntimeFlags),
+
     globals.lookup_string_option(Globals, java_interpreter, Java),
     mangle_sym_name_for_java(MainModuleName, module_qual, ".", ClassName),
 
     io.write_strings(Stream, [
         "@echo off\n",
         "rem Automatically generated by the Mercury compiler.\n",
-        "setlocal\n",
+        "setlocal enableextensions\n",
         "set DIR=%~dp0\n",
         "set CLASSPATH=", ClassPath, "\n",
-        Java, " jmercury.", ClassName, " %*\n"
+        "if not defined MERCURY_JAVA_OPTIONS set MERCURY_JAVA_OPTIONS=",
+            RuntimeOpts, "\n",
+        Java, " %MERCURY_JAVA_OPTIONS% jmercury.", ClassName, " %*\n"
     ], !IO).
 
 get_mercury_std_libs_for_java(Globals, !:StdLibs) :-
@@ -1101,12 +1189,12 @@ file_error_is_relevant(NestedClassPrefixes, FileError) :-
 %-----------------------------------------------------------------------------%
 
 get_env_classpath(Classpath, !IO) :-
-    io.get_environment_var("CLASSPATH", MaybeCP, !IO),
+    io.environment.get_environment_var("CLASSPATH", MaybeCP, !IO),
     (
         MaybeCP = yes(Classpath)
     ;
         MaybeCP = no,
-        io.get_environment_var("java.class.path", MaybeJCP, !IO),
+        io.environment.get_environment_var("java.class.path", MaybeJCP, !IO),
         (
             MaybeJCP = yes(Classpath)
         ;
@@ -1127,13 +1215,13 @@ create_launcher_shell_script(Globals, MainModuleName, Pred, Succeeded, !IO) :-
         "% Generating shell script `" ++ FileName ++ "'...\n", !IO),
 
     % Remove symlink in the way, if any.
-    io.remove_file(FileName, _, !IO),
+    io.file.remove_file(FileName, _, !IO),
     io.open_output(FileName, OpenResult, !IO),
     (
         OpenResult = ok(Stream),
         Pred(Stream, !IO),
         io.close_output(Stream, !IO),
-        io.call_system("chmod a+x " ++ FileName, ChmodResult, !IO),
+        io.call_system.call_system("chmod a+x " ++ FileName, ChmodResult, !IO),
         (
             ChmodResult = ok(Status),
             ( if Status = 0 then
@@ -1166,7 +1254,7 @@ create_launcher_batch_file(Globals, MainModuleName, Pred, Succeeded, !IO) :-
         "% Generating batch file `" ++ FileName ++ "'...\n", !IO),
 
     % Remove an existing batch file of the same name, if any.
-    io.remove_file(FileName, _, !IO),
+    io.file.remove_file(FileName, _, !IO),
     io.open_output(FileName, OpenResult, !IO),
     (
         OpenResult = ok(Stream),

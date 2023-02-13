@@ -25,6 +25,7 @@ enum.m
 eqvclass.m
 exception.m
 fat_sparse_bitset.m
+fatter_sparse_bitset.m
 float.m
 gc.m
 getopt.m
@@ -38,6 +39,9 @@ int32.m
 int64.m
 integer.m
 io.m
+io.call_system.m
+io.environment.m
+io.file.m
 kv_list.m
 lazy.m
 library.m
@@ -59,6 +63,7 @@ pretty_printer.m
 prolog.m
 psqueue.m
 queue.m
+ra_list.m
 random.m
 random.sfc16.m
 random.sfc32.m
@@ -86,7 +91,12 @@ string.builder.m
 string.m
 table_statistics.m
 term.m
+term_context.m
 term_conversion.m
+term_int.m
+term_subst.m
+term_unify.m
+term_vars.m
 term_io.m
 term_to_xml.m
 thread.barrier.m

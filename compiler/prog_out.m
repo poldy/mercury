@@ -27,6 +27,25 @@
 :- import_module io.
 :- import_module maybe.
 
+%---------------------------------------------------------------------------%
+%
+% Write out indentation.
+%
+
+:- func indent_increment = int.
+
+    % Write out the given indent level (indent_increment spaces per indent).
+    % error_util.m
+    %
+:- pred write_indent(io.text_output_stream::in, int::in,
+    io::di, io::uo) is det.
+
+    % Return the indent for the given level as a string.
+    %
+:- func indent_string(int) = string.
+
+%---------------------------------------------------------------------------%
+
     % Write to a string the information in term context (at the moment,
     % just the line number) in a form suitable for the beginning of an
     % error message.
@@ -81,17 +100,23 @@
 
 %-----------------------------------------------------------------------------%
 
-:- func pf_sym_name_orig_arity_to_string(pf_sym_name_arity) = string.
-:- func pf_sym_name_orig_arity_to_string(pred_or_func, sym_name_arity)
+:- func pf_sym_name_pred_form_arity_to_string(pf_sym_name_arity) = string.
+:- func pf_sym_name_pred_form_arity_to_string(pred_or_func, sym_name_arity)
     = string.
-:- func pf_sym_name_orig_arity_to_string(pred_or_func, sym_name, arity)
-    = string.
+:- func pf_sym_name_pred_form_arity_to_string(pred_or_func, sym_name,
+    pred_form_arity) = string.
 
 :- func pf_sym_name_user_arity_to_string(pred_pf_name_arity) = string.
 :- func pf_sym_name_user_arity_to_string(pred_or_func, sym_name_arity)
     = string.
 :- func pf_sym_name_user_arity_to_string(pred_or_func, sym_name, arity)
     = string.
+
+:- func pf_sym_name_user_arity_to_unquoted_string(pred_pf_name_arity) = string.
+:- func pf_sym_name_user_arity_to_unquoted_string(pred_or_func, sym_name_arity)
+    = string.
+:- func pf_sym_name_user_arity_to_unquoted_string(pred_or_func, sym_name,
+    arity) = string.
 
 %-----------------------------------------------------------------------------%
 
@@ -146,12 +171,6 @@
     %
 :- func pred_or_func_to_str(pred_or_func) = string.
 
-    % Print "predicate" or "function" depending on the given value.
-    %
-:- pred write_pred_or_func(pred_or_func::in, io::di, io::uo) is det.
-:- pred write_pred_or_func(io.text_output_stream::in, pred_or_func::in,
-    io::di, io::uo) is det.
-
     % Get a purity name as a string.
     %
 :- pred purity_name(purity, string).
@@ -197,27 +216,61 @@
 
 :- implementation.
 
-:- import_module parse_tree.error_util.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.prog_util.
 
+:- import_module int.
 :- import_module list.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module term_io.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
-context_to_string(Context, ContextMessage) :-
-    term.context_file(Context, FileName),
-    term.context_line(Context, LineNumber),
-    ( if FileName = "" then
-        ContextMessage = ""
+indent_increment = 2.
+
+write_indent(Stream, Indent, !IO) :-
+    Str = indent_string(Indent),
+    io.write_string(Stream, Str, !IO).
+
+indent_string(Indent) = Str :-
+    % The code here is modelled after output_std_indent_levels in
+    % library/pretty_printer.m, except we can, and do, assume that
+    % Indent is never negative, and in our use case, deep indentation
+    % is much rarer.
+    ( if indent_str_09(Indent, Str0) then
+        Str = Str0
     else
-        string.format("%s:%03d: ", [s(FileName), i(LineNumber)],
-            ContextMessage)
+        indent_str_10(TenIndentStr),
+        Str = TenIndentStr ++ indent_string(Indent - 10)
+    ).
+
+:- pred indent_str_09(int::in, string::out) is semidet.
+:- pred indent_str_10(string::out) is det.
+
+indent_str_09(0,  "").
+indent_str_09(1,  "  ").
+indent_str_09(2,  "    ").
+indent_str_09(3,  "      ").
+indent_str_09(4,  "        ").
+indent_str_09(5,  "          ").
+indent_str_09(6,  "            ").
+indent_str_09(7,  "              ").
+indent_str_09(8,  "                ").
+indent_str_09(9,  "                  ").
+indent_str_10(    "                    ").
+
+%-----------------------------------------------------------------------------%
+
+context_to_string(Context, ContextStr) :-
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
+    ( if FileName = "" then
+        ContextStr = ""
+    else
+        string.format("%s:%03d: ", [s(FileName), i(LineNumber)], ContextStr)
     ).
 
 write_context(Context, !IO) :-
@@ -257,10 +310,9 @@ write_quoted_sym_name(Stream, SymName, !IO) :-
     write_sym_name(Stream, SymName, !IO),
     io.write_string(Stream, "'", !IO).
 
-sym_name_arity_to_string(sym_name_arity(SymName, Arity)) = String :-
-    SymNameString = sym_name_to_string(SymName),
-    string.int_to_string(Arity, ArityString),
-    string.append_list([SymNameString, "/", ArityString], String).
+sym_name_arity_to_string(sym_name_arity(SymName, Arity)) = Str :-
+    SymNameStr = sym_name_to_string(SymName),
+    string.format("%s/%d", [s(SymNameStr), i(Arity)], Str).
 
 write_sym_name_arity(SNA, !IO) :-
     io.output_stream(Stream, !IO),
@@ -278,19 +330,24 @@ module_name_to_escaped_string(ModuleName) =
 
 %-----------------------------------------------------------------------------%
 
-pf_sym_name_orig_arity_to_string(PFSymNameArity) = Str :-
+pf_sym_name_pred_form_arity_to_string(PFSymNameArity) = Str :-
     PFSymNameArity = pf_sym_name_arity(PredOrFunc, SymName, Arity),
-    Str = pf_sym_name_orig_arity_to_string(PredOrFunc, SymName, Arity).
+    Str = pf_sym_name_pred_form_arity_to_string(PredOrFunc, SymName, Arity).
 
-pf_sym_name_orig_arity_to_string(PredOrFunc, SNA) = Str :-
+pf_sym_name_pred_form_arity_to_string(PredOrFunc, SNA) = Str :-
     SNA = sym_name_arity(SymName, Arity),
-    Str = pf_sym_name_orig_arity_to_string(PredOrFunc, SymName, Arity).
+    PredFormArity = pred_form_arity(Arity),
+    Str = pf_sym_name_pred_form_arity_to_string(PredOrFunc, SymName,
+        PredFormArity).
 
-pf_sym_name_orig_arity_to_string(PredOrFunc, SymName, Arity) = Str :-
-    adjust_func_arity(PredOrFunc, OrigArity, Arity),
-    Str = pred_or_func_to_string(PredOrFunc) ++ " " ++
-        add_quotes(sym_name_to_string(SymName)) ++ "/" ++
-        string.int_to_string(OrigArity).
+pf_sym_name_pred_form_arity_to_string(PredOrFunc, SymName, PredFormArity)
+        = Str :-
+    user_arity_pred_form_arity(PredOrFunc,
+        user_arity(UserArityInt), PredFormArity),
+    PredOrFuncStr = pred_or_func_to_string(PredOrFunc),
+    SymNameStr = sym_name_to_string(SymName),
+    string.format("%s `%s'/%d",
+        [s(PredOrFuncStr), s(SymNameStr), i(UserArityInt)], Str).
 
 %-----------------------------------------------------------------------------%
 
@@ -304,9 +361,29 @@ pf_sym_name_user_arity_to_string(PredOrFunc, SNA) = Str :-
     Str = pf_sym_name_user_arity_to_string(PredOrFunc, SymName, Arity).
 
 pf_sym_name_user_arity_to_string(PredOrFunc, SymName, Arity) = Str :-
-    Str = pred_or_func_to_string(PredOrFunc) ++ " " ++
-        add_quotes(sym_name_to_string(SymName)) ++ "/" ++
-        string.int_to_string(Arity).
+    PredOrFuncStr = pred_or_func_to_string(PredOrFunc),
+    SymNameStr = sym_name_to_string(SymName),
+    string.format("%s `%s'/%d",
+        [s(PredOrFuncStr), s(SymNameStr), i(Arity)], Str).
+
+%-----------------------------------------------------------------------------%
+
+pf_sym_name_user_arity_to_unquoted_string(PFSymNameArity) = Str :-
+    PFSymNameArity =
+        pred_pf_name_arity(PredOrFunc, SymName, user_arity(Arity)),
+    Str =
+        pf_sym_name_user_arity_to_unquoted_string(PredOrFunc, SymName, Arity).
+
+pf_sym_name_user_arity_to_unquoted_string(PredOrFunc, SNA) = Str :-
+    SNA = sym_name_arity(SymName, Arity),
+    Str =
+        pf_sym_name_user_arity_to_unquoted_string(PredOrFunc, SymName, Arity).
+
+pf_sym_name_user_arity_to_unquoted_string(PredOrFunc, SymName, Arity) = Str :-
+    PredOrFuncStr = pred_or_func_to_string(PredOrFunc),
+    SymNameStr = sym_name_to_string(SymName),
+    string.format("%s %s/%d",
+        [s(PredOrFuncStr), s(SymNameStr), i(Arity)], Str).
 
 %-----------------------------------------------------------------------------%
 
@@ -490,7 +567,7 @@ int_const_to_string_and_suffix(IntConst, Str, Suffix) :-
 
 promise_to_string(promise_type_true) = "promise".
 promise_to_string(promise_type_exclusive) = "promise_exclusive".
-promise_to_string(promise_type_exhaustive) =  "promise_exhaustive".
+promise_to_string(promise_type_exhaustive) = "promise_exhaustive".
 promise_to_string(promise_type_exclusive_exhaustive) =
     "promise_exclusive_exhaustive".
 
@@ -499,13 +576,6 @@ pred_or_func_to_full_str(pf_function) = "function".
 
 pred_or_func_to_str(pf_predicate) = "pred".
 pred_or_func_to_str(pf_function) = "func".
-
-write_pred_or_func(PorF, !IO) :-
-    io.output_stream(Stream, !IO),
-    write_pred_or_func(Stream, PorF, !IO).
-
-write_pred_or_func(Stream, PorF, !IO) :-
-    io.write_string(Stream, pred_or_func_to_full_str(PorF), !IO).
 
 purity_name(purity_pure, "pure").
 purity_name(purity_semipure, "semipure").
@@ -624,6 +694,9 @@ goal_warning_to_string(Warning) = Str :-
     ;
         Warning = goal_warning_no_solution_disjunct,
         Str = "no_solution_disjunct"
+    ;
+        Warning = goal_warning_unknown_format_calls,
+        Str = "unknown_format_calls"
     ).
 
 %-----------------------------------------------------------------------------%
@@ -631,7 +704,7 @@ goal_warning_to_string(Warning) = Str :-
 type_to_debug_string(TVarSet, Type, Name) :-
     (
         Type = type_variable(TVar,_),
-        Name = mercury_var_to_string(TVarSet, print_name_and_num, TVar)
+        Name = mercury_var_to_string_vs(TVarSet, print_name_and_num, TVar)
     ;
         Type = defined_type(SymName, Subtypes, _),
         list.map(type_to_debug_string(TVarSet), Subtypes, SubtypeNames),

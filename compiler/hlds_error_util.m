@@ -10,7 +10,7 @@
 % Main author: zs.
 %
 % This module contains code that can be helpful in the generation or
-% formatting of error messages. It builds upon parse_tree.error_util,
+% formatting of error messages. It builds upon parse_tree.error_spec,
 % and extends it with predicates that access HLDS data structures.
 %
 %-----------------------------------------------------------------------------%
@@ -25,7 +25,7 @@
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 
@@ -45,48 +45,48 @@
     ;       should_not_module_qualify.
 
 :- func describe_one_pred_name(module_info, should_module_qualify, pred_id)
-    = list(format_component).
+    = list(format_piece).
 
 :- func describe_one_pred_info_name(should_module_qualify, pred_info)
-    = list(format_component).
+    = list(format_piece).
 
 :- func describe_one_pred_name_mode(module_info, output_lang,
     should_module_qualify, pred_id, inst_varset, list(mer_mode))
-    = list(format_component).
+    = list(format_piece).
 
 :- func describe_several_pred_names(module_info, should_module_qualify,
-    list(pred_id)) = list(format_component).
+    list(pred_id)) = list(format_piece).
 
 :- func describe_one_proc_name(module_info, should_module_qualify,
-    pred_proc_id) = list(format_component).
+    pred_proc_id) = list(format_piece).
 
 :- func describe_one_proc_name_mode(module_info, output_lang,
-    should_module_qualify, pred_proc_id) = list(format_component).
+    should_module_qualify, pred_proc_id) = list(format_piece).
 
 :- func describe_several_proc_names(module_info, should_module_qualify,
-    list(pred_proc_id)) = list(format_component).
+    list(pred_proc_id)) = list(format_piece).
 
 :- func describe_one_call_site(module_info, should_module_qualify,
-    pair(pred_proc_id, prog_context)) = list(format_component).
+    pair(pred_proc_id, prog_context)) = list(format_piece).
 
 :- func describe_several_call_sites(module_info, should_module_qualify,
-    assoc_list(pred_proc_id, prog_context)) = list(format_component).
+    assoc_list(pred_proc_id, prog_context)) = list(format_piece).
 
 %-----------------------------------------------------------------------------%
 
     % Return the arities that the given pred_ids have.
     %
-:- pred find_pred_arities(pred_table::in, list(pred_id)::in,
+:- pred find_pred_arities(pred_id_table::in, list(pred_id)::in,
     list(pred_form_arity)::out) is det.
-:- pred find_user_arities(pred_table::in, list(pred_id)::in,
+:- pred find_user_arities(pred_id_table::in, list(pred_id)::in,
     list(user_arity)::out) is det.
 
     % Return the set of arities that the given pred_ids have,
     % other than the given arity.
     %
-:- pred find_pred_arities_other_than(pred_table::in, list(pred_id)::in,
+:- pred find_pred_arities_other_than(pred_id_table::in, list(pred_id)::in,
     pred_form_arity::in, list(pred_form_arity)::out) is det.
-:- pred find_user_arities_other_than(pred_table::in, list(pred_id)::in,
+:- pred find_user_arities_other_than(pred_id_table::in, list(pred_id)::in,
     user_arity::in, list(user_arity)::out) is det.
 
 :- func project_user_arity_int(user_arity) = int.
@@ -127,17 +127,19 @@
 %   when there is nothing to print is so low (a few dozen instructions),
 %   we can easily afford to incur it unnecessarily once per compiler phase.
 
-:- pred definitely_write_out_errors(globals::in, list(error_spec)::in,
-    io::di, io::uo) is det.
+:- pred definitely_write_out_errors(io.text_output_stream::in, globals::in,
+    list(error_spec)::in, io::di, io::uo) is det.
 
-:- pred maybe_write_out_errors(bool::in, globals::in,
-    list(error_spec)::in, list(error_spec)::out, io::di, io::uo) is det.
+:- pred maybe_write_out_errors(io.text_output_stream::in, bool::in,
+    globals::in, list(error_spec)::in, list(error_spec)::out,
+    io::di, io::uo) is det.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
 :- implementation.
 
+:- import_module hlds.pred_name.
 :- import_module hlds.special_pred.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
@@ -146,13 +148,14 @@
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_util.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module int.
 :- import_module map.
-:- import_module string.
 :- import_module require.
 :- import_module set.
-:- import_module term.
+:- import_module string.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -163,6 +166,8 @@ describe_one_pred_name(ModuleInfo, ShouldModuleQualify, PredId) = Pieces :-
 describe_one_pred_info_name(ShouldModuleQualify, PredInfo) = Pieces :-
     % NOTE The code of this predicate duplicates the functionality of
     % hlds_out.write_pred_id. Changes here should be made there as well.
+    %
+    % XXX This predicate should subcontract its work to pred_name.m.
     PredName = pred_info_name(PredInfo),
     ModuleName = pred_info_module(PredInfo),
     Arity = pred_info_orig_arity(PredInfo),
@@ -170,7 +175,7 @@ describe_one_pred_info_name(ShouldModuleQualify, PredInfo) = Pieces :-
     adjust_func_arity(PredOrFunc, OrigArity, Arity),
     pred_info_get_markers(PredInfo, Markers),
     pred_info_get_origin(PredInfo, Origin),
-    ( if Origin = origin_special_pred(SpecialId, TypeCtor) then
+    ( if Origin = origin_compiler(made_for_uci(SpecialId, TypeCtor)) then
         special_pred_description(SpecialId, Descr),
         TypeCtor = type_ctor(TypeSymName0, TypeArity),
         (
@@ -221,7 +226,8 @@ describe_one_pred_name_mode(ModuleInfo, Lang, ShouldModuleQualify, PredId,
     % We need to strip off the extra type_info arguments inserted at the
     % front by polymorphism.m - we only want the last `Arity' of them.
     ( if list.drop(NumArgModes - Arity, ArgModes0, ArgModes) then
-        strip_builtin_qualifiers_from_mode_list(ArgModes, StrippedArgModes)
+        strip_module_names_from_mode_list(strip_builtin_module_name,
+            ArgModes, StrippedArgModes)
     else
         unexpected($pred, "bad argument list")
     ),
@@ -277,8 +283,8 @@ describe_one_call_site(ModuleInfo, ShouldModuleQualify, PPId - Context)
         = Pieces :-
     ProcNamePieces = describe_one_proc_name(ModuleInfo, ShouldModuleQualify,
         PPId),
-    term.context_file(Context, FileName),
-    term.context_line(Context, LineNumber),
+    FileName = term_context.context_file(Context),
+    LineNumber = term_context.context_line(Context),
     string.int_to_string(LineNumber, LineNumberStr),
     Pieces = ProcNamePieces ++
         [words("at"), fixed(FileName ++ ":" ++ LineNumberStr)].
@@ -333,7 +339,7 @@ find_user_arities_other_than(PredTable, PredIds, Arity, OtherArities) :-
     set.delete(Arity, AritiesSet, OtherAritiesSet),
     set.to_sorted_list(OtherAritiesSet, OtherArities).
 
-:- pred find_pred_arities_set(pred_table::in, list(pred_id)::in,
+:- pred find_pred_arities_set(pred_id_table::in, list(pred_id)::in,
     set(pred_form_arity)::out) is det.
 
 find_pred_arities_set(_, [], set.init).
@@ -344,7 +350,7 @@ find_pred_arities_set(PredTable, [PredId | PredIds], AritiesSet) :-
     PredFormArity = pred_form_arity(PredFormArityInt),
     set.insert(PredFormArity, AritiesSet0, AritiesSet).
 
-:- pred find_user_arities_set(pred_table::in, list(pred_id)::in,
+:- pred find_user_arities_set(pred_id_table::in, list(pred_id)::in,
     set(user_arity)::out) is det.
 
 find_user_arities_set(_, [], set.init).
@@ -365,17 +371,17 @@ project_pred_form_arity_int(pred_form_arity(A)) = A.
 
 %-----------------------------------------------------------------------------%
 
-definitely_write_out_errors(Globals, Specs, !IO) :-
-    write_error_specs(Globals, Specs, !IO).
+definitely_write_out_errors(Stream, Globals, Specs, !IO) :-
+    write_error_specs(Stream, Globals, Specs, !IO).
 
-maybe_write_out_errors(Verbose, Globals, !Specs, !IO) :-
-    % pre_hlds_maybe_write_out_errors in error_util.m is a pre-HLDS version
-    % of this predicate.
+maybe_write_out_errors(Stream, Verbose, Globals, !Specs, !IO) :-
+    % pre_hlds_maybe_write_out_errors in write_error_spec.m is a
+    % pre-HLDS version of this predicate.
     (
         Verbose = no
     ;
         Verbose = yes,
-        write_error_specs(Globals, !.Specs, !IO),
+        write_error_specs(Stream, Globals, !.Specs, !IO),
         !:Specs = []
     ).
 

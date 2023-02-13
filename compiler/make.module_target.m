@@ -2,6 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 2002-2012 The University of Melbourne.
+% Copyright (C) 2013-2017, 2019-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -26,31 +27,25 @@
 :- import_module make.dependencies.
 :- import_module make.make_info.
 :- import_module parse_tree.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.module_dep_info.
 
 :- import_module io.
 :- import_module list.
 
 %---------------------------------------------------------------------------%
 
-    % make_module_target(Target, Succeeded, !Info).
+    % make_module_target(ExtraOpts, Globals, Target, Succeeded, !Info, !IO):
     %
-    % Make a target corresponding to a single module.
+    % Make a target corresponding to a single module, possibly with
+    % extra command line options.
     %
-:- pred make_module_target(globals::in, dependency_file::in,
-    maybe_succeeded::out,
-    make_info::in, make_info::out, io::di, io::uo) is det.
-
-    % make_module_target_extra_options(ExtraOpts, Target, Succeeded, !Info)
+    % ExtraOpts must be the first argument, because we curry it.
     %
-    % Make a target corresponding to a single module, with extra command line
-    % options.
-    %
-:- pred make_module_target_extra_options(list(string)::in, globals::in,
+:- pred make_module_target(list(string)::in, globals::in,
     dependency_file::in, maybe_succeeded::out,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
-    % record_made_target(Globals, Target, Task, MakeSucceeded, !Info, !IO)
+    % record_made_target(Globals, Target, Task, MakeSucceeded, !Info, !IO):
     %
     % Record whether building a target succeeded or not.
     % Makes sure any timestamps for files which may have changed
@@ -88,6 +83,7 @@
 :- import_module analysis.
 :- import_module libs.options.
 :- import_module libs.process_util.
+:- import_module libs.shell_util.
 :- import_module libs.timestamp.
 :- import_module make.build.
 :- import_module make.deps_set.
@@ -95,10 +91,11 @@
 :- import_module make.util.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.error_util.
 :- import_module parse_tree.file_names.
+:- import_module parse_tree.module_baggage.
 :- import_module parse_tree.module_cmds.
 :- import_module parse_tree.prog_foreign.
+:- import_module parse_tree.write_error_spec.
 :- import_module top_level.                      % XXX unwanted dependency
 :- import_module top_level.mercury_compile_main. % XXX unwanted dependency
 :- import_module transform_hlds.
@@ -106,11 +103,12 @@
 
 :- import_module bool.
 :- import_module dir.
-:- import_module int.
 :- import_module float.
+:- import_module int.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module map.
 :- import_module maybe.
-:- import_module pair.
 :- import_module require.
 :- import_module set.
 :- import_module sparse_bitset.
@@ -119,12 +117,7 @@
 
 %---------------------------------------------------------------------------%
 
-make_module_target(Globals, DepFile, Succeeded, !Info, !IO) :-
-    make_module_target_extra_options([], Globals, DepFile, Succeeded,
-        !Info, !IO).
-
-make_module_target_extra_options(ExtraOptions, Globals, Dep, Succeeded,
-        !Info, !IO) :-
+make_module_target(ExtraOptions, Globals, Dep, Succeeded, !Info, !IO) :-
     (
         Dep = dep_file(_),
         dependency_status(Globals, Dep, Status, !Info, !IO),
@@ -200,8 +193,8 @@ make_module_target_file_main_path(ExtraOptions, Globals, TargetFile,
     then
         NestedTargetFile =
             target_file(SourceFileModuleName, TargetType),
-        make_module_target_extra_options(ExtraOptions, Globals,
-            dep_target(NestedTargetFile), Succeeded, !Info, !IO)
+        make_module_target(ExtraOptions, Globals, dep_target(NestedTargetFile),
+            Succeeded, !Info, !IO)
     else
         find_files_maybe_touched_by_task(Globals, TargetFile,
             CompilationTaskType, TouchedTargetFiles, TouchedFiles, !Info, !IO),
@@ -219,12 +212,19 @@ make_module_target_file_main_path(ExtraOptions, Globals, TargetFile,
         else
             ModulesToCheck = [ModuleName]
         ),
-        module_names_to_index_set(ModulesToCheck, ModulesToCheckSet, !Info),
+        module_names_to_index_set(ModulesToCheck, ModuleIndexesToCheckSet,
+            !Info),
+        ModuleIndexesToCheck = to_sorted_list(ModuleIndexesToCheckSet),
 
-        deps_set_foldl3_maybe_stop_at_error(!.Info ^ mki_keep_going,
-            union_deps(target_dependencies(Globals, TargetType)),
-            Globals, ModulesToCheckSet, DepsSucceeded,
+        KeepGoing0 = !.Info ^ mki_keep_going,
+        find_target_dependencies_of_modules(KeepGoing0, Globals, TargetType,
+            ModuleIndexesToCheck, succeeded, DepsSucceeded,
             sparse_bitset.init, DepFiles0, !Info, !IO),
+        % NOTE: converting the dep_set to a plain set is relatively expensive,
+        % so it would be better to avoid it. Also, there should be a definite
+        % improvement if we could represent the dependency_status map with an
+        % array indexed by dependency_file_indexes, instead of a hash table
+        % indexed by dependency_file terms.
         dependency_file_index_set_to_plain_set(!.Info, DepFiles0,
             DepFilesSet0),
         ( if TargetType = module_target_int0 then
@@ -240,8 +240,9 @@ make_module_target_file_main_path(ExtraOptions, Globals, TargetFile,
 
         debug_make_msg(Globals,
            ( pred(!.IO::di, !:IO::uo) is det :-
-                make_write_target_file(Globals, TargetFile, !IO),
-                io.write_string(": dependencies:\n", !IO),
+                get_make_target_file_name(Globals, TargetFile,
+                    TargetFileName, !IO),
+                io.format("%s: dependencies:\n", [s(TargetFileName)], !IO),
                 dependency_file_index_set_to_plain_set(!.Info,
                     DepFiles0, PlainSet),
                 make_write_dependency_file_list(Globals,
@@ -249,9 +250,10 @@ make_module_target_file_main_path(ExtraOptions, Globals, TargetFile,
             ), !IO),
 
         KeepGoing = !.Info ^ mki_keep_going,
+        expect(unify(KeepGoing, KeepGoing0), $pred, "KeepGoing != KeepGoing0"),
         ( if
             DepsSucceeded = did_not_succeed,
-            KeepGoing= do_not_keep_going
+            KeepGoing = do_not_keep_going
         then
             DepsResult = deps_error
         else
@@ -273,7 +275,7 @@ make_module_target_file_main_path(ExtraOptions, Globals, TargetFile,
         ;
             DepsResult = deps_out_of_date,
             Targets0 = !.Info ^ mki_command_line_targets,
-            set.delete(ModuleName - module_target(TargetType),
+            set.delete(top_target_file(ModuleName, module_target(TargetType)),
                 Targets0, Targets),
             !Info ^ mki_command_line_targets := Targets,
             build_target(Globals, CompilationTask, TargetFile,
@@ -282,7 +284,8 @@ make_module_target_file_main_path(ExtraOptions, Globals, TargetFile,
         ;
             DepsResult = deps_up_to_date,
             maybe_warn_up_to_date_target(Globals,
-                ModuleName - module_target(TargetType), !Info, !IO),
+                top_target_file(ModuleName, module_target(TargetType)),
+                !Info, !IO),
             debug_file_msg(Globals, TargetFile, "up to date", !IO),
             Succeeded = succeeded,
             list.foldl(update_target_status(deps_status_up_to_date),
@@ -299,8 +302,8 @@ make_dependency_files(Globals, TargetFile, DepFilesToMake, TouchedTargetFiles,
         TouchedFiles, DepsResult, !Info, !IO) :-
     % Build the dependencies.
     KeepGoing = !.Info ^ mki_keep_going,
-    foldl2_maybe_stop_at_error(KeepGoing, make_module_target,
-        Globals, DepFilesToMake, MakeDepsSucceeded, !Info, !IO),
+    foldl2_make_module_targets(KeepGoing, [], Globals, DepFilesToMake,
+        MakeDepsSucceeded, !Info, !IO),
 
     % Check that the target files exist.
     list.map_foldl2(get_target_timestamp(Globals, do_not_search),
@@ -390,13 +393,17 @@ build_target(Globals, CompilationTask, TargetFile, ModuleDepInfo,
     ExtraAndTaskOptions = ExtraOptions ++ TaskOptions,
     ( if
         Task = process_module(ModuleTask),
-        forkable_module_compilation_task_type(ModuleTask) = yes,
+        do_task_in_separate_process(ModuleTask) = yes,
         not can_fork
     then
-        % We need a temporary file to pass the arguments to the mmc process
-        % which will do the compilation. It is created here (not in invoke_mmc)
-        % so it can be cleaned up by teardown_checking_for_interrupt.
-        io.make_temp_file(ArgFileNameResult, !IO),
+        % If we will perform a compilation task in a separate process,
+        % but fork() is unavailable, then we will invoke the Mercury compiler
+        % with a bunch of command line arguments. On Windows, the command line
+        % is likely to exceed that maximum command line length, so we need to
+        % pass the command line arguments via a temporary file, created here
+        % (not in invoke_mmc) so it can be cleaned up by
+        % teardown_checking_for_interrupt.
+        io.file.make_temp_file(ArgFileNameResult, !IO),
         (
             ArgFileNameResult = ok(ArgFileName),
             MaybeArgFileName = yes(ArgFileName),
@@ -484,7 +491,7 @@ cleanup_files(Globals, MaybeArgFileName, TouchedTargetFiles, TouchedFiles,
         TouchedFiles, !MakeInfo, !IO),
     (
         MaybeArgFileName = yes(ArgFileName2),
-        io.remove_file(ArgFileName2, _, !IO)
+        io.file.remove_file(ArgFileName2, _, !IO)
     ;
         MaybeArgFileName = no
     ).
@@ -508,32 +515,30 @@ build_target_2(ModuleName, Task, ArgFileName, ModuleDepInfo, Globals,
             Verbose = yes,
             AllArgs = AllOptionArgs ++ [ModuleArg],
             % XXX Don't write the default options.
-            AllArgStrs = list.map(quote_arg, AllArgs),
+            AllArgStrs = list.map(quote_shell_cmd_arg, AllArgs),
             AllArgsStr = string.join_list(" ", AllArgStrs),
             io.format("Invoking self `mmc %s'\n", [s(AllArgsStr)], !IO)
         ;
             Verbose = no
         ),
 
-        % Run compilations to target code in a separate process. This avoids
-        % problems with the Boehm GC retaining memory by scanning too much of
-        % the Mercury stacks. If the compilation is run in a separate process,
-        % it is also easier to kill if an interrupt arrives. We do the same for
-        % intermodule-optimization interfaces because if type checking gets
-        % overloaded by ambiguities, it can be difficult to kill the compiler
-        % otherwise.
+        % Run some tasks in a separate process instead of within the mmc --make
+        % process. This avoids problems with the Boehm GC retaining memory by
+        % scanning too much of the Mercury stacks. If the compilation is run
+        % in a separate process, it is also easier to kill if an interrupt
+        % arrives.
         % XXX The above comment is likely to be quite out-of-date.
         io.set_output_stream(ErrorStream, OldOutputStream, !IO),
-        IsForkable = forkable_module_compilation_task_type(ModuleTask),
+        CallInSeparateProcess = do_task_in_separate_process(ModuleTask),
         (
-            IsForkable = yes,
+            CallInSeparateProcess = yes,
             call_in_forked_process_with_backup(
                 call_mercury_compile_main(Globals, [ModuleArg]),
                 invoke_mmc(Globals, ProgressStream, ErrorStream,
                     ArgFileName, AllOptionArgs ++ [ModuleArg]),
                 CompileSucceeded, !IO)
         ;
-            IsForkable = no,
+            CallInSeparateProcess = no,
             call_mercury_compile_main(Globals, [ModuleArg],
                 CompileSucceeded, !IO)
         ),
@@ -632,17 +637,16 @@ compile_foreign_code_file(Globals, ProgressStream, ErrorStream, PIC,
             ModuleDepInfo, CSharpFile, DLLFile, Succeeded, !IO)
     ).
 
-:- func forkable_module_compilation_task_type(module_compilation_task_type)
-    = bool.
+:- func do_task_in_separate_process(module_compilation_task_type) = bool.
 
-forkable_module_compilation_task_type(task_errorcheck) = no.
-forkable_module_compilation_task_type(task_make_int0) = no.
-forkable_module_compilation_task_type(task_make_int12) = no.
-forkable_module_compilation_task_type(task_make_int3) = no.
-forkable_module_compilation_task_type(task_make_opt) = yes.
-forkable_module_compilation_task_type(task_make_analysis_registry) = yes.
-forkable_module_compilation_task_type(task_compile_to_target_code) = yes.
-forkable_module_compilation_task_type(task_make_xml_doc) = yes.
+do_task_in_separate_process(task_errorcheck) = no.
+do_task_in_separate_process(task_make_int0) = no.
+do_task_in_separate_process(task_make_int12) = no.
+do_task_in_separate_process(task_make_int3) = no.
+do_task_in_separate_process(task_make_opt) = yes.
+do_task_in_separate_process(task_make_analysis_registry) = yes.
+do_task_in_separate_process(task_compile_to_target_code) = yes.
+do_task_in_separate_process(task_make_xml_doc) = yes.
 
 %---------------------------------------------------------------------------%
 
@@ -712,7 +716,8 @@ invoke_mmc(Globals, ProgressStream, ErrorStream,
         ; target_is_java
         )
     then
-        io.get_environment_var("MERCURY_COMPILER", MaybeMercuryCompiler, !IO),
+        io.environment.get_environment_var("MERCURY_COMPILER",
+            MaybeMercuryCompiler, !IO),
         (
             MaybeMercuryCompiler = yes(MercuryCompiler)
         ;
@@ -723,7 +728,7 @@ invoke_mmc(Globals, ProgressStream, ErrorStream,
         MercuryCompiler = ProgName
     ),
 
-    QuotedArgs = list.map(quote_arg, Args),
+    QuotedArgs = list.map(quote_shell_cmd_arg, Args),
 
     % Some operating systems (e.g. Windows) have shells with ludicrously
     % short limits on the length of command lines, so we need to write the
@@ -746,8 +751,9 @@ invoke_mmc(Globals, ProgressStream, ErrorStream,
             [s(string.join_list(" ", QuotedArgs))], !IO),
         io.close_output(ArgFileStream, !IO),
 
-        Command = string.format("%s --arg-file %s",
-            [s(quote_arg(MercuryCompiler)), s(quote_arg(ArgFileName))]),
+        Command = string.format("%s --arg-file %s", [
+            s(quote_shell_cmd_arg(MercuryCompiler)),
+            s(quote_shell_cmd_arg(ArgFileName))]),
 
         % We have already written the command.
         CommandVerbosity = cmd_verbose,
@@ -760,7 +766,7 @@ invoke_mmc(Globals, ProgressStream, ErrorStream,
         io.format("Error opening `%s' for output: %s\n",
             [s(ArgFileName), s(ErrorMsg)], !IO)
     ),
-    io.remove_file(ArgFileName, _, !IO).
+    io.file.remove_file(ArgFileName, _, !IO).
 
 :- pred target_is_java is semidet.
 
@@ -803,11 +809,12 @@ record_made_target_given_maybe_touched_files(Globals, Succeeded, TargetFile,
     list.map_foldl2(get_file_name(Globals, do_not_search), TouchedTargetFiles,
         TouchedTargetFileNames, !Info, !IO),
 
-    some [!Timestamps] (
-        !:Timestamps = !.Info ^ mki_file_timestamps,
+    some [!FileTimestamps] (
+        !:FileTimestamps = !.Info ^ mki_file_timestamps,
         list.foldl(delete_timestamp(Globals), TouchedTargetFileNames,
-            !Timestamps),
-        list.foldl(delete_timestamp(Globals), OtherTouchedFiles, !Timestamps),
+            !FileTimestamps),
+        list.foldl(delete_timestamp(Globals), OtherTouchedFiles,
+            !FileTimestamps),
 
         % When an .analysis file is made, that potentially invalidates other
         % .analysis files so we have to delete their timestamps. The exact list
@@ -816,13 +823,18 @@ record_made_target_given_maybe_touched_files(Globals, Succeeded, TargetFile,
         % timestamps of all the .analysis files that we know about.
         ( if TargetFile = target_file(_, module_target_analysis_registry) then
             map.foldl(delete_analysis_registry_timestamps(Globals),
-                !.Timestamps, !Timestamps)
+                !.FileTimestamps, !FileTimestamps)
         else
             true
         ),
 
-        !Info ^ mki_file_timestamps := !.Timestamps
-    ).
+        !Info ^ mki_file_timestamps := !.FileTimestamps
+    ),
+
+    TargetFileTimestamps0 = !.Info ^ mki_target_file_timestamps,
+    version_hash_table.delete(TargetFile,
+        TargetFileTimestamps0, TargetFileTimestamps),
+    !Info ^ mki_target_file_timestamps := TargetFileTimestamps.
 
 :- pred update_target_status(dependency_status::in, target_file::in,
     make_info::in, make_info::out) is det.

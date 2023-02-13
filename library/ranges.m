@@ -3,7 +3,7 @@
 %---------------------------------------------------------------------------%
 % Copyright (C) 2006-2009 The University of Melbourne.
 % Copyright (C) 2013-2016 Opturion Pty Ltd.
-% Copyright (C) 2017-2018 The Mercury team.
+% Copyright (C) 2017-2019, 2022 The Mercury team.
 % This file is distributed under the terms specified in COPYING.LIB.
 %---------------------------------------------------------------------------%
 %
@@ -376,15 +376,15 @@
     % Values of this type represent finite sets of integers.
     % They are interpreted in the following way.
     %
-    %     S[[ nil ]]                        = {}
-    %     S[[ range(L, H, Rest) ]]       = {N | L < N =< H} \/ S[[ Rest ]]
+    %     S[[ nil ]]               = {}
+    %     S[[ range(L, H, Rest) ]] = {N | L < N =< H} \/ S[[ Rest ]]
     %
     % For example, `range(1, 4, nil)' is interpreted as {2, 3, 4}.
     %
     % The invariants on this type are:
     %
     %   1) Each range must be non-empty (i.e., L < H).
-    %   2) The ranges must not overlap or abut (i.e., for any
+    %   2) The ranges must not overlap or abut (i.e. for any
     %      value `range(_, H1, range(L2, _, _)' we must have H1 < L2).
     %   3) The ranges must be in sorted order.
     %

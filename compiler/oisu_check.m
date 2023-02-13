@@ -21,7 +21,7 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 
 :- import_module assoc_list.
@@ -40,6 +40,7 @@
 :- import_module check_hlds.mode_test.
 :- import_module hlds.hlds_error_util.
 :- import_module hlds.hlds_pred.
+:- import_module hlds.pred_name.
 :- import_module hlds.status.
 :- import_module parse_tree.prog_type.
 
@@ -54,14 +55,14 @@
 check_oisu_pragmas_for_module(OISUPairs, !ModuleInfo, Specs) :-
     map.init(KindMap0),
     list.foldl(add_type_ctor_to_kind_map, OISUPairs, KindMap0, KindMap),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.to_assoc_list(PredTable0, Preds0),
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    map.to_assoc_list(PredIdTable0, PredIdsInfos0),
     assoc_list.keys(OISUPairs, OISUTypeCtors),
     list.map_foldl2(
         check_local_oisu_pred(!.ModuleInfo, KindMap, OISUTypeCtors),
-        Preds0, Preds, set.init, OISUProcs, [], Specs),
-    map.from_assoc_list(Preds, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo),
+        PredIdsInfos0, PredIdsInfos, set.init, OISUProcs, [], Specs),
+    map.from_assoc_list(PredIdsInfos, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo),
     module_info_set_oisu_procs(OISUProcs, !ModuleInfo).
 
 %-----------------------------------------------------------------------------%
@@ -165,7 +166,7 @@ check_local_oisu_pred(ModuleInfo, KindMap, OISUTypeCtors, Pair0, Pair,
             )
         else
             pred_info_get_origin(PredInfo0, Origin),
-            ( if Origin = origin_special_pred(_, _) then
+            ( if Origin = origin_compiler(made_for_uci(_, _)) then
                 true
             else
                 pred_info_get_arg_types(PredInfo0, ArgTypes),
@@ -384,7 +385,7 @@ find_unhandled_oisu_kind_fors([KindFor | KindFors], HandledOISUTypeCtors,
 
 :- pred describe_unhandled_kind_fors(
     oisu_pred_kind_for::in, list(oisu_pred_kind_for)::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 describe_unhandled_kind_fors(HeadKindFor, TailKindFors, Pieces) :-
     ( HeadKindFor = oisu_creator_for(HeadTypeCtor), HeadKind = "creator"

@@ -36,7 +36,7 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
@@ -56,11 +56,11 @@
 :- import_module hlds.hlds_error_util.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_pred.
+:- import_module hlds.pred_name.
 :- import_module hlds.status.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
-:- import_module libs.op_mode.
 :- import_module libs.options.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
@@ -96,8 +96,10 @@ analyse_termination_in_module(!ModuleInfo, !:Specs) :-
 
     % Process builtin and compiler-generated predicates, and user-supplied
     % pragmas.
+    should_we_believe_check_termination_markers(!.ModuleInfo,
+        BelieveCheckTerm),
     module_info_get_valid_pred_ids(!.ModuleInfo, PredIds),
-    term_preprocess_preds(PredIds, !ModuleInfo),
+    term_preprocess_preds(BelieveCheckTerm, PredIds, !ModuleInfo),
 
     % Process all the SCCs of the call graph in a bottom-up order.
     module_info_ensure_dependency_info(!ModuleInfo, DepInfo),
@@ -439,18 +441,14 @@ set_finite_arg_size_infos([], _, !ModuleInfo).
 set_finite_arg_size_infos([Soln | Solns], OutputSupplierMap, !ModuleInfo) :-
     Soln = PPId - Gamma,
     PPId = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
-    pred_info_get_proc_table(PredInfo0, ProcTable0),
-    map.lookup(ProcTable0, ProcId, ProcInfo),
+    module_info_pred_proc_info(!.ModuleInfo, PredId, ProcId,
+        PredInfo0, ProcInfo0),
     map.lookup(OutputSupplierMap, PPId, OutputSuppliers),
     ArgSizeInfo = finite(Gamma, OutputSuppliers),
     % XXX intermod
-    proc_info_set_maybe_arg_size_info(yes(ArgSizeInfo), ProcInfo, ProcInfo1),
-    map.set(ProcId, ProcInfo1, ProcTable0, ProcTable),
-    pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-    map.set(PredId, PredInfo, PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo),
+    proc_info_set_maybe_arg_size_info(yes(ArgSizeInfo), ProcInfo0, ProcInfo),
+    pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo),
     set_finite_arg_size_infos(Solns, OutputSupplierMap, !ModuleInfo).
 
 :- pred set_infinite_arg_size_info(arg_size_info::in, pred_proc_id::in,
@@ -458,16 +456,12 @@ set_finite_arg_size_infos([Soln | Solns], OutputSupplierMap, !ModuleInfo) :-
 
 set_infinite_arg_size_info(ArgSizeInfo, PPId, !ModuleInfo) :-
     PPId = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
-    pred_info_get_proc_table(PredInfo0, ProcTable0),
-    map.lookup(ProcTable0, ProcId, ProcInfo0),
+    module_info_pred_proc_info(!.ModuleInfo, PredId, ProcId,
+        PredInfo0, ProcInfo0),
     % XXX intermod
     proc_info_set_maybe_arg_size_info(yes(ArgSizeInfo), ProcInfo0, ProcInfo),
-    map.set(ProcId, ProcInfo, ProcTable0, ProcTable),
-    pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-    map.set(PredId, PredInfo, PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 %-----------------------------------------------------------------------------%
 
@@ -476,17 +470,13 @@ set_infinite_arg_size_info(ArgSizeInfo, PPId, !ModuleInfo) :-
 
 set_termination_info(TerminationInfo, PPId, !ModuleInfo) :-
     PPId = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
-    pred_info_get_proc_table(PredInfo0, ProcTable0),
-    map.lookup(ProcTable0, ProcId, ProcInfo0),
+    module_info_pred_proc_info(!.ModuleInfo, PredId, ProcId,
+        PredInfo0, ProcInfo0),
     % XXX intermod
     proc_info_set_maybe_termination_info(yes(TerminationInfo),
         ProcInfo0, ProcInfo),
-    map.det_update(ProcId, ProcInfo, ProcTable0, ProcTable),
-    pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-    map.det_update(PredId, PredInfo, PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 %-----------------------------------------------------------------------------%
 
@@ -598,20 +588,19 @@ decide_what_term_errors_to_report(ModuleInfo, SCC, Errors,
     %   information about it (termination_info pragmas, terminates pragmas,
     %   check_termination pragmas, builtin/compiler generated).
     %
-:- pred term_preprocess_preds(list(pred_id)::in,
-    module_info::in, module_info::out) is det.
+:- pred term_preprocess_preds(maybe_believe_check_termination::in,
+    list(pred_id)::in, module_info::in, module_info::out) is det.
 
-term_preprocess_preds([], !ModuleInfo).
-term_preprocess_preds([PredId | PredIds], !ModuleInfo) :-
-    module_info_get_globals(!.ModuleInfo, Globals),
-    globals.get_op_mode(Globals, OpMode),
-    ( if OpMode = opm_top_args(opma_augment(opmau_make_opt_int)) then
-        MakeOptInt = yes
-    else
-        MakeOptInt = no
-    ),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+term_preprocess_preds(_, [], !ModuleInfo).
+term_preprocess_preds(BelieveCheckTerm, [PredId | PredIds], !ModuleInfo) :-
+    term_preprocess_pred(BelieveCheckTerm, PredId, !ModuleInfo),
+    term_preprocess_preds(BelieveCheckTerm, PredIds, !ModuleInfo).
+
+:- pred term_preprocess_pred(maybe_believe_check_termination::in,
+    pred_id::in, module_info::in, module_info::out) is det.
+
+term_preprocess_pred(BelieveCheckTerm, PredId, !ModuleInfo) :-
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_status(PredInfo0, PredStatus),
     pred_info_get_context(PredInfo0, Context),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
@@ -621,8 +610,8 @@ term_preprocess_preds([PredId | PredIds], !ModuleInfo) :-
         % It is possible for compiler generated/mercury builtin
         % predicates to be imported or locally defined, so they
         % must be covered here, separately.
-        set_compiler_gen_terminates(PredInfo0, ProcIds, PredId,
-            !.ModuleInfo, ProcTable0, ProcTable1)
+        set_compiler_gen_terminates(!.ModuleInfo, PredInfo0, ProcIds, PredId,
+            ProcTable0, ProcTable1)
     then
         ProcTable2 = ProcTable1
     else if
@@ -650,7 +639,7 @@ term_preprocess_preds([PredId | PredIds], !ModuleInfo) :-
             (
                 check_marker(Markers, marker_terminates)
             ;
-                MakeOptInt = no,
+                BelieveCheckTerm = do_believe_check_termination,
                 check_marker(Markers, marker_check_termination)
             )
         then
@@ -676,9 +665,7 @@ term_preprocess_preds([PredId | PredIds], !ModuleInfo) :-
         ProcTable = ProcTable2
     ),
     pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-    map.set(PredId, PredInfo, PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo),
-    term_preprocess_preds(PredIds, !ModuleInfo).
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 %----------------------------------------------------------------------------%
 
@@ -690,18 +677,22 @@ term_preprocess_preds([PredId | PredIds], !ModuleInfo) :-
     % We assume that user-defined special predicates terminate. This assumption
     % is checked later during the post_term_analysis pass.
     %
-:- pred set_compiler_gen_terminates(pred_info::in, list(proc_id)::in,
-    pred_id::in, module_info::in, proc_table::in, proc_table::out)
+:- pred set_compiler_gen_terminates(module_info::in, pred_info::in,
+    list(proc_id)::in, pred_id::in, proc_table::in, proc_table::out)
     is semidet.
 
-set_compiler_gen_terminates(PredInfo, ProcIds, PredId, ModuleInfo,
+set_compiler_gen_terminates(ModuleInfo, PredInfo, ProcIds, PredId,
         !ProcTable) :-
+    % XXX This code looks to be a near-identical copy of the predicate
+    % of the same name in term_constr_initial.m.
     ( if
         pred_info_is_builtin(PredInfo)
     then
         set_builtin_terminates(ProcIds, PredId, PredInfo, ModuleInfo,
             !ProcTable)
     else if
+        % XXX The origin test should be the only one needed;
+        % we should pay no attention to the name.
         ( if
             ModuleName = pred_info_module(PredInfo),
             Name = pred_info_name(PredInfo),
@@ -712,7 +703,7 @@ set_compiler_gen_terminates(PredInfo, ProcIds, PredId, ModuleInfo,
             SpecialPredId = SpecPredId0
         else
             pred_info_get_origin(PredInfo, Origin),
-            Origin = origin_special_pred(SpecialPredId, _)
+            Origin = origin_compiler(made_for_uci(SpecialPredId, _))
         )
     then
         set_generated_terminates(ProcIds, SpecialPredId, !ProcTable)

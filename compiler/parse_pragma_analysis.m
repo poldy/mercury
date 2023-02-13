@@ -68,7 +68,7 @@
 :- import_module libs.
 :- import_module libs.rat.
 :- import_module mdbcomp.prim_data.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.parse_sym_name.
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.parse_type_name.
@@ -80,6 +80,8 @@
 :- import_module bool.
 :- import_module cord.
 :- import_module maybe.
+:- import_module term_int.
+:- import_module term_vars.
 :- import_module unit.
 
 %---------------------------------------------------------------------------%
@@ -96,7 +98,7 @@ parse_pragma_unused_args(ModuleName, VarSet, ErrorTerm, PragmaTerms,
             pragma_decl("unused_args"), words("declaration:"), nl]),
         parse_predicate_or_function(VarSet, PredOrFuncTerm, MaybePredOrFunc),
         parse_implicitly_qualified_sym_name_and_no_args(ModuleName,
-            PredNameTerm, VarSet, PredNameContextPieces, MaybePredName),
+            VarSet, PredNameContextPieces, PredNameTerm, MaybePredName),
         ArityContextPieces = cord.from_list(
             [words("In the third argument of"),
             pragma_decl("unused_args"), words("declaration:"), nl]),
@@ -294,7 +296,7 @@ parse_pragma_termination_info(ModuleName, VarSet, ErrorTerm, PragmaTerms,
         MaybeIOM = error1([Spec])
     ).
 
-:- pred parse_bool(cord(format_component)::in, varset::in, term::in,
+:- pred parse_bool(cord(format_piece)::in, varset::in, term::in,
     maybe1(bool)::out) is det.
 
 parse_bool(ContextPieces, VarSet, Term, MaybeBool) :-
@@ -368,7 +370,7 @@ parse_pragma_termination2_info(ModuleName, VarSet, ErrorTerm, PragmaTerms,
         MaybeIOM = error1([Spec])
     ).
 
-:- pred parse_termination_info(list(format_component)::in, varset::in,
+:- pred parse_termination_info(list(format_piece)::in, varset::in,
     term::in, maybe1(maybe(pragma_termination_info))::out) is det.
 
 parse_termination_info(ContextPieces, VarSet, Term,
@@ -476,7 +478,7 @@ parse_lp_term(VarSet, Term, MaybeLpTerm) :-
     ( if
         Term = term.functor(term.atom("term"), [VarIdTerm, CoeffTerm], _)
     then
-        ( if decimal_term_to_int(VarIdTerm, VarId0) then
+        ( if term_int.decimal_term_to_int(VarIdTerm, VarId0) then
             MaybeVarId = ok1(VarId0)
         else
             VarIdTermStr = describe_error_term(VarSet, VarIdTerm),
@@ -513,8 +515,8 @@ parse_lp_term(VarSet, Term, MaybeLpTerm) :-
 parse_rational(VarSet, Term, MaybeRational) :-
     ( if
         Term = term.functor(term.atom("r"), [NumerTerm, DenomTerm], _),
-        decimal_term_to_int(NumerTerm, Numer),
-        decimal_term_to_int(DenomTerm, Denom)
+        term_int.decimal_term_to_int(NumerTerm, Numer),
+        term_int.decimal_term_to_int(DenomTerm, Denom)
     then
         Rational = rat.rat(Numer, Denom),
         MaybeRational = ok1(Rational)
@@ -542,8 +544,8 @@ parse_pragma_structure_sharing(ModuleName, VarSet, ErrorTerm, PragmaTerms,
         MaybeNameAndModes = ok3(PredName, PredOrFunc, Modes),
 
         % Parse the head variables:
-        HeadVarsTerm = term.functor(term.atom("vars"), ListHVTerm, _),
-        term.vars_list(ListHVTerm, HeadVarsGeneric),
+        HeadVarsTerm = term.functor(term.atom("vars"), ListHVTerms, _),
+        term_vars.vars_in_terms(ListHVTerms, HeadVarsGeneric),
         list.map(term.coerce_var, HeadVarsGeneric, HeadVars),
 
         % Parse the types:
@@ -596,8 +598,8 @@ parse_pragma_structure_reuse(ModuleName, VarSet, ErrorTerm, PragmaTerms,
         MaybeNameAndModes = ok3(PredName, PredOrFunc, Modes),
 
         % Parse the head variables:
-        HeadVarsTerm = term.functor(term.atom("vars"), ListHVTerm, _),
-        term.vars_list(ListHVTerm, HeadVarsGeneric),
+        HeadVarsTerm = term.functor(term.atom("vars"), ListHVTerms, _),
+        term_vars.vars_in_terms(ListHVTerms, HeadVarsGeneric),
         list.map(term.coerce_var, HeadVarsGeneric, HeadVars),
 
         % Parse the types:
@@ -648,7 +650,7 @@ parse_pragma_exceptions(ModuleName, VarSet, ErrorTerm, PragmaTerms,
             [words("In the second argument of"), pragma_decl("exceptions"),
             words("declaration:"), nl]),
         parse_implicitly_qualified_sym_name_and_no_args(ModuleName,
-            PredNameTerm, VarSet, PNContextPieces, MaybePredName),
+            VarSet, PNContextPieces, PredNameTerm, MaybePredName),
         ArityContextPieces = cord.from_list(
             [words("In the third argument of an"),
             pragma_decl("unused_args"), words("declaration:"), nl]),
@@ -794,7 +796,7 @@ parse_pragma_trailing_info(ModuleName, VarSet, ErrorTerm, PragmaTerms,
             [words("In the second argument of"), pragma_decl("traling_info"),
             words("declaration:"), nl]),
         parse_implicitly_qualified_sym_name_and_no_args(ModuleName,
-            PredNameTerm, VarSet, PNContextPieces, MaybePredName),
+            VarSet, PNContextPieces, PredNameTerm, MaybePredName),
         ArityContextPieces = cord.from_list(
             [words("In the third argument of an"),
             pragma_decl("unused_args"), words("declaration:"), nl]),
@@ -884,7 +886,7 @@ parse_pragma_mm_tabling_info(ModuleName, VarSet, ErrorTerm, PragmaTerms,
             [words("In the second argument of"),
             pragma_decl("mm_tabling_info"), words("declaration:"), nl]),
         parse_implicitly_qualified_sym_name_and_no_args(ModuleName,
-            PredNameTerm, VarSet, PNContextPieces, MaybePredName),
+            VarSet, PNContextPieces, PredNameTerm, MaybePredName),
         ArityContextPieces = cord.from_list(
             [words("In the third argument of an"),
             pragma_decl("mm_tabling_info"), words("declaration:"), nl]),

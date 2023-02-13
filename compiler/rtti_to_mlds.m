@@ -75,15 +75,15 @@
 :- import_module bool.
 :- import_module counter.
 :- import_module digraph.
-:- import_module map.
-:- import_module maybe.
 :- import_module int16.
 :- import_module int32.
 :- import_module int8.
+:- import_module map.
+:- import_module maybe.
 :- import_module pair.
 :- import_module require.
 :- import_module set.
-:- import_module term.
+:- import_module term_context.
 :- import_module uint.
 :- import_module uint16.
 :- import_module uint32.
@@ -129,7 +129,7 @@ rtti_entity_name_and_init_to_defn(Name, RttiId, Initializer, !GlobalData) :-
     %
     % XXX The rtti_data ought to include a prog_context (the context of the
     % corresponding type or instance definition).
-    term.context_init(Context),
+    Context = dummy_context,
 
     % Generate the declaration flags.
     Exported = rtti_id_is_exported(RttiId),
@@ -1611,7 +1611,7 @@ gen_init_special_pred(ModuleInfo, Target, RttiProcIdUniv, Initializer,
     % hence we need to generate a wrapper function which unboxes the arguments
     % if necessary.
     det_univ_to_type(RttiProcIdUniv, RttiProcId),
-    ( if RttiProcId ^ rpl_proc_arity = 0 then
+    ( if RttiProcId ^ rpl_proc_arity = pred_form_arity(0) then
         % If there are no arguments, then there is no unboxing to do,
         % so we don't need a wrapper. (This case can occur with
         % --no-special-preds, where the procedure will be
@@ -1657,7 +1657,7 @@ gen_wrapper_func_and_initializer(ModuleInfo, Target, NumExtra, RttiProcId,
         ml_gen_info_bump_counters(!Info),
 
         % Now we can safely go ahead and generate the wrapper function.
-        term.context_init(Context),
+        Context = dummy_context,
         ml_gen_closure_wrapper(PredId, ProcId, ClosureKind, NumExtra, Context,
             WrapperFuncRval, WrapperFuncType, !Info),
         ml_gen_info_get_closure_wrapper_defns(!.Info, ClosureWrapperDefns),
@@ -1725,11 +1725,12 @@ real_rtti_data(RttiData) :-
 % This handles sectag_locn, functor_subtype_info and type_ctor_rep. The rvals
 % generated are just named constants in the private_builtin module, which the
 % Mercury runtime is expected to define.
+%
 
 :- func gen_init_pred_or_func(pred_or_func) = mlds_initializer.
 
 gen_init_pred_or_func(PredOrFunc) = Initializer :-
-    rtti.pred_or_func_to_string(PredOrFunc, TargetPrefixes, Name),
+    rtti.pred_or_func_to_target_string(PredOrFunc, TargetPrefixes, Name),
     Initializer = gen_init_builtin_const(TargetPrefixes, Name).
 
 :- func gen_init_sectag_locn(sectag_locn) = mlds_initializer.

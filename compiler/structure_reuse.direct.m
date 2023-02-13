@@ -55,6 +55,7 @@
 
 :- import_module analysis.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.status.
 :- import_module libs.
 :- import_module libs.file_util.
@@ -92,7 +93,7 @@ direct_reuse_process_pred(SharingTable, PredId, !ModuleInfo, !ReuseTable) :-
     module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     ( if
         pred_info_get_origin(PredInfo0, Origin),
-        Origin = origin_special_pred(_, _)
+        Origin = origin_compiler(made_for_uci(_, _))
     then
         % We can't analyse compiler generated special predicates.
         true
@@ -142,22 +143,18 @@ direct_reuse_process_ppid(SharingTable, proc(PredId, ProcId),
 
 direct_reuse_process_proc(SharingTable, PredId, ProcId,
         !ModuleInfo, !ReuseTable) :-
-    module_info_get_preds(!.ModuleInfo, Preds0),
-    map.lookup(Preds0, PredId, Pred0),
-    pred_info_get_proc_table(Pred0, Procs0),
-    map.lookup(Procs0, ProcId, Proc0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    pred_info_proc_info(PredInfo0, ProcId, ProcInfo0),
 
     direct_reuse_process_proc_2(SharingTable, PredId, ProcId,
-        !.ModuleInfo, Pred0, Proc0, Proc, ReuseAs),
+        !.ModuleInfo, PredInfo0, ProcInfo0, ProcInfo, ReuseAs),
     % XXX is this right?
     Status = optimal,
     AsAndStatus = reuse_as_and_status(ReuseAs, Status),
     reuse_as_table_set(proc(PredId, ProcId), AsAndStatus, !ReuseTable),
 
-    map.det_update(ProcId, Proc, Procs0, Procs),
-    pred_info_set_proc_table(Procs, Pred0, Pred),
-    map.det_update(PredId, Pred, Preds0, Preds),
-    module_info_set_preds(Preds, !ModuleInfo).
+    pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 :- pred direct_reuse_process_proc_2(sharing_as_table::in,
     pred_id::in, proc_id::in, module_info::in,
@@ -169,8 +166,8 @@ direct_reuse_process_proc_2(SharingTable, PredId, ProcId,
     globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
 
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
-            "Direct reuse analysis of", PredId, ProcId, !IO)
+        maybe_write_proc_progress_message(ModuleInfo,
+            "Direct reuse analysis of", proc(PredId, ProcId), !IO)
     ),
 
     proc_info_get_goal(!.ProcInfo, Goal0),

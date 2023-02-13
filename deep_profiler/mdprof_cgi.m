@@ -41,6 +41,9 @@
 :- import_module char.
 :- import_module getopt.
 :- import_module int.
+:- import_module io.call_system.
+:- import_module io.environment.
+:- import_module io.file.
 :- import_module library.
 :- import_module list.
 :- import_module map.
@@ -60,7 +63,7 @@ main(!IO) :-
     io.stdin_stream(StdIn, !IO),
     io.stdout_stream(StdOut, !IO),
     write_html_header(StdOut, !IO),
-    io.get_environment_var("QUERY_STRING", MaybeQueryString, !IO),
+    io.environment.get_environment_var("QUERY_STRING", MaybeQueryString, !IO),
     (
         MaybeQueryString = yes(QueryString0),
         OptionOps = option_ops_multi(short, long, defaults),
@@ -400,7 +403,7 @@ handle_query_from_existing_server(Cmd, PrefInd, ToServerPipe, FromServerPipe,
     remove_want_file(WantFile, !IO),
     recv_string(FromServerPipe, Debug, ResponseFileName, !IO),
     CatCmd = string.format("cat %s", [s(ResponseFileName)]),
-    io.call_system(CatCmd, _, !IO),
+    io.call_system.call_system(CatCmd, _, !IO),
     trace [compiletime(flag("debug_client_server")), io(!T)] (
         io.open_append("/tmp/deep_debug", Res2, !T),
         (
@@ -410,7 +413,7 @@ handle_query_from_existing_server(Cmd, PrefInd, ToServerPipe, FromServerPipe,
             io.close_output(DebugStream2, !T),
             DebugCatCmd = string.format("cat %s >> /tmp/deep_debug",
                 [s(ResponseFileName)]),
-            io.call_system(DebugCatCmd, _, !T)
+            io.call_system.call_system(DebugCatCmd, _, !T)
         ;
             Res2 = error(_)
         )
@@ -420,7 +423,7 @@ handle_query_from_existing_server(Cmd, PrefInd, ToServerPipe, FromServerPipe,
         % Leave the response file to be examined.
     ;
         Debug = no,
-        io.remove_file(ResponseFileName, _, !IO)
+        io.file.remove_file(ResponseFileName, _, !IO)
     ).
 
     % Handle the given query and then become the new server. Delete the mutex
@@ -690,8 +693,8 @@ make_pipes(FileName, Success, !IO) :-
     FromServerPipe = from_server_pipe_name(FileName),
     MakeToServerPipeCmd = make_pipe_cmd(ToServerPipe),
     MakeFromServerPipeCmd = make_pipe_cmd(FromServerPipe),
-    io.call_system(MakeToServerPipeCmd, ToServerRes, !IO),
-    io.call_system(MakeFromServerPipeCmd, FromServerRes, !IO),
+    io.call_system.call_system(MakeToServerPipeCmd, ToServerRes, !IO),
+    io.call_system.call_system(MakeFromServerPipeCmd, FromServerRes, !IO),
     ( if
         ToServerRes = ok(0),
         FromServerRes = ok(0)
@@ -705,8 +708,8 @@ make_pipes(FileName, Success, !IO) :-
         % create both pipes), and if we can't remove a named pipe we did
         % succeed in creating, then something is so screwed up that probably
         % there is nothing we can do to fix the situation.
-        io.remove_file(ToServerPipe, _, !IO),
-        io.remove_file(FromServerPipe, _, !IO),
+        io.file.remove_file(ToServerPipe, _, !IO),
+        io.file.remove_file(FromServerPipe, _, !IO),
         Success = no
     ).
 

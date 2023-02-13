@@ -33,7 +33,7 @@
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
 
 :- import_module list.
@@ -41,7 +41,7 @@
 %-----------------------------------------------------------------------------%
 
 :- type arg_context
-    --->    ac_head(pred_or_func, arity)
+    --->    ac_head(pred_or_func, pred_form_arity)
             % The arguments in the head of the clause.
 
     ;       ac_call(call_id)
@@ -146,6 +146,7 @@
 :- import_module hlds.make_hlds.field_access.
 :- import_module hlds.make_hlds.goal_expr_to_goal.
 :- import_module hlds.passes_aux.
+:- import_module hlds.status.
 :- import_module libs.
 :- import_module libs.globals.  % for get_maybe_from_ground_term_threshold
 :- import_module libs.options.  % for warn_suspected_occurs_check_failure
@@ -159,10 +160,12 @@
 :- import_module parse_tree.parse_tree_out_term.
 :- import_module parse_tree.parse_type_name.
 :- import_module parse_tree.parse_util.
+:- import_module parse_tree.prog_item.
 :- import_module parse_tree.prog_mode.
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_util.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_db.
 
 :- import_module bool.
 :- import_module cord.
@@ -175,6 +178,7 @@
 :- import_module require.
 :- import_module string.
 :- import_module term.
+:- import_module term_vars.
 :- import_module varset.
 
 %-----------------------------------------------------------------------------%
@@ -2031,7 +2035,7 @@ build_lambda_expression(LHSVar, UnificationPurity,
         InconsistentVars = [_ | _],
         varset.coerce(!.VarSet, InstVarSet),
         InconsistentVarStrs = list.map(
-            mercury_var_to_string(InstVarSet, print_name_only),
+            mercury_var_to_string_vs(InstVarSet, print_name_only),
             InconsistentVars),
         InconsistentVarPieces =
             [words("Error: the constraints on the inst"),
@@ -2085,8 +2089,8 @@ build_lambda_expression(LHSVar, UnificationPurity,
             partition_args_and_lambda_vars(!.ModuleInfo, LambdaArgs1, ArgTerms,
                 NonOutputLambdaVarsArgs, OutputLambdaVarsArgs),
 
-            list.length(ArgTerms, NumArgs),
-            ArgContext = ac_head(PredOrFunc, NumArgs),
+            PredFormArity = arg_list_arity(ArgTerms),
+            ArgContext = ac_head(PredOrFunc, PredFormArity),
 
             % Create the unifications that need to come before the body of the
             % lambda expression; those corresponding to args whose mode is
@@ -2127,13 +2131,14 @@ build_lambda_expression(LHSVar, UnificationPurity,
                 io.write_line(DebugStream, LambdaVars, !IO),
                 io.write_string(DebugStream,
                     "lambda arg unifies before:\n", !IO),
-                dump_goal_nl(DebugStream, !.ModuleInfo, !.VarSet,
+                dump_goal_nl(DebugStream, !.ModuleInfo, vns_varset(!.VarSet),
                     HeadBefore, !IO),
                 io.write_string(DebugStream, "lambda body:\n", !IO),
-                dump_goal_nl(DebugStream, !.ModuleInfo, !.VarSet, Body, !IO),
+                dump_goal_nl(DebugStream, !.ModuleInfo, vns_varset(!.VarSet),
+                    Body, !IO),
                 io.write_string(DebugStream,
                     "lambda arg unifies after:\n", !IO),
-                dump_goal_nl(DebugStream, !.ModuleInfo, !.VarSet,
+                dump_goal_nl(DebugStream, !.ModuleInfo, vns_varset(!.VarSet),
                     HeadAfter, !IO),
                 map.to_assoc_list(FinalSVarMap, FinalSVarList),
                 io.write_string(DebugStream, "FinalSVarMap:\n", !IO),
@@ -2158,7 +2163,7 @@ build_lambda_expression(LHSVar, UnificationPurity,
                 pred_args_to_func_args(ArgTerms, QuantifiedArgTerms,
                     _ReturnValTerm)
             ),
-            term.vars_list(QuantifiedArgTerms, QuantifiedVars0),
+            term_vars.vars_in_terms(QuantifiedArgTerms, QuantifiedVars0),
             list.sort_and_remove_dups(QuantifiedVars0, QuantifiedVars),
 
             goal_info_init(Context, GoalInfo),
@@ -2280,12 +2285,16 @@ qualify_lambda_arg_modes(InInt, [LambdaArg0 | LambdaArgs0],
 
 arg_context_to_unify_context(ArgContext, ArgNum, MainContext, SubContexts) :-
     (
-        ArgContext = ac_head(PredOrFunc, Arity),
-        ( if PredOrFunc = pf_function, ArgNum = Arity then
+        ArgContext = ac_head(PredOrFunc, PredFormArity),
+        ( if
+            PredOrFunc = pf_function,
+            PredFormArity = pred_form_arity(PredFormArityInt),
+            ArgNum = PredFormArityInt
+        then
             % It is the function result term in the head.
             MainContext = umc_head_result
         else
-            % It is a head argument.
+            % It is a non-function-result head argument.
             MainContext = umc_head(ArgNum)
         ),
         SubContexts = []

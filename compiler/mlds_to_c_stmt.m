@@ -69,7 +69,6 @@
 :- import_module maybe.
 :- import_module require.
 :- import_module string.
-:- import_module term.
 
 %---------------------------------------------------------------------------%
 
@@ -845,7 +844,8 @@ mlds_output_stmt_try_commit(Opts, Stream, Indent, FuncInfo, Stmt, !IO) :-
     output_n_indents(Stream, Indent, !IO),
     io.write_string(Stream, "else\n", !IO),
 
-    mlds_output_statement(Opts, Stream, Indent + 1, FuncInfo, HandlerStmt, !IO).
+    mlds_output_statement(Opts, Stream, Indent + 1, FuncInfo, HandlerStmt,
+        !IO).
 
 %---------------------------------------------------------------------------%
 %
@@ -942,9 +942,7 @@ write_comment_lines(Stream, Indent, [CommentLine | CommentLines], !IO) :-
         io.nl(Stream, !IO)
     else
         output_n_indents(Stream, Indent, !IO),
-        io.write_string(Stream, "// ", !IO),
-        io.write_string(Stream, CommentLine, !IO),
-        io.nl(Stream, !IO)
+        io.format(Stream, "// %s\n", [s(CommentLine)], !IO)
     ),
     write_comment_lines(Stream, Indent, CommentLines, !IO).
 
@@ -1004,8 +1002,8 @@ mlds_output_stmt_atomic_new_object(Opts, Stream, Indent, AtomicStmt,
             NeedsForwardingSpace = yes,
             c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
             output_n_indents(Stream, Indent + 1, !IO),
-            io.write_string(Stream, "// reserve space for GC forwarding pointer\n",
-                !IO),
+            io.write_string(Stream,
+                "// reserve space for GC forwarding pointer\n", !IO),
             c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
             output_n_indents(Stream, Indent + 1, !IO),
             io.write_string(Stream, "MR_hp_alloc(1);\n", !IO)
@@ -1025,16 +1023,15 @@ mlds_output_stmt_atomic_new_object(Opts, Stream, Indent, AtomicStmt,
     output_n_indents(Stream, Indent + 1, !IO),
     write_lval_or_string(Opts, Stream, Base, !IO),
     io.write_string(Stream, " = ", !IO),
-    ( if Ptag = ptag(0u8) then
+    Ptag = ptag(PtagUInt8),
+    ( if PtagUInt8 = 0u8 then
         % XXX We should not need the cast here, but currently the type that
         % we include in the call to MR_new_object() is not always correct.
         mlds_output_cast(Opts, Stream, Type, !IO),
         EndMkword = ""
     else
         mlds_output_cast(Opts, Stream, Type, !IO),
-        io.write_string(Stream, "MR_mkword(", !IO),
-        mlds_output_ptag(Stream, Ptag, !IO),
-        io.write_string(Stream, ", ", !IO),
+        io.format(Stream, "MR_mkword(%u, ", [u8(PtagUInt8)], !IO),
         EndMkword = ")"
     ),
     (
@@ -1062,9 +1059,7 @@ mlds_output_stmt_atomic_new_object(Opts, Stream, Indent, AtomicStmt,
     ),
     io.write_string(Stream, ", ", !IO),
     mlds_output_maybe_alloc_id(Stream, MaybeAllocId, !IO),
-    io.write_string(Stream, ", NULL)", !IO),
-    io.write_string(Stream, EndMkword, !IO),
-    io.write_string(Stream, ";\n", !IO),
+    io.format(Stream, ", NULL)%s;\n", [s(EndMkword)], !IO),
     (
         Base = ls_lval(_)
     ;
@@ -1072,9 +1067,7 @@ mlds_output_stmt_atomic_new_object(Opts, Stream, Indent, AtomicStmt,
         c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
         output_n_indents(Stream, Indent + 1, !IO),
         mlds_output_lval(Opts, Target, Stream, !IO),
-        io.write_string(Stream, " = ", !IO),
-        io.write_string(Stream, BaseVarName1, !IO),
-        io.write_string(Stream, ";\n", !IO)
+        io.format(Stream, " = %s;\n", [s(BaseVarName1)], !IO)
     ),
     mlds_output_init_args(Opts, Stream, ArgRvalsTypes, Context, 0, Base, Ptag,
         Indent + 1, !IO),
@@ -1103,7 +1096,8 @@ mlds_output_target_code_component(Opts, Stream, Context, TargetCode, !IO) :-
         TargetCode = user_target_code(CodeString, MaybeUserContext),
         (
             MaybeUserContext = yes(UserContext),
-            c_output_context(Stream, Opts ^ m2co_line_numbers, UserContext, !IO)
+            c_output_context(Stream, Opts ^ m2co_line_numbers, UserContext,
+                !IO)
         ;
             MaybeUserContext = no,
             c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO)
@@ -1207,20 +1201,12 @@ mlds_output_init_args(Opts, Stream, [ArgRvalType | ArgRvalsTypes], Context,
     % The MR_hl_field() macro expects its argument to have type MR_Box,
     % so we need to box the arguments if they are not already boxed.
     % Hence the use of mlds_output_boxed_rval below.
-
-    % XXX For --high-level-data, we ought to generate assignments to the fields
-    % (or perhaps a call to a constructor function) rather than using the
-    % MR_hl_field() macro.
-
+    Ptag = ptag(PtagUInt8),
     c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
     output_n_indents(Stream, Indent, !IO),
-    io.write_string(Stream, "MR_hl_field(", !IO),
-    mlds_output_ptag(Stream, Ptag, !IO),
-    io.write_string(Stream, ", ", !IO),
+    io.format(Stream, "MR_hl_field(%u, ", [u8(PtagUInt8)], !IO),
     write_lval_or_string(Opts, Stream, Base, !IO),
-    io.write_string(Stream, ", ", !IO),
-    io.write_int(Stream, ArgNum, !IO),
-    io.write_string(Stream, ") = ", !IO),
+    io.format(Stream, ", %d) = ", [i(ArgNum)], !IO),
     ArgRvalType = ml_typed_rval(ArgRval, ArgType),
     mlds_output_boxed_rval(Opts, Stream, ArgType, ArgRval, !IO),
     io.write_string(Stream, ";\n", !IO),

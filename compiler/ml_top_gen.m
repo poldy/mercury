@@ -1,7 +1,7 @@
 %---------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
-% Copyright (C) 2017 The Mercury team.
+% Copyright (C) 2017-2022 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -16,8 +16,9 @@
 :- import_module hlds.hlds_module.
 :- import_module ml_backend.mlds.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
+:- import_module io.
 :- import_module list.
 
 %---------------------------------------------------------------------------%
@@ -25,8 +26,8 @@
 
     % Generate MLDS code for an entire module.
     %
-:- pred ml_code_gen(mlds_target_lang::in, mlds::out,
-    module_info::in, module_info::out, 
+:- pred ml_code_gen(io.text_output_stream::in, mlds_target_lang::in,
+    mlds::out, module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 %---------------------------------------------------------------------------%
@@ -63,12 +64,11 @@
 :- import_module pair.
 :- import_module require.
 :- import_module set.
-:- import_module std_util.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-ml_code_gen(Target, MLDS, !ModuleInfo, !Specs) :-
+ml_code_gen(ProgressStream, Target, MLDS, !ModuleInfo, !Specs) :-
     module_info_get_name(!.ModuleInfo, ModuleName),
     ml_gen_foreign_code(!.ModuleInfo, ForeignCode),
     ml_gen_imports(!.ModuleInfo, Imports),
@@ -81,8 +81,8 @@ ml_code_gen(Target, MLDS, !ModuleInfo, !Specs) :-
     ml_gen_exported_enums(!.ModuleInfo, ExportedEnums),
     module_info_user_init_pred_target_names(!.ModuleInfo, InitPreds),
     module_info_user_final_pred_target_names(!.ModuleInfo, FinalPreds),
-    ml_gen_preds(Target, ConstStructMap, PredDefns, GlobalData1, GlobalData,
-        !ModuleInfo, !Specs),
+    ml_gen_preds(ProgressStream, Target, ConstStructMap, PredDefns,
+        GlobalData1, GlobalData, !ModuleInfo, !Specs),
     MLDS = mlds(ModuleName, Imports, GlobalData, TypeDefns,
         TableStructDefns, PredDefns, InitPreds, FinalPreds,
         ForeignCode, ExportedEnums).
@@ -259,7 +259,7 @@ ml_gen_table_structs(ModuleInfo, DataDefns) :-
         % GC support (stack frame registration, and calls to MR_GC_check()) to
         % MR_make_long_lived() and MR_deep_copy() so that we do garbage
         % collection of the "global heap" which is used to store the tables.
-        expect(isnt(unify(gc_accurate), GC_Method), $pred,
+        expect_not(unify(gc_accurate, GC_Method), $pred,
             "tabling and `--gc accurate'"),
 
         list.foldl(ml_gen_add_table_var(ModuleInfo), TableStructs,

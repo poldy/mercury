@@ -176,18 +176,18 @@
 :- import_module check_hlds.type_util.
 :- import_module hlds.arg_info.
 :- import_module hlds.goal_util.
-:- import_module hlds.hlds_dependency_graph.
 :- import_module hlds.hlds_data.
+:- import_module hlds.hlds_dependency_graph.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_out.
 :- import_module hlds.hlds_out.hlds_out_goal.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
@@ -197,6 +197,7 @@
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
+:- import_module parse_tree.builtin_lib_types.
 :- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.parse_tree_out_term.
@@ -206,6 +207,8 @@
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_util.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_db.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bag.
@@ -215,13 +218,13 @@
 :- import_module io.
 :- import_module list.
 :- import_module map.
-:- import_module multi_map.
 :- import_module maybe.
+:- import_module multi_map.
 :- import_module pair.
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -230,7 +233,7 @@
     --->    variant_id(
                 list(variant_arg),  % The output arguments returned in memory.
                 pred_proc_id,       % The id of the variant.
-                string              % The name of the variant predicate.
+                sym_name            % The sym_name of the variant predicate.
             ).
 
 :- type variant_arg
@@ -278,8 +281,7 @@
     --->    lco_info(
                 lco_module_info         :: module_info,
                 lco_cur_scc_variants    :: variant_map,
-                lco_var_set             :: prog_varset,
-                lco_var_types           :: vartypes,
+                lco_var_table           :: var_table,
                 lco_permitted           :: lco_is_permitted_on_scc,
                 lco_changed             :: proc_changed
             ).
@@ -403,13 +405,11 @@ lco_proc(LowerSCCVariants, SCC, CurProc, PredInfo, ProcInfo0,
         io.write_line(DebugStream, CurProc, !IO),
         io.flush_output(DebugStream, !IO)
     ),
-    proc_info_get_varset(ProcInfo0, VarSet0),
-    proc_info_get_vartypes(ProcInfo0, VarTypes0),
+    proc_info_get_var_table(ProcInfo0, VarTable0),
     proc_info_get_headvars(ProcInfo0, HeadVars),
     proc_info_get_argmodes(ProcInfo0, ArgModes),
-    lookup_var_types(VarTypes0, HeadVars, ArgTypes),
-    arg_info.compute_in_and_out_vars(!.ModuleInfo, HeadVars,
-        ArgModes, ArgTypes, _InputHeadVars, OutputHeadVars),
+    arg_info.compute_in_and_out_vars(!.ModuleInfo, VarTable0,
+        HeadVars, ArgModes, _InputHeadVars, OutputHeadVars),
     proc_info_get_inferred_determinism(ProcInfo0, CurProcDetism),
     module_info_get_globals(!.ModuleInfo, Globals),
     globals.get_target(Globals, Target),
@@ -429,11 +429,11 @@ lco_proc(LowerSCCVariants, SCC, CurProc, PredInfo, ProcInfo0,
     ConstInfo = lco_const_info(LowerSCCVariants, SCC,
         CurProc, PredInfo, ProcInfo0, OutputHeadVars, CurProcDetism,
         AllowFloatAddr, HighLevelData),
-    Info0 = lco_info(!.ModuleInfo, !.CurSCCVariants, VarSet0, VarTypes0,
+    Info0 = lco_info(!.ModuleInfo, !.CurSCCVariants, VarTable0,
         lco_is_permitted_on_scc, proc_not_changed),
     proc_info_get_goal(ProcInfo0, Goal0),
     lco_in_goal(Goal0, Goal, Info0, Info, ConstInfo),
-    Info = lco_info(!:ModuleInfo, !:CurSCCVariants, VarSet, VarTypes,
+    Info = lco_info(!:ModuleInfo, !:CurSCCVariants, VarTable,
         !:Permitted, Changed),
     ( if
         !.Permitted = lco_is_permitted_on_scc,
@@ -442,19 +442,20 @@ lco_proc(LowerSCCVariants, SCC, CurProc, PredInfo, ProcInfo0,
         trace [compiletime(flag("lco")), io(!IO)] (
             get_lco_debug_output_stream(Info, DebugStream, !IO),
             io.write_string(DebugStream, "\ngoal before lco:\n", !IO),
-            dump_goal_nl(DebugStream, !.ModuleInfo, VarSet, Goal0, !IO),
+            dump_goal_nl(DebugStream, !.ModuleInfo, vns_var_table(VarTable),
+                Goal0, !IO),
             io.write_string(DebugStream, "\ngoal after lco:\n", !IO),
-            dump_goal_nl(DebugStream, !.ModuleInfo, VarSet, Goal, !IO)
+            dump_goal_nl(DebugStream, !.ModuleInfo, vns_var_table(VarTable),
+                Goal, !IO)
         ),
         some [!ProcInfo] (
             !:ProcInfo = ProcInfo0,
-            proc_info_set_varset(VarSet, !ProcInfo),
-            proc_info_set_vartypes(VarTypes, !ProcInfo),
+            proc_info_set_var_table(VarTable, !ProcInfo),
             proc_info_set_goal(Goal, !ProcInfo),
             % See the comment in transform_call_and_unifies for why these
             % are needed.
-            requantify_proc_general(ordinary_nonlocals_no_lambda, !ProcInfo),
-            recompute_instmap_delta_proc(recompute_atomic_instmap_deltas,
+            requantify_proc_general(ord_nl_no_lambda, !ProcInfo),
+            recompute_instmap_delta_proc(recomp_atomics,
                 !ProcInfo, !ModuleInfo),
             map.det_insert(CurProc, !.ProcInfo, !CurSCCUpdates)
         )
@@ -671,11 +672,11 @@ potentially_transformable_recursive_call(Info, ConstInfo, Goal, OutArgs) :-
 
     ModuleInfo = Info ^ lco_module_info,
     ProcInfo = ConstInfo ^ lci_cur_proc_proc,
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    proc_info_get_var_table(ProcInfo, VarTable),
 
     module_info_proc_info(ModuleInfo, PredId, ProcId, CalleeProcInfo),
     proc_info_get_argmodes(CalleeProcInfo, CalleeArgModes),
-    classify_proc_call_args(ModuleInfo, VarTypes, Args, CalleeArgModes,
+    classify_proc_call_args(ModuleInfo, VarTable, Args, CalleeArgModes,
         _InArgs, OutArgs, UnusedArgs),
     UnusedArgs = [],
 
@@ -798,14 +799,13 @@ acceptable_construct_unification(ConstInfo, DelayForVars, Goal,
         bag.insert_list(ConstructArgVars, !UnifyInputVars),
         trace [compiletime(flag("lco")), io(!IO)] (
             ProcInfo = ConstInfo ^ lci_cur_proc_proc,
-            proc_info_get_varset(ProcInfo, VarSet),
-            ConstructedVarStr =
-                mercury_var_to_string(VarSet, print_name_and_num,
-                    ConstructedVar),
+            proc_info_get_var_table(ProcInfo, VarTable),
+            ConstructedVarStr = mercury_var_to_string(VarTable,
+                print_name_and_num, ConstructedVar),
             ConsIdStr = mercury_cons_id_to_string(output_debug,
                 does_not_need_brackets, ConsId),
             ConstructArgVarStrs = list.map(
-                mercury_var_to_string(VarSet, print_name_and_num),
+                mercury_var_to_string(VarTable, print_name_and_num),
                 ConstructArgVars),
             ConstructArgVarsStr = string.join_list(", ", ConstructArgVarStrs),
             get_debug_output_stream(ModuleInfo, DebugStream, !IO),
@@ -868,11 +868,10 @@ transform_call_and_unifies(CallGoal, CallOutArgVars, UnifyGoals,
         UnifyInputVars, MaybeGoals, !Info, ConstInfo) :-
     CallGoal = hlds_goal(CallGoalExpr, CallGoalInfo),
     ModuleInfo = !.Info ^ lco_module_info,
-    ProcInfo = ConstInfo ^ lci_cur_proc_proc,
-    proc_info_get_vartypes(ProcInfo, VarTypes),
+    CurProcInfo = ConstInfo ^ lci_cur_proc_proc,
     ( if
         CallGoalExpr = plain_call(PredId, ProcId, ArgVars, Builtin,
-            UnifyContext, SymName),
+            UnifyContext, _SymName),
         CurrProcOutArgs = ConstInfo ^ lci_cur_proc_outputs,
         assoc_list.from_corresponding_lists(CallOutArgVars, CurrProcOutArgs,
             CallHeadPairs),
@@ -904,12 +903,13 @@ transform_call_and_unifies(CallGoal, CallOutArgVars, UnifyGoals,
             UnifyGoals, UpdatedUnifyGoals, map.init, AddrFieldIds, !Info),
         trace [compiletime(flag("lco")), io(!IO)] (
             get_debug_output_stream(ModuleInfo, DebugStream, !IO),
-            VarSet = !.Info ^ lco_var_set,
+            VarTable = !.Info ^ lco_var_table,
+            VarNameSrc = vns_var_table(VarTable),
             io.write_string(DebugStream, "original unifies:\n", !IO),
-            list.foldl(dump_goal_nl(DebugStream, ModuleInfo, VarSet),
+            list.foldl(dump_goal_nl(DebugStream, ModuleInfo, VarNameSrc),
                 UnifyGoals, !IO),
             io.write_string(DebugStream, "updated unifies:\n", !IO),
-            list.foldl(dump_goal_nl(DebugStream, ModuleInfo, VarSet),
+            list.foldl(dump_goal_nl(DebugStream, ModuleInfo, VarNameSrc),
                 UpdatedUnifyGoals, !IO),
             io.write_string(DebugStream, "addr field ids:\n", !IO),
             map.to_assoc_list(AddrFieldIds, AddrFieldIdsAL),
@@ -919,11 +919,12 @@ transform_call_and_unifies(CallGoal, CallOutArgVars, UnifyGoals,
         make_variant_args(HighLevelData, AddrFieldIds, Mismatches,
             VariantArgs),
         ensure_variant_exists(PredId, ProcId, VariantArgs,
-            VariantPredProcId, SymName, VariantSymName, !Info)
+            VariantPredProcId, VariantSymName, !Info)
     then
+        proc_info_get_var_table(CurProcInfo, CurProcVarTable),
         module_info_proc_info(ModuleInfo, PredId, ProcId, CalleeProcInfo),
         proc_info_get_argmodes(CalleeProcInfo, CalleeModes),
-        update_call_args(ModuleInfo, VarTypes, CalleeModes, ArgVars,
+        update_call_args(ModuleInfo, CurProcVarTable, CalleeModes, ArgVars,
             UpdatedCallOutArgs, UpdatedArgs),
         VariantPredProcId = proc(VariantPredId, VariantProcId),
         UpdatedGoalExpr = plain_call(VariantPredId, VariantProcId,
@@ -983,24 +984,24 @@ transform_call_and_unifies(CallGoal, CallOutArgVars, UnifyGoals,
 occurs_once(Bag, Var) :-
     bag.count_value(Bag, Var, 1).
 
-:- pred update_call_args(module_info::in, vartypes::in, list(mer_mode)::in,
+:- pred update_call_args(module_info::in, var_table::in, list(mer_mode)::in,
     list(prog_var)::in, list(prog_var)::in, list(prog_var)::out) is det.
 
-update_call_args(_ModuleInfo, _VarTypes, [], [], UpdatedCallOutArgVars, []) :-
+update_call_args(_ModuleInfo, _VarTable, [], [], UpdatedCallOutArgVars, []) :-
     expect(unify(UpdatedCallOutArgVars, []), $pred,
         "updating nonexistent arg").
-update_call_args(_ModuleInfo, _VarTypes, [], [_ | _], _, _) :-
+update_call_args(_ModuleInfo, _VarTable, [], [_ | _], _, _) :-
     unexpected($pred, "mismatched lists").
-update_call_args(_ModuleInfo, _VarTypes, [_ | _], [], _, _) :-
+update_call_args(_ModuleInfo, _VarTable, [_ | _], [], _, _) :-
     unexpected($pred, "mismatched lists").
-update_call_args(ModuleInfo, VarTypes, [CalleeMode | CalleeModes],
+update_call_args(ModuleInfo, VarTable, [CalleeMode | CalleeModes],
         [ArgVar | ArgVars], !.UpdatedCallOutArgVars, !:UpdatedArgVars) :-
-    lookup_var_type(VarTypes, ArgVar, CalleeType),
+    lookup_var_type(VarTable, ArgVar, CalleeType),
     mode_to_top_functor_mode(ModuleInfo, CalleeMode, CalleeType,
         TopFunctorMode),
     (
         TopFunctorMode = top_in,
-        update_call_args(ModuleInfo, VarTypes, CalleeModes, ArgVars,
+        update_call_args(ModuleInfo, VarTable, CalleeModes, ArgVars,
             !.UpdatedCallOutArgVars, !:UpdatedArgVars),
         !:UpdatedArgVars = [ArgVar | !.UpdatedArgVars]
     ;
@@ -1011,7 +1012,7 @@ update_call_args(ModuleInfo, VarTypes, [CalleeMode | CalleeModes],
             !.UpdatedCallOutArgVars = [],
             unexpected($pred, "no UpdatedCallOutArgs")
         ),
-        update_call_args(ModuleInfo, VarTypes, CalleeModes, ArgVars,
+        update_call_args(ModuleInfo, VarTable, CalleeModes, ArgVars,
             !.UpdatedCallOutArgVars, !:UpdatedArgVars),
         !:UpdatedArgVars = [UpdatedArgVar | !.UpdatedArgVars]
     ;
@@ -1021,20 +1022,20 @@ update_call_args(ModuleInfo, VarTypes, [CalleeMode | CalleeModes],
 
 %---------------------------------------------------------------------------%
 
-:- pred classify_proc_call_args(module_info::in, vartypes::in,
+:- pred classify_proc_call_args(module_info::in, var_table::in,
     list(prog_var)::in, list(mer_mode)::in,
     list(prog_var)::out, list(prog_var)::out, list(prog_var)::out) is det.
 
-classify_proc_call_args(_ModuleInfo, _VarTypes, [], [], [], [], []).
-classify_proc_call_args(_ModuleInfo, _VarTypes, [], [_ | _], _, _, _) :-
+classify_proc_call_args(_ModuleInfo, _VarTable, [], [], [], [], []).
+classify_proc_call_args(_ModuleInfo, _VarTable, [], [_ | _], _, _, _) :-
     unexpected($pred, "mismatched lists").
-classify_proc_call_args(_ModuleInfo, _VarTypes, [_ | _], [], _, _, _) :-
+classify_proc_call_args(_ModuleInfo, _VarTable, [_ | _], [], _, _, _) :-
     unexpected($pred, "mismatched lists").
-classify_proc_call_args(ModuleInfo, VarTypes, [Arg | Args],
+classify_proc_call_args(ModuleInfo, VarTable, [Arg | Args],
         [CalleeMode | CalleeModes], !:InArgs, !:OutArgs, !:UnusedArgs) :-
-    classify_proc_call_args(ModuleInfo, VarTypes, Args, CalleeModes,
+    classify_proc_call_args(ModuleInfo, VarTable, Args, CalleeModes,
         !:InArgs, !:OutArgs, !:UnusedArgs),
-    lookup_var_type(VarTypes, Arg, CalleeType),
+    lookup_var_type(VarTable, Arg, CalleeType),
     mode_to_top_functor_mode(ModuleInfo, CalleeMode, CalleeType,
         TopFunctorMode),
     (
@@ -1064,7 +1065,7 @@ find_args_to_pass_by_addr(ConstInfo, UnifyInputVars,
         ArgNum + 1, MismatchesTail, UpdatedCallArgs, !Subst, !Info),
     ( if
         ConstInfo ^ lci_allow_float_addr = do_not_allow_float_addr,
-        lookup_var_type(!.Info ^ lco_var_types, CallArg, CallArgType),
+        lookup_var_type(!.Info ^ lco_var_table, CallArg, CallArgType),
         type_to_ctor(CallArgType, CallArgTypeCtor),
         CallArgTypeCtor = type_ctor(unqualified("float"), 0)
     then
@@ -1113,24 +1114,23 @@ find_args_to_pass_by_addr(ConstInfo, UnifyInputVars,
     lco_info::in, lco_info::out) is det.
 
 make_address_var(ConstInfo, Var, AddrVar, !Info) :-
-    VarSet0 = !.Info ^ lco_var_set,
-    VarTypes0 = !.Info ^ lco_var_types,
-    varset.lookup_name(VarSet0, Var, "SCCcallarg", Name),
-    AddrName = "Addr" ++ Name,
-    varset.new_named_var(AddrName, AddrVar, VarSet0, VarSet),
+    VarTable0 = !.Info ^ lco_var_table,
+    lookup_var_entry(VarTable0, Var, VarEntry),
+    Name = var_entry_name_default(Var, VarEntry, "SCCcallarg"),
+    VarEntry = vte(_, VarType, _VarTypeIsDummy),
     HighLevelData = ConstInfo ^ lci_highlevel_data,
     (
         HighLevelData = no,
-        lookup_var_type(VarTypes0, Var, FieldType),
-        AddrVarType = make_ref_type(FieldType),
-        add_var_type(AddrVar, AddrVarType, VarTypes0, VarTypes)
+        AddrVarType = make_ref_type(VarType)
     ;
         HighLevelData = yes,
-        % We set the type later when it is more convenient.
-        VarTypes = VarTypes0
+        % We set the actual type later when it is more convenient.
+        AddrVarType = void_type
     ),
-    !Info ^ lco_var_set := VarSet,
-    !Info ^ lco_var_types := VarTypes.
+    AddrName = "Addr" ++ Name,
+    AddrVarEntry = vte(AddrName, AddrVarType, is_not_dummy_type),
+    add_var_entry(AddrVarEntry, AddrVar, VarTable0, VarTable),
+    !Info ^ lco_var_table := VarTable.
 
 :- func make_ref_type(mer_type) = mer_type.
 
@@ -1158,25 +1158,19 @@ make_variant_args(HighLevelData, AddrVarFieldIds, Mismatches, VariantArgs) :-
     VariantArgs = list.map(MakeArg, Mismatches).
 
 :- pred ensure_variant_exists(pred_id::in, proc_id::in, list(variant_arg)::in,
-    pred_proc_id::out, sym_name::in, sym_name::out,
-    lco_info::in, lco_info::out) is semidet.
+    pred_proc_id::out, sym_name::out, lco_info::in, lco_info::out) is semidet.
 
-ensure_variant_exists(PredId, ProcId, AddrArgNums, VariantPredProcId,
-        SymName, VariantSymName, !Info) :-
+ensure_variant_exists(PredId, ProcId, AddrOutArgs, VariantPredProcId,
+        VariantSymName, !Info) :-
     PredProcId = proc(PredId, ProcId),
     CurSCCVariants0 = !.Info ^ lco_cur_scc_variants,
     ( if
-        multi_map.search(CurSCCVariants0, PredProcId, ExistingVariants),
-        match_existing_variant(ExistingVariants, AddrArgNums, ExistingVariant)
+        multi_map.search(CurSCCVariants0, PredProcId, ExistingVariantIds),
+        match_existing_variant(ExistingVariantIds, AddrOutArgs,
+            ExistingVariantId)
     then
-        get_variant_id_and_name(ExistingVariant, SymName, VariantPredProcId,
-            VariantSymName)
+        ExistingVariantId = variant_id(_, VariantPredProcId, VariantSymName)
     else
-        ModuleInfo0 = !.Info ^ lco_module_info,
-        clone_pred_proc(PredId, ClonePredId, PredOrFunc,
-            ModuleInfo0, ModuleInfo),
-        VariantPredProcId = proc(ClonePredId, ProcId),
-        !Info ^ lco_module_info := ModuleInfo,
         ( if
             multi_map.search(CurSCCVariants0, PredProcId, ExistingVariants)
         then
@@ -1185,16 +1179,53 @@ ensure_variant_exists(PredId, ProcId, AddrArgNums, VariantPredProcId,
             VariantNumber = 1
         ),
         VariantNumber =< max_variants_per_proc,
-        (
-            SymName = unqualified(Name),
-            create_variant_name(PredOrFunc, VariantNumber, Name, VariantName),
-            VariantSymName = unqualified(VariantName)
-        ;
-            SymName = qualified(ModuleName, Name),
-            create_variant_name(PredOrFunc, VariantNumber, Name, VariantName),
-            VariantSymName = qualified(ModuleName, VariantName)
+
+        ModuleInfo0 = !.Info ^ lco_module_info,
+        module_info_get_name(ModuleInfo0, ModuleName),
+        module_info_pred_info(ModuleInfo0, PredId, PredInfo),
+        PredOrFunc = pred_info_is_pred_or_func(PredInfo),
+        pred_info_get_name(PredInfo, PredName),
+        Transform = tn_last_call_modulo_cons(PredOrFunc, VariantNumber),
+        % Even if PredInfo describes a predicate opt-imported from another
+        % module, the variant we construct is defined in *this* module.
+        make_transformed_pred_name(PredName, Transform, VariantName),
+
+        some [!VariantPredInfo] (
+            !:VariantPredInfo = PredInfo,
+            VariantSymName = qualified(ModuleName, VariantName),
+            pred_info_set_module_name(ModuleName, !VariantPredInfo),
+            pred_info_set_name(VariantName, !VariantPredInfo),
+            pred_info_set_is_pred_or_func(pf_predicate, !VariantPredInfo),
+
+            pred_info_get_origin(PredInfo, Origin0),
+            AddrOutArgNums = list.map(va_pos, AddrOutArgs),
+            ProcTransform = proc_transform_lcmc(VariantNumber, AddrOutArgNums),
+            Origin = origin_proc_transform(ProcTransform, Origin0,
+                PredId, ProcId),
+            pred_info_set_origin(Origin, !VariantPredInfo),
+
+            % We throw away any other procs in the variant predicate, because
+            % we create a separate predicate for each variant.
+            %
+            % update_variant_pred_info will update the proc_info
+            % after transforming it.
+            pred_info_get_proc_table(PredInfo, ProcTable),
+            map.lookup(ProcTable, ProcId, ProcInfo),
+            VariantProcTable = map.singleton(ProcId, ProcInfo),
+            pred_info_set_proc_table(VariantProcTable, !VariantPredInfo),
+
+            module_info_get_predicate_table(ModuleInfo0, PredTable0),
+            predicate_table_insert(!.VariantPredInfo, VariantPredId,
+                PredTable0, PredTable),
+            module_info_set_predicate_table(PredTable,
+                ModuleInfo0, ModuleInfo)
         ),
-        NewVariant = variant_id(AddrArgNums, VariantPredProcId, VariantName),
+
+        VariantPredProcId = proc(VariantPredId, ProcId),
+        !Info ^ lco_module_info := ModuleInfo,
+
+        NewVariant =
+            variant_id(AddrOutArgs, VariantPredProcId, VariantSymName),
         multi_map.set(PredProcId, NewVariant, CurSCCVariants0, CurSCCVariants),
         !Info ^ lco_cur_scc_variants := CurSCCVariants
     ).
@@ -1202,52 +1233,16 @@ ensure_variant_exists(PredId, ProcId, AddrArgNums, VariantPredProcId,
 :- pred match_existing_variant(list(variant_id)::in, list(variant_arg)::in,
     variant_id::out) is semidet.
 
-match_existing_variant([Variant0 | Variants], AddrArgNums, Variant) :-
-    ( if Variant0 = variant_id(AddrArgNums, _, _) then
-        Variant = Variant0
+match_existing_variant([VariantId0 | VariantIds], AddrArgNums, VariantId) :-
+    ( if VariantId0 = variant_id(AddrArgNums, _, _) then
+        VariantId = VariantId0
     else
-        match_existing_variant(Variants, AddrArgNums, Variant)
-    ).
-
-:- pred get_variant_id_and_name(variant_id::in, sym_name::in,
-    pred_proc_id::out, sym_name::out) is det.
-
-get_variant_id_and_name(VariantId, SymName, PredProcId, VariantSymName) :-
-    VariantId = variant_id(_, PredProcId, VariantName),
-    (
-        SymName = unqualified(_Name),
-        VariantSymName = unqualified(VariantName)
-    ;
-        SymName = qualified(ModuleName, _Name),
-        VariantSymName = qualified(ModuleName, VariantName)
+        match_existing_variant(VariantIds, AddrArgNums, VariantId)
     ).
 
 :- func max_variants_per_proc = int.
 
 max_variants_per_proc = 4.
-
-:- pred clone_pred_proc(pred_id::in, pred_id::out, pred_or_func::out,
-    module_info::in, module_info::out) is det.
-
-clone_pred_proc(PredId, ClonePredId, PredOrFunc, !ModuleInfo) :-
-    module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
-    PredOrFunc = pred_info_is_pred_or_func(PredInfo),
-    module_info_get_predicate_table(!.ModuleInfo, PredTable0),
-    predicate_table_insert(PredInfo, ClonePredId, PredTable0, PredTable),
-    module_info_set_predicate_table(PredTable, !ModuleInfo).
-
-:- pred create_variant_name(pred_or_func::in, int::in, string::in,
-    string::out) is det.
-
-create_variant_name(PredOrFunc, VariantNumber, OrigName, VariantName) :-
-    (
-        PredOrFunc = pf_function,
-        Prefix = "LCMCfn_"
-    ;
-        PredOrFunc = pf_predicate,
-        Prefix = "LCMCpr_"
-    ),
-    VariantName = Prefix ++ OrigName ++ "_" ++ int_to_string(VariantNumber).
 
 %---------------------------------------------------------------------------%
 
@@ -1275,13 +1270,15 @@ update_construct(ConstInfo, Subst, Goal0, Goal, !AddrVarFieldIds, !Info) :-
         % partial instantiation is incomplete, instmaps for the assignments are
         % likely to be recomputed incorrectly.
         HighLevelData = ConstInfo ^ lci_highlevel_data,
-        VarTypes0 = !.Info ^ lco_var_types,
-        lookup_var_type(VarTypes0, Var, VarType),
+        VarTable0 = !.Info ^ lco_var_table,
+        lookup_var_entry(VarTable0, Var, VarEntry),
+        VarEntry = vte(_, VarType, IsDummy),
         InstMapDelta0 = goal_info_get_instmap_delta(GoalInfo0),
-        update_construct_args(Subst, HighLevelData, VarType, ConsId, 1,
-            ArgVars, UpdatedArgVars, AddrFields, InstMapDelta0, InstMapDelta,
-            !AddrVarFieldIds, VarTypes0, VarTypes),
-        !Info ^ lco_var_types := VarTypes,
+        update_construct_args(Subst, HighLevelData, VarType, IsDummy,
+            ConsId, 1, ArgVars, UpdatedArgVars, AddrFields,
+            InstMapDelta0, InstMapDelta, !AddrVarFieldIds,
+            VarTable0, VarTable),
+        !Info ^ lco_var_table := VarTable,
         (
             AddrFields = [],
             Goal = Goal0
@@ -1317,19 +1314,19 @@ update_construct(ConstInfo, Subst, Goal0, Goal, !AddrVarFieldIds, !Info) :-
     ).
 
 :- pred update_construct_args(map(prog_var, prog_var)::in, bool::in,
-    mer_type::in, cons_id::in, int::in, list(prog_var)::in,
+    mer_type::in, is_dummy_type::in, cons_id::in, int::in, list(prog_var)::in,
     list(prog_var)::out, list(int)::out, instmap_delta::in, instmap_delta::out,
     map(prog_var, field_id)::in, map(prog_var, field_id)::out,
-    vartypes::in, vartypes::out) is det.
+    var_table::in, var_table::out) is det.
 
-update_construct_args(_, _, _, _, _, [], [], [],
-        !InstMapDelta, !AddrFieldIds, !VarTypes).
-update_construct_args(Subst, HighLevelData, VarType, ConsId, ArgNum,
-        [OrigVar | OrigVars], [UpdatedVar | UpdatedVars], AddrArgs,
-        !InstMapDelta, !AddrFieldIds, !VarTypes) :-
-    update_construct_args(Subst, HighLevelData, VarType, ConsId, ArgNum + 1,
-        OrigVars, UpdatedVars, AddrArgsTail, !InstMapDelta, !AddrFieldIds,
-        !VarTypes),
+update_construct_args(_, _, _, _, _, _, [], [], [],
+        !InstMapDelta, !AddrFieldIds, !VarTable).
+update_construct_args(Subst, HighLevelData, VarType, IsDummyType,
+        ConsId, ArgNum, [OrigVar | OrigVars], [UpdatedVar | UpdatedVars],
+        AddrArgs, !InstMapDelta, !AddrFieldIds, !VarTable) :-
+    update_construct_args(Subst, HighLevelData, VarType, IsDummyType,
+        ConsId, ArgNum + 1, OrigVars, UpdatedVars, AddrArgsTail,
+        !InstMapDelta, !AddrFieldIds, !VarTable),
     ( if map.search(Subst, OrigVar, AddrVar) then
         UpdatedVar = AddrVar,
         (
@@ -1340,11 +1337,16 @@ update_construct_args(Subst, HighLevelData, VarType, ConsId, ArgNum,
             BoundInst = bound_inst_with_free_arg(ConsId, ArgNum),
             FinalInst = bound(shared, inst_test_no_results, [BoundInst]),
             % We didn't do this when we initially created the variable.
-            add_var_type(AddrVar, VarType, !VarTypes)
+            lookup_var_entry(!.VarTable, AddrVar, AddrVarEntry0),
+            AddrVarEntry0 = vte(AddrVarName, _, _),
+            % XXX Why is it that VarType, and its IsDummyType companion,
+            % do not depend on which field we are taking the address of?
+            AddrVarEntry = vte(AddrVarName, VarType, IsDummyType),
+            update_var_entry(AddrVar, AddrVarEntry, !VarTable)
         ),
         instmap_delta_set_var(AddrVar, FinalInst, !InstMapDelta),
-        map.det_insert(OrigVar, field_id(VarType, ConsId, ArgNum),
-            !AddrFieldIds),
+        FieldId = field_id(VarType, ConsId, ArgNum),
+        map.det_insert(OrigVar, FieldId, !AddrFieldIds),
         AddrArgs = [ArgNum | AddrArgsTail]
     else
         UpdatedVar = OrigVar,
@@ -1378,13 +1380,11 @@ acceptable_construct_mode(ModuleInfo, UnifyMode) :-
 
 store_updated_procs_in_module_info(PredProcId - NewProcInfo, !ModuleInfo) :-
     PredProcId = proc(PredId, ProcId),
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
     pred_info_get_proc_table(PredInfo0, Procs0),
     map.det_update(ProcId, NewProcInfo, Procs0, Procs),
     pred_info_set_proc_table(Procs, PredInfo0, PredInfo),
-    map.det_update(PredId, PredInfo, PredTable0, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo).
+    module_info_set_pred_info(PredId, PredInfo, !ModuleInfo).
 
 %---------------------------------------------------------------------------%
 
@@ -1399,7 +1399,7 @@ update_variant_pred_info(VariantMap, PredProcId - VariantId, !ModuleInfo) :-
         io.write_line(DebugStream, PredProcId, !IO),
         io.write_line(DebugStream, VariantId, !IO)
     ),
-    VariantId = variant_id(AddrOutArgs, VariantPredProcId, VariantName),
+    VariantId = variant_id(AddrOutArgs, VariantPredProcId, _VariantSymName),
     VariantPredProcId = proc(VariantPredId, VariantProcId),
     PredProcId = proc(PredId, ProcId),
 
@@ -1409,33 +1409,22 @@ update_variant_pred_info(VariantMap, PredProcId - VariantId, !ModuleInfo) :-
         VariantProcInfo, !ModuleInfo),
 
     proc_info_get_headvars(VariantProcInfo, HeadVars),
-    proc_info_get_vartypes(VariantProcInfo, VarTypes),
-    lookup_var_types(VarTypes, HeadVars, ArgTypes),
+    proc_info_get_var_table(VariantProcInfo, VarTable),
+    lookup_var_types(VarTable, HeadVars, ArgTypes),
 
-    some [!VariantPredInfo, !PredTable] (
-        module_info_get_preds(!.ModuleInfo, !:PredTable),
-        map.lookup(!.PredTable, VariantPredId, !:VariantPredInfo),
-        pred_info_set_name(VariantName, !VariantPredInfo),
-        pred_info_set_is_pred_or_func(pf_predicate, !VariantPredInfo),
-
-        % Update the argument types for the variant's pred_info.
-        pred_info_get_arg_types(!.VariantPredInfo, TVarSet, ExistQVars,
-            _ArgTypes0),
+    some [!VariantPredInfo] (
+        module_info_pred_info(!.ModuleInfo, VariantPredId, !:VariantPredInfo),
+        % Put the updated arg type information in the VariantProcInfo
+        % we just constructed into !VariantPredInfo.
+        pred_info_get_arg_types(!.VariantPredInfo,
+            TVarSet, ExistQVars, _ArgTypes0),
         pred_info_set_arg_types(TVarSet, ExistQVars, ArgTypes,
             !VariantPredInfo),
-
-        pred_info_get_origin(!.VariantPredInfo, Origin0),
-        AddrOutArgPosns = list.map(va_pos, AddrOutArgs),
-        Transform = transform_return_via_ptr(ProcId, AddrOutArgPosns),
-        Origin = origin_transformed(Transform, Origin0, PredId),
-        pred_info_set_origin(Origin, !VariantPredInfo),
-
-        % We throw away any other procs in the variant predicate, because
-        % we create a separate predicate for each variant.
+        % Put the VariantProcInfo we just constructed into !VariantPredInfo.
         VariantProcs = map.singleton(VariantProcId, VariantProcInfo),
         pred_info_set_proc_table(VariantProcs, !VariantPredInfo),
-        map.det_update(VariantPredId, !.VariantPredInfo, !PredTable),
-        module_info_set_preds(!.PredTable, !ModuleInfo)
+        module_info_set_pred_info(VariantPredId, !.VariantPredInfo,
+            !ModuleInfo)
     ).
 
 %---------------------------------------------------------------------------%
@@ -1446,17 +1435,14 @@ update_variant_pred_info(VariantMap, PredProcId - VariantId, !ModuleInfo) :-
 lco_transform_variant_proc(VariantMap, AddrOutArgs, ProcInfo,
         !:VariantProcInfo, !ModuleInfo) :-
     !:VariantProcInfo = ProcInfo,
-    proc_info_get_varset(ProcInfo, VarSet0),
-    proc_info_get_vartypes(ProcInfo, VarTypes0),
+    proc_info_get_var_table(ProcInfo, VarTable0),
     proc_info_get_headvars(ProcInfo, HeadVars0),
     proc_info_get_argmodes(ProcInfo, ArgModes0),
-    make_addr_vars(HeadVars0, ArgModes0, HeadVars, ArgModes,
-        AddrOutArgs, 1, !.ModuleInfo, VarToAddr,
-        VarSet0, VarSet, VarTypes0, VarTypes),
+    make_addr_vars(!.ModuleInfo, 1, HeadVars0, HeadVars, ArgModes0, ArgModes,
+        AddrOutArgs, VarToAddr, VarTable0, VarTable),
     proc_info_set_headvars(HeadVars, !VariantProcInfo),
     proc_info_set_argmodes(ArgModes, !VariantProcInfo),
-    proc_info_set_varset(VarSet, !VariantProcInfo),
-    proc_info_set_vartypes(VarTypes, !VariantProcInfo),
+    proc_info_set_var_table(VarTable, !VariantProcInfo),
 
     proc_info_get_initial_instmap(!.ModuleInfo, ProcInfo, InstMap0),
     proc_info_get_goal(ProcInfo, Goal0),
@@ -1472,14 +1458,16 @@ lco_transform_variant_proc(VariantMap, AddrOutArgs, ProcInfo,
         ;
             Changed = yes,
             io.write_string(DebugStream, "goal before:\n", !IO),
-            dump_goal_nl(DebugStream, !.ModuleInfo, VarSet, Goal0, !IO),
+            dump_goal_nl(DebugStream, !.ModuleInfo, vns_var_table(VarTable),
+                Goal0, !IO),
             io.write_string(DebugStream, "\ngoal after:\n", !IO),
-            dump_goal_nl(DebugStream, !.ModuleInfo, VarSet, Goal, !IO)
+            dump_goal_nl(DebugStream, !.ModuleInfo, vns_var_table(VarTable),
+                Goal, !IO)
         )
     ),
     proc_info_set_goal(Goal, !VariantProcInfo),
     % We changed the scopes of the headvars we now return via pointers.
-    requantify_proc_general(ordinary_nonlocals_no_lambda, !VariantProcInfo),
+    requantify_proc_general(ord_nl_no_lambda, !VariantProcInfo),
 
     % The high-level data transformation requires instmap deltas
     % to be recomputed.
@@ -1491,71 +1479,75 @@ lco_transform_variant_proc(VariantMap, AddrOutArgs, ProcInfo,
         ( Target = target_java
         ; Target = target_csharp
         ),
-        recompute_instmap_delta_proc(do_not_recompute_atomic_instmap_deltas,
+        recompute_instmap_delta_proc(no_recomp_atomics,
             !VariantProcInfo, !ModuleInfo)
     ).
 
-:- pred make_addr_vars(list(prog_var)::in, list(mer_mode)::in,
-    list(prog_var)::out, list(mer_mode)::out, list(variant_arg)::in,
-    int::in, module_info::in, var_to_target::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out) is det.
+:- pred make_addr_vars(module_info::in, int::in,
+    list(prog_var)::in, list(prog_var)::out,
+    list(mer_mode)::in, list(mer_mode)::out,
+    list(variant_arg)::in, var_to_target::out,
+    var_table::in, var_table::out) is det.
 
-make_addr_vars([], [], [], [], AddrOutArgs, _, _, [],
-        !VarSet, !VarTypes) :-
+make_addr_vars(_, _, [], [], [], [], AddrOutArgs, [], !VarTable) :-
     expect(unify(AddrOutArgs, []), $pred, "AddrOutArgs != []").
-make_addr_vars([], [_ | _], _, _, _, _, _, _, !VarSet, !VarTypes) :-
+make_addr_vars(_, _, [], _, [_ | _], _, _, _, !VarTable) :-
     unexpected($pred, "mismatched lists").
-make_addr_vars([_ | _], [], _, _, _, _, _, _, !VarSet, !VarTypes) :-
+make_addr_vars(_, _, [_ | _], _, [], _, _, _, !VarTable) :-
     unexpected($pred, "mismatched lists").
-make_addr_vars([HeadVar0 | HeadVars0], [Mode0 | Modes0],
-        [HeadVar | HeadVars], [Mode | Modes], !.AddrOutArgs,
-        NextOutArgNum, ModuleInfo, VarToAddr, !VarSet, !VarTypes) :-
-    lookup_var_type(!.VarTypes, HeadVar0, HeadVarType),
+make_addr_vars(ModuleInfo, NextOutArgNum,
+        [HeadVar0 | HeadVars0], [HeadVar | HeadVars],
+        [Mode0 | Modes0], [Mode | Modes],
+        !.AddrOutArgs, VarToAddr, !VarTable) :-
+    lookup_var_entry(!.VarTable, HeadVar0, HeadVarEntry0),
+    HeadVarType = HeadVarEntry0 ^ vte_type,
     mode_to_top_functor_mode(ModuleInfo, Mode0, HeadVarType, TopFunctorMode),
     (
         TopFunctorMode = top_in,
         HeadVar = HeadVar0,
         Mode = Mode0,
-        make_addr_vars(HeadVars0, Modes0, HeadVars, Modes, !.AddrOutArgs,
-            NextOutArgNum, ModuleInfo, VarToAddr, !VarSet, !VarTypes)
+        make_addr_vars(ModuleInfo, NextOutArgNum,
+            HeadVars0, HeadVars, Modes0, Modes,
+            !.AddrOutArgs, VarToAddr, !VarTable)
     ;
         TopFunctorMode = top_out,
         ( if
             !.AddrOutArgs = [AddrOutArg | !:AddrOutArgs],
             AddrOutArg = variant_arg(NextOutArgNum, MaybeFieldId)
         then
-            varset.lookup_name(!.VarSet, HeadVar0, Name),
-            AddrName = "AddrOf" ++ Name,
-            varset.new_named_var(AddrName, AddrVar, !VarSet),
-            HeadVar = AddrVar,
-            lookup_var_type(!.VarTypes, HeadVar0, OldType),
+            HeadVarName = var_entry_name(HeadVar0, HeadVarEntry0),
+            AddrVarName = "AddrOf" ++ HeadVarName,
             (
                 MaybeFieldId = no,
                 % For low-level data we replace the output argument with a
                 % store_at_ref_type(T) input argument.
-                add_var_type(AddrVar, make_ref_type(OldType), !VarTypes),
+                AddrVarType = make_ref_type(HeadVarType),
+                AddrVarTypeIsDummy = is_not_dummy_type,
                 Mode = in_mode
             ;
                 MaybeFieldId = yes(field_id(AddrVarType, ConsId, ArgNum)),
                 % For high-level data we replace the output argument with a
                 % partially instantiated structure. The structure has one
                 % argument left unfilled.
-                add_var_type(AddrVar, AddrVarType, !VarTypes),
+                AddrVarTypeIsDummy = is_type_a_dummy(ModuleInfo, AddrVarType),
                 BoundInst = bound_inst_with_free_arg(ConsId, ArgNum),
                 InitialInst = bound(shared, inst_test_no_results, [BoundInst]),
                 Mode = from_to_mode(InitialInst, ground_inst)
             ),
-            make_addr_vars(HeadVars0, Modes0, HeadVars, Modes,
-                !.AddrOutArgs, NextOutArgNum + 1, ModuleInfo,
-                VarToAddrTail, !VarSet, !VarTypes),
+            AddrVarEntry = vte(AddrVarName, AddrVarType, AddrVarTypeIsDummy),
+            add_var_entry(AddrVarEntry, AddrVar, !VarTable),
+            HeadVar = AddrVar,
+            make_addr_vars(ModuleInfo, NextOutArgNum + 1,
+                HeadVars0, HeadVars, Modes0, Modes,
+                !.AddrOutArgs, VarToAddrTail, !VarTable),
             VarToAddrHead = HeadVar0 - store_target(AddrVar, MaybeFieldId),
             VarToAddr = [VarToAddrHead | VarToAddrTail]
         else
             HeadVar = HeadVar0,
             Mode = Mode0,
-            make_addr_vars(HeadVars0, Modes0, HeadVars, Modes,
-                !.AddrOutArgs, NextOutArgNum + 1, ModuleInfo,
-                VarToAddr, !VarSet, !VarTypes)
+            make_addr_vars(ModuleInfo, NextOutArgNum + 1,
+                HeadVars0, HeadVars, Modes0, Modes,
+                !.AddrOutArgs, VarToAddr, !VarTable)
         )
     ;
         TopFunctorMode = top_unused,
@@ -1834,21 +1826,21 @@ lco_transform_variant_plain_call(ModuleInfo, Transforms, VariantMap, VarToAddr,
         % an address variable in place of each variable that would be ground by
         % the call.
         GoalExpr0 = plain_call(CallPredId, CallProcId, ArgVars, Builtin,
-            UnifyContext, SymName),
+            UnifyContext, _SymName),
         CallPredProcId = proc(CallPredId, CallProcId),
         module_info_proc_info(ModuleInfo, CallPredId, CallProcId,
             CalleeProcInfo),
-        proc_info_get_vartypes(!.ProcInfo, VarTypes),
+        proc_info_get_var_table(!.ProcInfo, VarTable),
         proc_info_get_argmodes(CalleeProcInfo, CalleeArgModes),
         ( if
-            multi_map.search(VariantMap, CallPredProcId, ExistingVariants),
-            classify_proc_call_args(ModuleInfo, VarTypes,
+            multi_map.search(VariantMap, CallPredProcId, ExistingVariantIds),
+            classify_proc_call_args(ModuleInfo, VarTable,
                 ArgVars, CalleeArgModes,
                 _InArgVars, OutArgVars, _UnusedArgVars),
             grounding_to_variant_args(GroundingVarToAddr, 1, OutArgVars, Subst,
                 VariantArgVars, VariantArgs),
-            match_existing_variant(ExistingVariants, VariantArgs,
-                ExistingVariant),
+            match_existing_variant(ExistingVariantIds, VariantArgs,
+                ExistingVariantId),
 
             % The need for the test done by the rest of this condition
             % is explained by the comment on the variant_transforms type.
@@ -1859,8 +1851,9 @@ lco_transform_variant_plain_call(ModuleInfo, Transforms, VariantMap, VarToAddr,
             set_of_var.is_empty(NeededOutArgVarsSet)
         then
             rename_var_list(need_not_rename, Subst, ArgVars, CallArgVars),
-            get_variant_id_and_name(ExistingVariant, SymName,
-                proc(VariantPredId, VariantProcId), VariantSymName),
+            ExistingVariantId = variant_id(_, VariantPredProcId,
+                VariantSymName),
+            VariantPredProcId = proc(VariantPredId, VariantProcId),
             GoalExpr = plain_call(VariantPredId, VariantProcId, CallArgVars,
                 Builtin, UnifyContext, VariantSymName),
 
@@ -1950,15 +1943,15 @@ make_store_goal(ModuleInfo, InstMap, GroundVar - StoreTarget, Goal,
     (
         % Low-level data.
         MaybeFieldId = no,
-        generate_simple_call(ModuleInfo, mercury_private_builtin_module,
-            "store_at_ref_impure", pf_predicate, only_mode, detism_det,
-            purity_impure, [AddrVar, GroundVar], [],
-            instmap_delta_bind_vars([]), term.context_init, Goal)
+        generate_plain_call(ModuleInfo, pf_predicate,
+            mercury_private_builtin_module, "store_at_ref_impure",
+            [], [AddrVar, GroundVar], instmap_delta_bind_vars([]), only_mode,
+            detism_det, purity_impure, [], dummy_context, Goal)
     ;
         % High-level data.
         MaybeFieldId = yes(field_id(AddrVarType, ConsId, ArgNum)),
         get_cons_id_arg_types(ModuleInfo, AddrVarType, ConsId, ArgTypes),
-        make_unification_args(GroundVar, ArgNum, 1, ArgTypes,
+        make_unification_args(ModuleInfo, GroundVar, ArgNum, 1, ArgTypes,
             ArgVars, ArgModes, !ProcInfo),
 
         RHS = rhs_functor(ConsId, is_not_exist_constr, ArgVars),
@@ -1982,11 +1975,11 @@ make_store_goal(ModuleInfo, InstMap, GroundVar - StoreTarget, Goal,
         Goal = hlds_goal(GoalExpr, GoalInfo)
     ).
 
-:- pred make_unification_args(prog_var::in, int::in, int::in,
+:- pred make_unification_args(module_info::in, prog_var::in, int::in, int::in,
     list(mer_type)::in, list(prog_var)::out, list(unify_mode)::out,
     proc_info::in, proc_info::out) is det.
 
-make_unification_args(GroundVar, TargetArgNum, CurArgNum, ArgTypes,
+make_unification_args(ModuleInfo, GroundVar, TargetArgNum, CurArgNum, ArgTypes,
         ArgVars, ArgModes, !ProcInfo) :-
     (
         ArgTypes = [],
@@ -1994,26 +1987,29 @@ make_unification_args(GroundVar, TargetArgNum, CurArgNum, ArgTypes,
         ArgModes = []
     ;
         ArgTypes = [ArgType | ArgTypesTail],
-        make_unification_args(GroundVar, TargetArgNum, CurArgNum + 1,
-            ArgTypesTail, ArgVarsTail, ArgModesTail, !ProcInfo),
-        make_unification_arg(GroundVar, TargetArgNum, CurArgNum,
-            ArgType, Var, ArgMode, !ProcInfo),
+        make_unification_args(ModuleInfo, GroundVar, TargetArgNum,
+            CurArgNum + 1, ArgTypesTail, ArgVarsTail, ArgModesTail, !ProcInfo),
+        make_unification_arg(ModuleInfo, GroundVar, TargetArgNum,
+            CurArgNum, ArgType, Var, ArgMode, !ProcInfo),
         ArgVars = [Var | ArgVarsTail],
         ArgModes = [ArgMode | ArgModesTail]
     ).
 
-:- pred make_unification_arg(prog_var::in, int::in, int::in, mer_type::in,
-    prog_var::out, unify_mode::out, proc_info::in, proc_info::out) is det.
+:- pred make_unification_arg(module_info::in, prog_var::in, int::in, int::in,
+    mer_type::in, prog_var::out, unify_mode::out,
+    proc_info::in, proc_info::out) is det.
 
-make_unification_arg(GroundVar, TargetArgNum, CurArgNum, ArgType,
-        Var, UnifyMode, !ProcInfo) :-
+make_unification_arg(ModuleInfo, GroundVar, TargetArgNum, CurArgNum,
+        ArgType, Var, UnifyMode, !ProcInfo) :-
     ( if CurArgNum = TargetArgNum then
         Var = GroundVar,
         UnifyMode = unify_modes_li_lf_ri_rf(free_inst, ground_inst,
             ground_inst, ground_inst)
     else
         % Bind other arguments to fresh variables.
-        proc_info_create_var_from_type(ArgType, no, Var, !ProcInfo),
+        ArgTypeIsDummy = is_type_a_dummy(ModuleInfo, ArgType),
+        proc_info_create_var_from_type("", ArgType, ArgTypeIsDummy,
+            Var, !ProcInfo),
         UnifyMode = unify_modes_li_lf_ri_rf(ground_inst, ground_inst,
             free_inst, ground_inst)
     ).

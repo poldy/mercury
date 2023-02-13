@@ -19,8 +19,9 @@
 :- import_module ml_backend.ml_global_data.
 :- import_module ml_backend.mlds.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
+:- import_module io.
 :- import_module list.
 
 %---------------------------------------------------------------------------%
@@ -28,7 +29,7 @@
     % Generate MLDS definitions for all the non-imported predicates
     % (and functions) in the HLDS.
     %
-:- pred ml_gen_preds(mlds_target_lang::in,
+:- pred ml_gen_preds(io.text_output_stream::in, mlds_target_lang::in,
     ml_const_struct_map::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out,
     module_info::in, module_info::out,
@@ -47,7 +48,6 @@
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
@@ -62,6 +62,7 @@
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -72,18 +73,31 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-ml_gen_preds(Target, ConstStructMap, FuncDefns,
+ml_gen_preds(ProgressStream, Target, ConstStructMap, FuncDefns,
         !GlobalData, !ModuleInfo, !Specs) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.to_sorted_assoc_list(PredTable0, PredIdInfos0),
-    ml_find_procs_for_code_gen(PredIdInfos0, PredIdInfos, [], PredProcIds),
-    map.from_sorted_assoc_list(PredIdInfos, PredTable),
-    module_info_set_preds(PredTable, !ModuleInfo),
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    map.to_sorted_assoc_list(PredIdTable0, PredIdInfos0),
+    % For the reason documented by the comment on requantify_codegen_proc,
+    % we must requantify the body of every procedure we intend to generate
+    % code for. We don't *have* to put the requantified proc_infos back
+    % into !ModuleInfo; we *could* call requantify_proc_general from
+    % the initial part of ml_gen_proc. That would work in every way but one:
+    % it would make it harder to debug the MLDS code generator. This is
+    % because the MLDS code we generate for a procedure *has* to be for
+    % the requantified version of the procedure body, but unless we put
+    % that version back into !ModuleInfo, neither any pre-code-gen nor
+    % any post-code-gen HLDS dumps would contain that version. Putting
+    % the requantified proc_infos back into !ModuleInfo here makes them
+    % available in the post-code-gen HLDS dump.
+    ml_find_and_requantify_procs_for_code_gen(PredIdInfos0, PredIdInfos,
+        [], PredProcIds),
+    map.from_sorted_assoc_list(PredIdInfos, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo),
 
     list.sort(PredProcIds, SortedPredProcIds),
     set.sorted_list_to_set(SortedPredProcIds, CodeGenPredProcIds),
@@ -105,17 +119,17 @@ ml_gen_preds(Target, ConstStructMap, FuncDefns,
         OptTailCalls = no_tail_call_opt_in_code_gen
     ),
     get_default_warn_parms(Globals, DefaultWarnParams),
-    ml_gen_sccs(!.ModuleInfo, OptTailCalls, DefaultWarnParams, Target,
-        ConstStructMap, BottomUpSCCsWithEntryPoints,
+    ml_gen_sccs(ProgressStream, !.ModuleInfo, OptTailCalls, DefaultWarnParams,
+        Target, ConstStructMap, BottomUpSCCsWithEntryPoints,
         [], FuncDefns, !GlobalData, !Specs).
 
-:- pred ml_find_procs_for_code_gen(
+:- pred ml_find_and_requantify_procs_for_code_gen(
     assoc_list(pred_id, pred_info)::in,
     assoc_list(pred_id, pred_info)::out,
     list(pred_proc_id)::in, list(pred_proc_id)::out) is det.
 
-ml_find_procs_for_code_gen([], [], !CodeGenPredProcIds).
-ml_find_procs_for_code_gen([PredIdInfo0 | PredIdInfos0],
+ml_find_and_requantify_procs_for_code_gen([], [], !CodeGenPredProcIds).
+ml_find_and_requantify_procs_for_code_gen([PredIdInfo0 | PredIdInfos0],
         [PredIdInfo | PredIdInfos], !CodeGenPredProcIds) :-
     PredIdInfo0 = PredId - PredInfo0,
     pred_info_get_status(PredInfo0, PredStatus),
@@ -157,7 +171,8 @@ ml_find_procs_for_code_gen([PredIdInfo0 | PredIdInfos0],
         PredProcIds = list.map((func(ProcId) = proc(PredId, ProcId)), ProcIds),
         !:CodeGenPredProcIds = PredProcIds ++ !.CodeGenPredProcIds
     ),
-    ml_find_procs_for_code_gen(PredIdInfos0, PredIdInfos, !CodeGenPredProcIds).
+    ml_find_and_requantify_procs_for_code_gen(PredIdInfos0, PredIdInfos,
+        !CodeGenPredProcIds).
 
     % The specification of the HLDS allows goal_infos to overestimate
     % the set of non-locals. Such overestimates are bad for us for two reasons:
@@ -177,41 +192,43 @@ ml_find_procs_for_code_gen([PredIdInfo0 | PredIdInfos0],
 
 requantify_codegen_proc(ProcId, !ProcTable) :-
     map.lookup(!.ProcTable, ProcId, ProcInfo0),
-    requantify_proc_general(ordinary_nonlocals_no_lambda, ProcInfo0, ProcInfo),
+    requantify_proc_general(ord_nl_no_lambda, ProcInfo0, ProcInfo),
     map.det_update(ProcId, ProcInfo, !ProcTable).
 
 :- type maybe_tail_call_opt_in_code_gen
     --->    no_tail_call_opt_in_code_gen
     ;       tail_call_opt_in_code_gen.
 
-:- pred ml_gen_sccs(module_info::in, maybe_tail_call_opt_in_code_gen::in,
-    warn_non_tail_rec_params::in, mlds_target_lang::in,
-    ml_const_struct_map::in, list(scc_with_entry_points)::in,
+:- pred ml_gen_sccs(io.text_output_stream::in, module_info::in,
+    maybe_tail_call_opt_in_code_gen::in, warn_non_tail_rec_params::in,
+    mlds_target_lang::in, ml_const_struct_map::in,
+    list(scc_with_entry_points)::in,
     list(mlds_function_defn)::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-ml_gen_sccs(_, _, _, _, _, [], !FuncDefns, !GlobalData, !Specs).
-ml_gen_sccs(ModuleInfo, OptTailCalls, DefaultWarnParams, Target,
-        ConstStructMap, [SCCE | SCCEs], !FuncDefns, !GlobalData, !Specs) :-
-    ml_gen_scc(ModuleInfo, OptTailCalls, DefaultWarnParams, Target,
-        ConstStructMap, SCCE, !FuncDefns, !GlobalData, !Specs),
-    ml_gen_sccs(ModuleInfo, OptTailCalls, DefaultWarnParams, Target,
-        ConstStructMap, SCCEs, !FuncDefns, !GlobalData, !Specs).
+ml_gen_sccs(_, _, _, _, _, _, [], !FuncDefns, !GlobalData, !Specs).
+ml_gen_sccs(ProgressStream, ModuleInfo, OptTailCalls, DefaultWarnParams,
+        Target, ConstStructMap, [SCCE | SCCEs],
+        !FuncDefns, !GlobalData, !Specs) :-
+    ml_gen_scc(ProgressStream, ModuleInfo, OptTailCalls, DefaultWarnParams,
+        Target, ConstStructMap, SCCE, !FuncDefns, !GlobalData, !Specs),
+    ml_gen_sccs(ProgressStream, ModuleInfo, OptTailCalls, DefaultWarnParams,
+        Target, ConstStructMap, SCCEs, !FuncDefns, !GlobalData, !Specs).
 
 %---------------------------------------------------------------------------%
 
-:- pred ml_gen_scc(module_info::in, maybe_tail_call_opt_in_code_gen::in,
-    warn_non_tail_rec_params::in, mlds_target_lang::in,
-    ml_const_struct_map::in, scc_with_entry_points::in,
+:- pred ml_gen_scc(io.text_output_stream::in, module_info::in,
+    maybe_tail_call_opt_in_code_gen::in, warn_non_tail_rec_params::in,
+    mlds_target_lang::in, ml_const_struct_map::in, scc_with_entry_points::in,
     list(mlds_function_defn)::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-ml_gen_scc(ModuleInfo, OptTailCalls, DefaultWarnParams, Target,
+ml_gen_scc(ProgressStream, ModuleInfo, OptTailCalls, DefaultWarnParams, Target,
         ConstStructMap, SCCE, !FuncDefns, !GlobalData, !Specs) :-
-    ml_gen_scc_code(ModuleInfo, OptTailCalls, Target, ConstStructMap, SCCE,
-        InSccMap, !FuncDefns, !GlobalData),
+    ml_gen_scc_code(ProgressStream, ModuleInfo, OptTailCalls, Target,
+        ConstStructMap, SCCE, InSccMap, !FuncDefns, !GlobalData),
     map.foldl_values(gather_nontail_rec_calls, InSccMap, [], NonTailRecCalls),
     ( if
         % If we were trying to implement recursive calls as tail calls, ...
@@ -262,14 +279,14 @@ report_nontail_rec_call(ModuleInfo, DefaultWarnParams, NonTailRecCall,
 
 %---------------------------------------------------------------------------%
 
-:- pred ml_gen_scc_code(module_info::in, maybe_tail_call_opt_in_code_gen::in,
-    mlds_target_lang::in, ml_const_struct_map::in, scc_with_entry_points::in,
-    in_scc_map::out,
+:- pred ml_gen_scc_code(io.text_output_stream::in, module_info::in,
+    maybe_tail_call_opt_in_code_gen::in, mlds_target_lang::in,
+    ml_const_struct_map::in, scc_with_entry_points::in, in_scc_map::out,
     list(mlds_function_defn)::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out) is det.
 
-ml_gen_scc_code(ModuleInfo, OptTailCalls, Target, ConstStructMap, SCCE,
-        !:InSccMap, !FuncDefns, !GlobalData) :-
+ml_gen_scc_code(ProgressStream, ModuleInfo, OptTailCalls, Target,
+        ConstStructMap, SCCE, !:InSccMap, !FuncDefns, !GlobalData) :-
     SCCE = scc_with_entry_points(PredProcIds, CalledFromHigherSCCs,
         ExportedProcs),
     set.union(CalledFromHigherSCCs, ExportedProcs, SCCEntryProcs),
@@ -278,8 +295,8 @@ ml_gen_scc_code(ModuleInfo, OptTailCalls, Target, ConstStructMap, SCCE,
     (
         OptTailCalls = no_tail_call_opt_in_code_gen,
         set.foldl3(
-            ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap,
-                no_tail_rec),
+            ml_gen_proc_lookup(ProgressStream, ModuleInfo, Target,
+                ConstStructMap, no_tail_rec),
             PredProcIds, !FuncDefns, !GlobalData, !InSccMap)
     ;
         OptTailCalls = tail_call_opt_in_code_gen,
@@ -306,13 +323,15 @@ ml_gen_scc_code(ModuleInfo, OptTailCalls, Target, ConstStructMap, SCCE,
 
         % Translate the procedures we cannot apply tail call optimization to.
         list.foldl3(
-            ml_gen_proc(ModuleInfo, Target, ConstStructMap, no_tail_rec),
+            ml_gen_proc(ProgressStream, ModuleInfo, Target, ConstStructMap,
+                no_tail_rec),
             NonePredProcIdInfos, !FuncDefns, !GlobalData, !InSccMap),
 
         % Translate the procedures to which we can apply only self-tail-call
         % optimization.
         list.foldl3(
-            ml_gen_proc(ModuleInfo, Target, ConstStructMap, self_tail_rec),
+            ml_gen_proc(ProgressStream, ModuleInfo, Target, ConstStructMap,
+                self_tail_rec),
             SelfPredProcIdInfos, !FuncDefns, !GlobalData, !InSccMap),
 
         % Translate the procedures to which we can apply mutual-tail-call
@@ -336,20 +355,20 @@ ml_gen_scc_code(ModuleInfo, OptTailCalls, Target, ConstStructMap, SCCE,
         partition_tsccs(SemiTSCCEntries,
             SemiLonePredProcIds, SemiNonTrivialTSCCEntries),
         list.foldl3(
-            ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap,
-                self_tail_rec),
+            ml_gen_proc_lookup(ProgressStream, ModuleInfo, Target,
+                ConstStructMap, self_tail_rec),
             DetLonePredProcIds, !FuncDefns, !GlobalData, !InSccMap),
         list.foldl3(
-            ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap,
-                self_tail_rec),
+            ml_gen_proc_lookup(ProgressStream, ModuleInfo, Target,
+                ConstStructMap, self_tail_rec),
             SemiLonePredProcIds, !FuncDefns, !GlobalData, !InSccMap),
         list.foldl3(
-            ml_gen_tscc(ModuleInfo, Target, ConstStructMap, SCCEntryProcs,
-                tscc_det),
+            ml_gen_tscc(ProgressStream, ModuleInfo, Target, ConstStructMap,
+                SCCEntryProcs, tscc_det),
             DetNonTrivialTSCCEntries, !FuncDefns, !GlobalData, !InSccMap),
         list.foldl3(
-            ml_gen_tscc(ModuleInfo, Target, ConstStructMap, SCCEntryProcs,
-                tscc_semi),
+            ml_gen_tscc(ProgressStream, ModuleInfo, Target, ConstStructMap,
+                SCCEntryProcs, tscc_semi),
             SemiNonTrivialTSCCEntries, !FuncDefns, !GlobalData, !InSccMap)
     ).
 
@@ -493,21 +512,22 @@ partition_tsccs([TSCC | TSCCs], !:LonePredProcIds, !:NonTrivialTSCCS) :-
 % Code for handling individual procedures.
 %
 
-:- pred ml_gen_proc_lookup(module_info::in, mlds_target_lang::in,
-    ml_const_struct_map::in, none_or_self_tail_rec::in, pred_proc_id::in,
+:- pred ml_gen_proc_lookup(io.text_output_stream::in, module_info::in,
+    mlds_target_lang::in, ml_const_struct_map::in,
+    none_or_self_tail_rec::in, pred_proc_id::in,
     list(mlds_function_defn)::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out,
     in_scc_map::in, in_scc_map::out) is det.
 
-ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap, NoneOrSelf,
-        PredProcId, !FuncDefns, !GlobalData, !InSccMap) :-
+ml_gen_proc_lookup(ProgressStream, ModuleInfo, Target, ConstStructMap,
+        NoneOrSelf, PredProcId, !FuncDefns, !GlobalData, !InSccMap) :-
     module_info_pred_proc_info(ModuleInfo, PredProcId, PredInfo, ProcInfo),
     proc_info_get_goal(ProcInfo, Goal),
     Goal = hlds_goal(_GoalExpr, GoalInfo),
     ProcContext = goal_info_get_context(GoalInfo),
     PredProcIdInfo =
         pred_proc_id_info(PredProcId, PredInfo, ProcInfo, ProcContext),
-    ml_gen_proc(ModuleInfo, Target, ConstStructMap,
+    ml_gen_proc(ProgressStream, ModuleInfo, Target, ConstStructMap,
         NoneOrSelf, PredProcIdInfo, !FuncDefns, !GlobalData, !InSccMap).
 
 %---------------------%
@@ -516,18 +536,19 @@ ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap, NoneOrSelf,
     --->    no_tail_rec
     ;       self_tail_rec.
 
-:- pred ml_gen_proc(module_info::in, mlds_target_lang::in,
-    ml_const_struct_map::in, none_or_self_tail_rec::in, pred_proc_id_info::in,
+:- pred ml_gen_proc(io.text_output_stream::in, module_info::in,
+    mlds_target_lang::in, ml_const_struct_map::in,
+    none_or_self_tail_rec::in, pred_proc_id_info::in,
     list(mlds_function_defn)::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out,
     in_scc_map::in, in_scc_map::out) is det.
 
-ml_gen_proc(ModuleInfo, Target, ConstStructMap, NoneOrSelf,
+ml_gen_proc(ProgressStream, ModuleInfo, Target, ConstStructMap, NoneOrSelf,
         PredProcIdInfo, !FuncDefns, !GlobalData, !InSccMap) :-
     PredProcIdInfo =
         pred_proc_id_info(PredProcId, PredInfo, ProcInfo, ProcContext),
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
+        maybe_write_proc_progress_message(ProgressStream, ModuleInfo,
             "Generating MLDS code for", PredProcId, !IO)
     ),
 
@@ -609,9 +630,8 @@ ml_gen_proc(ModuleInfo, Target, ConstStructMap, NoneOrSelf,
                 CopiedOutputVars, CopiedOutputVarRvals),
             ml_append_return_statement(CodeModel, ProcContext,
                 CopiedOutputVarRvals, GoalStmts0, GoalStmts),
-            ml_gen_local_var_defns_for_copied_output_vars(ProcInfo,
-                ProcContext, ArgTuples, CopiedOutputVars, OutputVarLocalDefns,
-                !Info),
+            ml_gen_local_var_defns_for_copied_output_vars(!.Info, ProcContext,
+                ArgTuples, CopiedOutputVars, OutputVarLocalDefns, !Info),
             ml_gen_maybe_local_var_defn_for_succeeded(!.Info, ProcContext,
                 SucceededVarDefns),
             LocalVarDefns = SucceededVarDefns ++ OutputVarLocalDefns ++
@@ -634,14 +654,16 @@ ml_gen_proc(ModuleInfo, Target, ConstStructMap, NoneOrSelf,
 :- pred get_var_mlds_lval_and_type(ml_gen_info::in, prog_var::in,
     pair(mlds_lval, mer_type)::out) is det.
 
-get_var_mlds_lval_and_type(Info, Var, VarLval - Type) :-
-    ml_gen_var(Info, Var, VarLval),
-    ml_variable_type(Info, Var, Type).
+get_var_mlds_lval_and_type(Info, Var, VarLval - VarType) :-
+    ml_gen_info_get_var_table(Info, VarTable),
+    lookup_var_entry(VarTable, Var, VarEntry),
+    ml_gen_var(Info, Var, VarEntry, VarLval),
+    VarType = VarEntry ^ vte_type.
 
 :- pred get_var_rval(ml_gen_info::in, prog_var::in, mlds_rval::out) is det.
 
 get_var_rval(Info, Var, VarRval) :-
-    ml_gen_var(Info, Var, VarLval),
+    ml_gen_var_direct(Info, Var, VarLval),
     VarRval = ml_lval(VarLval).
 
 :- pred compute_initial_tail_rec_map_for_none_or_self(module_info::in,
@@ -746,15 +768,16 @@ construct_func_defn(ModuleInfo, PredProcIdInfo, FuncParams, FuncBody,
     --->    tscc_det
     ;       tscc_semi.
 
-:- pred ml_gen_tscc(module_info::in, mlds_target_lang::in,
-    ml_const_struct_map::in, set(pred_proc_id)::in, tscc_code_model::in,
-    scc_with_entry_points::in,
+:- pred ml_gen_tscc(io.text_output_stream::in, module_info::in,
+    mlds_target_lang::in, ml_const_struct_map::in, set(pred_proc_id)::in,
+    tscc_code_model::in, scc_with_entry_points::in,
     list(mlds_function_defn)::in, list(mlds_function_defn)::out,
     ml_global_data::in, ml_global_data::out,
     in_scc_map::in, in_scc_map::out) is det.
 
-ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
-        TsccCodeModel, TSCCE, !FuncDefns, !GlobalData, !InSccMap) :-
+ml_gen_tscc(ProgressStream, ModuleInfo, Target, ConstStructMap,
+        _SCCEntryPredProcIds, TsccCodeModel, TSCCE,
+        !FuncDefns, !GlobalData, !InSccMap) :-
     TSCCE = scc_with_entry_points(PredProcIds, _CalledFromHigherTSCCs,
         _ExportedTSCCPredProcIds),
     PredProcIdList = set.to_sorted_list(PredProcIds),
@@ -765,8 +788,9 @@ ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
         PredProcIdList = [SinglePredProcId],
         % For a TSCC containing just one procedure, we neither need nor want
         % the extra overhead required for managing *mutual* tail recursion.
-        ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap, self_tail_rec,
-            SinglePredProcId, !FuncDefns, !GlobalData, !InSccMap)
+        ml_gen_proc_lookup(ProgressStream, ModuleInfo, Target, ConstStructMap,
+            self_tail_rec, SinglePredProcId, !FuncDefns, !GlobalData,
+            !InSccMap)
     ;
         PredProcIdList = [_, _ | _],
         % Try to compile each procedure in the TSCC into the MLDS code
@@ -826,7 +850,7 @@ ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
         % at least, I (zs) don't see that the potential benefits justify
         % the costs.
         %
-        ml_gen_tscc_trial(ModuleInfo, Target, ConstStructMap,
+        ml_gen_tscc_trial(ProgressStream, ModuleInfo, Target, ConstStructMap,
             TsccCodeModel, PredProcIds, _NonTailEntryPredProcIds,
             NoMutualPredProcIds, MutualPredProcIds, MutualPredProcCodes,
             CanGenerateTscc, MutualEnvVarNames, MutualClosureWrapperFuncDefns,
@@ -890,7 +914,7 @@ ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
             StartCommentStmts = [],
 
             list.map(
-                construct_tscc_entry_proc(ModuleInfo, LoopKind,
+                construct_tscc_entry_proc(ProgressStream, ModuleInfo, LoopKind,
                     MutualPredProcCodes, MutualEnvVarNames, StartCommentStmts),
                 set.to_sorted_list(MutualPredProcIds), TSCCFuncDefns),
             !:FuncDefns = MutualClosureWrapperFuncDefns ++ TSCCFuncDefns ++
@@ -898,8 +922,8 @@ ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
         ),
 
         list.foldl3(
-            ml_gen_proc_lookup(ModuleInfo, Target, ConstStructMap,
-                self_tail_rec),
+            ml_gen_proc_lookup(ProgressStream, ModuleInfo, Target,
+                ConstStructMap, self_tail_rec),
             set.to_sorted_list(OutsideTsccPredProcIds),
             !FuncDefns, !GlobalData, !InSccMap)
     ).
@@ -912,8 +936,8 @@ ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
     % label in the scheme above, but also return the information our caller
     % needs to prepare for handling caveats 1 and 2.
     %
-:- pred ml_gen_tscc_trial(module_info::in, mlds_target_lang::in,
-    ml_const_struct_map::in, tscc_code_model::in,
+:- pred ml_gen_tscc_trial(io.text_output_stream::in, module_info::in,
+    mlds_target_lang::in, ml_const_struct_map::in, tscc_code_model::in,
     set(pred_proc_id)::in, set(pred_proc_id)::out,
     set(pred_proc_id)::out, set(pred_proc_id)::out, list(pred_proc_code)::out,
     can_we_generate_code_for_tscc::out, set(string)::out,
@@ -921,8 +945,8 @@ ml_gen_tscc(ModuleInfo, Target, ConstStructMap, _SCCEntryPredProcIds,
     in_scc_map::in, in_scc_map::out,
     ml_global_data::in, ml_global_data::out) is det.
 
-ml_gen_tscc_trial(ModuleInfo, Target, ConstStructMap, TsccCodeModel,
-        PredProcIds, NonTailEntryPredProcIds,
+ml_gen_tscc_trial(ProgressStream, ModuleInfo, Target, ConstStructMap,
+        TsccCodeModel, PredProcIds, NonTailEntryPredProcIds,
         NoMutualPredProcIds, MutualPredProcIds, MutualPredProcCodes,
         CanGenerateTscc, MutualEnvVarNames,
         MutualClosureWrapperFuncDefns, LoopKind, !InSccMap, !GlobalData) :-
@@ -939,8 +963,8 @@ ml_gen_tscc_trial(ModuleInfo, Target, ConstStructMap, TsccCodeModel,
     init_ml_gen_tscc_info(ModuleInfo, !.InSccMap, tscc_self_and_mutual_rec,
         TsccInfo0),
     list.map_foldl2(
-        ml_gen_tscc_proc_code(ModuleInfo, Target, ConstStructMap,
-            TsccCodeModel, SeenAtLabelMap),
+        ml_gen_tscc_proc_code(ProgressStream, ModuleInfo, Target,
+            ConstStructMap, TsccCodeModel, SeenAtLabelMap),
         PredProcIdArgsInfos, PredProcCodes,
         !GlobalData, TsccInfo0, TsccInfo),
 
@@ -1169,7 +1193,7 @@ compute_initial_tail_rec_map_for_mutual(ModuleInfo,
     module_info_pred_proc_info(ModuleInfo, PredProcId, PredInfo, ProcInfo),
     pred_info_get_is_pred_or_func(PredInfo, PredOrFunc),
     CodeModel = proc_info_interface_code_model(ProcInfo),
-    proc_info_get_varset(ProcInfo, VarSet),
+    proc_info_get_var_table(ProcInfo, VarTable),
     proc_info_get_headvars(ProcInfo, HeadVars),
     pred_info_get_arg_types(PredInfo, HeadTypes),
     proc_info_get_argmodes(ProcInfo, HeadModes),
@@ -1179,7 +1203,7 @@ compute_initial_tail_rec_map_for_mutual(ModuleInfo,
     ProcContext = goal_info_get_context(GoalInfo),
 
     ml_gen_tscc_arg_params(ModuleInfo, PredOrFunc, CodeModel,
-        ProcContext, IdInTscc, VarSet, HeadVars, HeadTypes, HeadModes,
+        ProcContext, IdInTscc, VarTable, HeadVars, HeadTypes, HeadModes,
         ArgTuples, !OutArgNames,
         TsccInArgs, FuncParams, ReturnRvalsTypes, OutVarsTypes,
         OwnLocalVarDefns, TsccInLocalVarDefns, TsccValueLocalVarDefns,
@@ -1232,14 +1256,14 @@ compute_initial_tail_rec_map_for_mutual(ModuleInfo,
     % results in a form that our caller can join together with the MLDS code
     % we get for the *other* procedures in the TSCC.
     %
-:- pred ml_gen_tscc_proc_code(module_info::in,
+:- pred ml_gen_tscc_proc_code(io.text_output_stream::in, module_info::in,
     mlds_target_lang::in, ml_const_struct_map::in, tscc_code_model::in,
     seen_at_label_map::in, pred_proc_id_args_info::in, pred_proc_code::out,
     ml_global_data::in, ml_global_data::out,
     ml_gen_tscc_info::in, ml_gen_tscc_info::out) is det.
 
-ml_gen_tscc_proc_code(ModuleInfo, Target, ConstStructMap, TsccCodeModel,
-        SeenAtLabelMap, PredProcIdArgsInfo, PredProcCode,
+ml_gen_tscc_proc_code(ProgressStream, ModuleInfo, Target, ConstStructMap,
+        TsccCodeModel, SeenAtLabelMap, PredProcIdArgsInfo, PredProcCode,
         !GlobalData, !TsccInfo) :-
     PredProcIdArgsInfo = pred_proc_id_args_info(PredProcId, PredInfo, ProcInfo,
         ProcContext, ProcIdInTscc, ArgTuples, _FuncParams, _ReturnRvalsTypes,
@@ -1248,7 +1272,7 @@ ml_gen_tscc_proc_code(ModuleInfo, Target, ConstStructMap, TsccCodeModel,
         _CopyOutValThroughPtrStmts),
 
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
+        maybe_write_proc_progress_message(ProgressStream, ModuleInfo,
             "Generating in-TSCC MLDS code for", PredProcId, !IO)
     ),
 
@@ -1267,7 +1291,7 @@ ml_gen_tscc_proc_code(ModuleInfo, Target, ConstStructMap, TsccCodeModel,
         ),
 
         PredProcId = proc(_PredId, ProcId),
-        ProcDesc = describe_proc(PredInfo, ProcId),
+        ProcDesc = describe_proc(include_module_name, PredInfo, ProcId),
         ProcIdInTscc = proc_id_in_tscc(ProcNumInTscc),
         ProcDescComment = string.format("proc %d in TSCC: %s",
             [i(ProcNumInTscc), s(ProcDesc)]),
@@ -1319,14 +1343,14 @@ ml_gen_tscc_proc_code(ModuleInfo, Target, ConstStructMap, TsccCodeModel,
     % Given the results of translating each procedure in a TSCC into MLDS code,
     % wrap them up in an MLDS function that implements EntryProc.
     %
-:- pred construct_tscc_entry_proc(module_info::in, tail_rec_loop_kind::in,
-    list(pred_proc_code)::in, set(string)::in,
+:- pred construct_tscc_entry_proc(io.text_output_stream::in, module_info::in,
+    tail_rec_loop_kind::in, list(pred_proc_code)::in, set(string)::in,
     list(mlds_stmt)::in, pred_proc_id::in, mlds_function_defn::out) is det.
 
-construct_tscc_entry_proc(ModuleInfo, LoopKind, PredProcCodes,
+construct_tscc_entry_proc(ProgressStream, ModuleInfo, LoopKind, PredProcCodes,
         EnvVarNames, EntryProcDescComments, EntryProc, FuncDefn) :-
     trace [io(!IO)] (
-        write_proc_progress_message(ModuleInfo,
+        maybe_write_proc_progress_message(ProgressStream, ModuleInfo,
             "Generating MLDS code for", EntryProc, !IO)
     ),
 
@@ -1352,7 +1376,8 @@ construct_tscc_entry_proc(ModuleInfo, LoopKind, PredProcCodes,
         NonEntryTsccInLocalVarDefns ++ EntryTsccOutLocalVarDefns,
 
     EntryIdInTscc = proc_id_in_tscc(EntryIdInTsccNum),
-    EntryProcDesc = describe_proc_from_id(ModuleInfo, EntryProc),
+    EntryProcDesc = describe_proc_from_id(include_module_name,
+        ModuleInfo, EntryProc),
     Comment0 = string.format("The code for TSCC PROC %d: %s.",
         [i(EntryIdInTsccNum), s(EntryProcDesc)]),
     CommentStmt0 = ml_stmt_atomic(comment(Comment0), EntryProcContext),
@@ -1731,11 +1756,11 @@ ml_gen_convert_headvars([], _CopiedOutputVars, _Context, [], [], [], !Info).
 ml_gen_convert_headvars([ArgTuple | ArgTuples], CopiedOutputVars, Context,
         LocalVarDefns, InputStmts, OutputStmts, !Info) :-
     ArgTuple = var_mvar_type_mode(Var, MLDSVarName, HeadType, TopFunctorMode),
-    ml_variable_type(!.Info, Var, BodyType),
+    ml_variable_type_direct(!.Info, Var, BodyType),
     ( if
-        % An argument doesn't need any conversion if ...
+        % An argument doesn't need any conversion ...
         (
-            % ... its type is the same in the head as in the body
+            % ... if its type is the same in the head as in the body
             % (modulo contexts), or ...
             map.init(Subst0),
             type_unify(HeadType, BodyType, [], Subst0, Subst),
@@ -1781,17 +1806,14 @@ ml_gen_convert_headvars([ArgTuple | ArgTuples], CopiedOutputVars, Context,
         LocalVarDefns = ConvLocalVarDefns ++ LocalVarDefnsTail
     ).
 
-:- pred ml_gen_local_var_defns_for_copied_output_vars(proc_info::in,
+:- pred ml_gen_local_var_defns_for_copied_output_vars(ml_gen_info::in,
     prog_context::in, list(var_mvar_type_mode)::in, list(prog_var)::in,
     list(mlds_local_var_defn)::out, ml_gen_info::in, ml_gen_info::out) is det.
 
-ml_gen_local_var_defns_for_copied_output_vars(ProcInfo, Context, ArgTuples,
+ml_gen_local_var_defns_for_copied_output_vars(Info, Context, ArgTuples,
         CopiedOutputVars, OutputVarLocalDefns, !Info) :-
-    % This would generate all the local variables at the top of
-    % the function:
-    %   ml_gen_all_local_var_decls(Goal,
-    %       VarSet, VarTypes, HeadVars, MLDS_LocalVars, !Info)
-    % But instead we now generate them locally for each goal.
+    % We could generate all the local variables at the top of the function.
+    % But instead, we now generate them locally for each goal.
     % We just declare the `succeeded' var here, plus locals
     % for any output arguments that are returned by value
     % (e.g. if --nondet-copy-out is enabled, or for det function
@@ -1802,18 +1824,19 @@ ml_gen_local_var_defns_for_copied_output_vars(ProcInfo, Context, ArgTuples,
         OutputVarLocalDefns = []
     ;
         CopiedOutputVars = [_ | _],
-        proc_info_get_varset(ProcInfo, VarSet),
-        proc_info_get_vartypes(ProcInfo, VarTypes),
-        % Note that for headvars we must use the types from
+        ml_gen_info_get_var_table(Info, VarTable0),
+        % Note that for headvars, we must use the types from
         % the procedure interface, not from the procedure body.
-        HeadVars = list.map((func(var_mvar_type_mode(HV, _, _, _)) = HV),
-            ArgTuples),
-        HeadTypes = list.map((func(var_mvar_type_mode(_, _, HT, _)) = HT),
-            ArgTuples),
-        vartypes_overlay_corresponding_lists(HeadVars, HeadTypes,
-            VarTypes, UpdatedVarTypes),
-        ml_gen_local_var_decls(VarSet, UpdatedVarTypes,
-            Context, CopiedOutputVars, OutputVarLocalDefns, !Info)
+        OverrideHeadVarType =
+            ( pred(AT::in, Table0::in, Table::out) is det :-
+                AT = var_mvar_type_mode(HV, _, HT, _),
+                lookup_var_entry(Table0, HV, Entry0),
+                Entry = Entry0 ^ vte_type := HT,
+                update_var_entry(HV, Entry, Table0, Table)
+            ),
+        list.foldl(OverrideHeadVarType, ArgTuples, VarTable0, VarTable1),
+        ml_gen_local_var_decls(VarTable1, Context,
+            CopiedOutputVars, OutputVarLocalDefns, !Info)
     ).
 
 :- pred ml_gen_maybe_local_var_defn_for_succeeded(ml_gen_info::in,
@@ -1905,7 +1928,7 @@ does_case_contain_nested_func_defn(Case, !ContainsNestedFuncs) :-
 :- pragma consider_used(pred(describe_pred_proc_ids/5)).
 
 describe_pred_proc_ids(ModuleInfo, Msg, PredProcIds, !StartCommentStmts) :-
-    MsgStmt = ml_stmt_atomic(comment(Msg), term.context_init),
+    MsgStmt = ml_stmt_atomic(comment(Msg), dummy_context),
     DescStmts = list.map(pred_proc_id_desc(ModuleInfo),
         set.to_sorted_list(PredProcIds)),
     !:StartCommentStmts = !.StartCommentStmts ++ [MsgStmt | DescStmts].
@@ -1913,8 +1936,9 @@ describe_pred_proc_ids(ModuleInfo, Msg, PredProcIds, !StartCommentStmts) :-
 :- func pred_proc_id_desc(module_info, pred_proc_id) = mlds_stmt.
 
 pred_proc_id_desc(ModuleInfo, PredProcId) = DescStmt :-
-    Comment = "  " ++ describe_proc_from_id(ModuleInfo, PredProcId),
-    DescStmt = ml_stmt_atomic(comment(Comment), term.context_init).
+    Comment = "  " ++ describe_proc_from_id(include_module_name,
+        ModuleInfo, PredProcId),
+    DescStmt = ml_stmt_atomic(comment(Comment), dummy_context).
 
 %---------------------------------------------------------------------------%
 :- end_module ml_backend.ml_proc_gen.

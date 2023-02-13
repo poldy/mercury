@@ -54,55 +54,6 @@
 
 %---------------------------------------------------------------------------%
 
-:- pred mlds_output_class_decl_opts(mlds_to_c_opts::in,
-    io.text_output_stream::in, indent::in, mlds_module_name::in,
-    mlds_class_defn::in, io::di, io::uo) is det.
-:- pragma consider_used(pred(mlds_output_class_decl_opts/7)).
-
-mlds_output_class_decl_opts(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
-    ClassDefn = mlds_class_defn(ClassName, Arity, Context, Flags, Kind,
-        _Imports, _Inherits, _Implements,
-        _TypeParams, _MemberFields, _MemberClasses, _MemberMethods, _Ctors),
-    % ANSI C does not permit forward declarations of enumeration types.
-    % So we just skip those. Currently they are not needed since we do not
-    % actually use the enum types.
-    ( if Kind = mlds_enum then
-        true
-    else
-        c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
-        output_n_indents(Stream, Indent, !IO),
-        mlds_output_class_decl_flags(Opts, Stream, Flags, forward_decl, !IO),
-        mlds_output_class_decl(Stream, Indent, ModuleName, ClassName,
-            Arity, ClassDefn, !IO),
-        io.write_string(Stream, ";\n", !IO)
-    ).
-
-:- pred mlds_output_class_decl(io.text_output_stream::in, indent::in,
-    mlds_module_name::in, mlds_class_name::in, arity::in, mlds_class_defn::in,
-    io::di, io::uo) is det.
-
-mlds_output_class_decl(Stream, _Indent, ModuleName, ClassName, Arity,
-        ClassDefn, !IO) :-
-    ClassKind = ClassDefn ^ mcd_kind,
-    (
-        ClassKind = mlds_enum,
-        io.write_string(Stream, "enum ", !IO),
-        output_qual_name_prefix_c(Stream, ModuleName, !IO),
-        mlds_output_class_name_arity(Stream, ClassName, Arity, !IO),
-        io.write_string(Stream, "_e", !IO)
-    ;
-        ( ClassKind = mlds_class
-        ; ClassKind = mlds_interface
-        ; ClassKind = mlds_struct
-        ),
-        io.write_string(Stream, "struct ", !IO),
-        output_qual_name_prefix_c(Stream, ModuleName, !IO),
-        mlds_output_class_name_arity(Stream, ClassName, Arity, !IO),
-        io.write_string(Stream, "_s", !IO)
-    ).
-
-%---------------------------------------------------------------------------%
-
 :- pred mlds_output_class_defns(mlds_to_c_opts::in, io.text_output_stream::in,
     indent::in, mlds_module_name::in, list(mlds_class_defn)::in,
     io::di, io::uo) is det.
@@ -114,27 +65,33 @@ mlds_output_class_defns(Opts, Stream, Indent, ModuleName,
     mlds_output_class_defns(Opts, Stream, Indent, ModuleName, ClassDefns, !IO).
 
 mlds_output_class_defn(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
-    ClassDefn = mlds_class_defn(_ClassName, _Arity, Context, Flags, _Kind,
-        _Imports, _Inherits, _Implements, _TypeParams,
-        _MemberFields, _MemberClasses, _MemberMethods, _Ctors),
-    io.nl(Stream, !IO),
-    c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
-    output_n_indents(Stream, Indent, !IO),
-    mlds_output_class_decl_flags(Opts, Stream, Flags, definition, !IO),
-    mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO).
-
-%---------------------------------------------------------------------------%
-
-:- pred mlds_output_class(mlds_to_c_opts::in, io.text_output_stream::in,
-    indent::in, mlds_module_name::in, mlds_class_defn::in,
-    io::di, io::uo) is det.
-
-mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
     ClassDefn = mlds_class_defn(ClassName, ClassArity, Context, _Flags,
-        Kind, _Imports, Inherits, _Implements, _TypeParams,
-        MemberFields, MemberClasses, MemberMethods, Ctors),
-    expect(unify(MemberMethods, []), $pred,
-        "MemberMethods != []"),
+        Kind, _Imports, Inherits, _Interfaces, _TypeParams,
+        MemberFields, MemberClasses, _MemberMethods, Ctors),
+    % These calls to expect/3 are based on the code constructing environment
+    % structures in ml_elim_nested.m, which should be the *only* place
+    % in the MLDS code generator that generates MLDS classes when
+    % targeting C using low level data.
+    %
+    % However, we want to preserve the possibility of writing out MLDS dumps
+    % as C code even if targeting another language, so these calls
+    % are commented out. For this to be truly useful, we would have to extend
+    % this code to write out the fields ignored above in some form
+    % (not necessarily in C syntax).
+    %
+    % expect(unify(Kind, mlds_struct), $pred, "Kind != mlds_struct"),
+    % expect(unify(Imports, []), $pred, "Imports != []"),
+    % expect(unify(Inherits, inherits_nothing), $pred, "Inherits != nothing"),
+    % expect(unify(Interfaces, []), $pred, "Interfaces != []"),
+    % expect(unify(TypeParams, []), $pred, "TypeParams != []"),
+    % expect(unify(MemberClasses, []), $pred, "MemberClasses != []"),
+    % expect(unify(MemberMethods, []), $pred, "MemberMethods != []"),
+    % expect(unify(Ctors, []), $pred, "Ctors != []"),
+
+    io.nl(Stream, !IO),
+    % Output the class declaration.
+    mlds_output_class_decl(Opts, Stream, Indent, ModuleName, ClassDefn,
+        definition, !IO),
 
     % To avoid name clashes, we need to qualify the names of the member
     % constants with the class name. (In particular, this is needed for
@@ -146,10 +103,6 @@ mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
 
     % Hoist out static members, since plain old C does not support
     % static members in structs (except for enumeration constants).
-    %
-    % XXX This should be conditional: only when compiling to C,
-    % not when compiling to C++.
-
     (
         Kind = mlds_enum,
         StaticCtors = [],
@@ -171,10 +124,6 @@ mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
 
     % Convert the base classes into member variables,
     % since plain old C does not support base classes.
-    %
-    % XXX this should be conditional: only when compiling to C,
-    % not when compiling to C++
-
     (
         Inherits = inherits_nothing,
         BaseFieldVarDefns = []
@@ -194,7 +143,7 @@ mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
         unexpected($pred, "inherits_generic_env_ptr_type")
     ),
 
-    % Output the class declaration and the class members.
+    % Output the class members.
     % We treat enumerations specially.
     %
     % Note that standard ANSI/ISO C does not allow empty structs. We could
@@ -205,9 +154,6 @@ mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
     % to not generate any. (E.g. ml_type_gen.m checks whether
     % `target_uses_empty_base_classes' before generating empty structs.)
     % Hence we do not need to check for empty structs here.
-
-    mlds_output_class_decl(Stream, Indent, ModuleName, ClassName, ClassArity,
-        ClassDefn, !IO),
     io.write_string(Stream, " {\n", !IO),
     (
         Kind = mlds_enum,
@@ -243,6 +189,97 @@ mlds_output_class(Opts, Stream, Indent, ModuleName, ClassDefn, !IO) :-
         StaticMemberFields, !IO),
     mlds_output_class_defns(Opts, Stream, Indent, ClassModuleName,
         MemberClasses, !IO).
+
+%---------------------------------------------------------------------------%
+
+:- pred mlds_output_class_decl(mlds_to_c_opts::in, io.text_output_stream::in,
+    indent::in, mlds_module_name::in, mlds_class_defn::in, decl_or_defn::in,
+    io::di, io::uo) is det.
+
+mlds_output_class_decl(Opts, Stream, Indent, ModuleName, ClassDefn,
+        DeclOrDefn, !IO) :-
+    ClassDefn = mlds_class_defn(ClassName, ClassArity, Context, Flags,
+        ClassKind, _Imports, _Inherits, _Implements, _TypeParams,
+        _MemberFields, _MemberClasses, _MemberMethods, _Ctors),
+    c_output_context(Stream, Opts ^ m2co_line_numbers, Context, !IO),
+    output_n_indents(Stream, Indent, !IO),
+    mlds_output_class_decl_flags(Opts, Stream, Flags, DeclOrDefn, !IO),
+    (
+        ClassKind = mlds_enum,
+        io.write_string(Stream, "enum ", !IO),
+        output_qual_name_prefix_c(Stream, ModuleName, !IO),
+        mlds_output_class_name_arity(Stream, ClassName, ClassArity, !IO),
+        io.write_string(Stream, "_e", !IO)
+    ;
+        ( ClassKind = mlds_class
+        ; ClassKind = mlds_interface
+        ; ClassKind = mlds_struct
+        ),
+        io.write_string(Stream, "struct ", !IO),
+        output_qual_name_prefix_c(Stream, ModuleName, !IO),
+        mlds_output_class_name_arity(Stream, ClassName, ClassArity, !IO),
+        io.write_string(Stream, "_s", !IO)
+    ).
+
+:- pred mlds_output_class_decl_flags(mlds_to_c_opts::in,
+    io.text_output_stream::in, mlds_class_decl_flags::in,
+    decl_or_defn::in, io::di, io::uo) is det.
+
+mlds_output_class_decl_flags(Opts, Stream, Flags, _DeclOrDefn, !IO) :-
+    % DeclOrDefn does not affect what we output. Callers who pass us
+    % DeclOrDefn = forward_decl will put a semicolon after the declaration;
+    % callers who pass us DeclOrDefn = definition will put the definition
+    % itself there.
+    Flags = mlds_class_decl_flags(Access, Overridability, Constness),
+    Comments = Opts ^ m2co_auto_comments,
+    (
+        Comments = yes,
+        (
+            Access = class_public,
+            io.write_string(Stream, "/* public: */ ", !IO)
+        ;
+            Access = class_private,
+            io.write_string(Stream, "/* private: */ ", !IO)
+        ),
+        io.write_string(Stream, "/* one_copy */ ", !IO),
+        (
+            Overridability = overridable
+        ;
+            Overridability = sealed,
+            io.write_string(Stream, "/* sealed */ ", !IO)
+        )
+    ;
+        Comments = no
+    ),
+    mlds_output_constness(Stream, Constness, !IO).
+
+:- pred mlds_output_constness(io.text_output_stream::in, constness::in,
+    io::di, io::uo) is det.
+
+mlds_output_constness(Stream, const, !IO) :-
+    io.write_string(Stream, "const ", !IO).
+mlds_output_constness(_, modifiable, !IO).
+
+%---------------------%
+
+:- pred mlds_output_class_forward_decl(mlds_to_c_opts::in,
+    io.text_output_stream::in, indent::in, mlds_module_name::in,
+    mlds_class_defn::in, io::di, io::uo) is det.
+:- pragma consider_used(pred(mlds_output_class_forward_decl/7)).
+
+mlds_output_class_forward_decl(Opts, Stream, Indent, ModuleName,
+        ClassDefn, !IO) :-
+    % ANSI C does not permit forward declarations of enumeration types.
+    % So we just skip those. Currently they are not needed since we do not
+    % actually create any mlds_enum classes when targeting C.
+    % We also never output forward declarations (this pred is never called).
+    ( if ClassDefn ^ mcd_kind = mlds_enum then
+        true
+    else
+        mlds_output_class_decl(Opts, Stream, Indent, ModuleName,
+            ClassDefn, forward_decl, !IO),
+        io.write_string(Stream, ";\n", !IO)
+    ).
 
 %---------------------------------------------------------------------------%
 
@@ -354,13 +391,13 @@ mlds_output_field_var_decl_flags(Opts, Stream, Flags, DeclOrDefn, !IO) :-
     Comments = Opts ^ m2co_auto_comments,
     (
         Comments = yes,
-        % XXX We used to call mlds_output_extern_or_static
-        % on mlds_data_decl_flags. This predicate pays attention to PerInstance
-        % *only* when the access flag is acc_local, while field var's
-        % access flags were always acc_public (which is why we do not need
-        % to explicitly store that flag).
         PerInstance = Flags ^ mfvdf_per_instance,
-        mlds_output_per_instance_comment(Stream, PerInstance, !IO)
+        (
+            PerInstance = per_instance
+        ;
+            PerInstance = one_copy,
+            io.write_string(Stream, "/* one_copy */ ", !IO)
+        )
     ;
         Comments = no
     ),
@@ -371,48 +408,6 @@ mlds_output_field_var_decl_flags(Opts, Stream, Flags, DeclOrDefn, !IO) :-
         DeclOrDefn = definition
     ),
     mlds_output_constness(Stream, Constness, !IO).
-
-:- pred mlds_output_class_decl_flags(mlds_to_c_opts::in,
-    io.text_output_stream::in, mlds_class_decl_flags::in,
-    decl_or_defn::in, io::di, io::uo) is det.
-
-mlds_output_class_decl_flags(Opts, Stream, Flags, _DeclOrDefn, !IO) :-
-    Flags = mlds_class_decl_flags(Access, Overridability, Constness),
-    Comments = Opts ^ m2co_auto_comments,
-    (
-        Comments = yes,
-        (
-            Access = class_public,
-            io.write_string(Stream, "/* public: */ ", !IO)
-        ;
-            Access = class_private,
-            io.write_string(Stream, "/* private: */ ", !IO)
-        ),
-        io.write_string(Stream, "/* one_copy */ ", !IO)
-    ;
-        Comments = no
-    ),
-    (
-        Overridability = overridable
-    ;
-        Overridability = sealed,
-        io.write_string(Stream, "/* sealed */ ", !IO)
-    ),
-    mlds_output_constness(Stream, Constness, !IO).
-
-:- pred mlds_output_per_instance_comment(io.text_output_stream::in,
-    per_instance::in, io::di, io::uo) is det.
-
-mlds_output_per_instance_comment(_, per_instance, !IO).
-mlds_output_per_instance_comment(Stream, one_copy, !IO) :-
-    io.write_string(Stream, "/* one_copy */ ", !IO).
-
-:- pred mlds_output_constness(io.text_output_stream::in, constness::in,
-    io::di, io::uo) is det.
-
-mlds_output_constness(Stream, const, !IO) :-
-    io.write_string(Stream, "const ", !IO).
-mlds_output_constness(_, modifiable, !IO).
 
 %---------------------------------------------------------------------------%
 :- end_module ml_backend.mlds_to_c_class.

@@ -19,12 +19,12 @@
 :- module transform_hlds.implicit_parallelism.introduce_parallelism.
 :- interface.
 
-:- import_module libs.
-:- import_module libs.globals.
 :- import_module hlds.
 :- import_module hlds.hlds_module.
+:- import_module libs.
+:- import_module libs.globals.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
@@ -56,8 +56,8 @@
 :- import_module mdbcomp.feedback.automatic_parallelism.
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.prim_data.
-:- import_module mdbcomp.sym_name.
 :- import_module mdbcomp.program_representation.
+:- import_module mdbcomp.sym_name.
 :- import_module parse_tree.prog_data.
 :- import_module transform_hlds.implicit_parallelism.push_goals_together.
 
@@ -68,7 +68,7 @@
 :- import_module pair.
 :- import_module require.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 
@@ -90,18 +90,16 @@ apply_implicit_parallelism_transformation(SourceFileMap, Specs, !ModuleInfo) :-
     then
         % Retrieve and process predicates.
         module_info_get_valid_pred_ids(!.ModuleInfo, PredIds),
-        module_info_get_predicate_table(!.ModuleInfo, PredTable0),
-        predicate_table_get_preds(PredTable0, PredMap0),
+        module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
         list.foldl4(maybe_parallelise_pred(ParallelismInfo),
-            PredIds, PredMap0, PredMap,
+            PredIds, PredIdTable0, PredIdTable,
             have_not_introduced_parallelism, AnyPredIntroducedParallelism,
             !ModuleInfo, [], Specs),
         (
             AnyPredIntroducedParallelism = have_not_introduced_parallelism
         ;
             AnyPredIntroducedParallelism = introduced_parallelism,
-            predicate_table_set_preds(PredMap, PredTable0, PredTable),
-            module_info_set_predicate_table(PredTable, !ModuleInfo),
+            module_info_set_pred_id_table(PredIdTable, !ModuleInfo),
             module_info_set_has_parallel_conj(!ModuleInfo)
         )
     else
@@ -187,14 +185,14 @@ cpc_proc_is_in_module(ModuleName, ProcLabel - CPC, IMProcLabel - CPC) :-
 %-----------------------------------------------------------------------------%
 
 :- pred maybe_parallelise_pred(parallelism_info::in,
-    pred_id::in, pred_table::in, pred_table::out,
+    pred_id::in, pred_id_table::in, pred_id_table::out,
     introduced_parallelism::in, introduced_parallelism::out,
     module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-maybe_parallelise_pred(ParallelismInfo, PredId, !PredTable,
+maybe_parallelise_pred(ParallelismInfo, PredId, !PredIdTable,
         !AnyPredIntroducedParallelism, !ModuleInfo, !Specs) :-
-    map.lookup(!.PredTable, PredId, PredInfo0),
+    map.lookup(!.PredIdTable, PredId, PredInfo0),
     ProcIds = pred_info_valid_non_imported_procids(PredInfo0),
     pred_info_get_proc_table(PredInfo0, ProcTable0),
     list.foldl4(maybe_parallelise_proc(ParallelismInfo, PredInfo0, PredId),
@@ -207,7 +205,7 @@ maybe_parallelise_pred(ParallelismInfo, PredId, !PredTable,
         AnyProcIntroducedParallelism = introduced_parallelism,
         !:AnyPredIntroducedParallelism = introduced_parallelism,
         pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-        map.det_update(PredId, PredInfo, !PredTable)
+        map.det_update(PredId, PredInfo, !PredIdTable)
     ).
 
 :- pred maybe_parallelise_proc(parallelism_info::in,
@@ -268,15 +266,14 @@ parallelise_proc(CPCProc, PredInfo, !ProcInfo,
 
     proc_info_get_goal(!.ProcInfo, Goal0),
     Context = goal_info_get_context(Goal0 ^ hg_info),
-    term.context_file(Context, FileName),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes),
+    FileName = term_context.context_file(Context),
+    proc_info_get_var_table(!.ProcInfo, VarTable),
     % VarNumRep is not used by goal_to_goal_rep, var_num_1_byte
     % is an arbitrary value. XXX zs: I don't think this is true.
     VarNumRep = var_num_1_byte,
     proc_info_get_headvars(!.ProcInfo, HeadVars),
-    proc_info_get_varset(!.ProcInfo, VarSet),
-    compute_var_number_map(HeadVars, VarSet, [], Goal0, VarNumMap),
-    ProgRepInfo = prog_rep_info(!.ModuleInfo, FileName, VarTypes, VarNumMap,
+    compute_var_number_map(VarTable, HeadVars, [], Goal0, VarNumMap),
+    ProgRepInfo = prog_rep_info(!.ModuleInfo, FileName, VarTable, VarNumMap,
         VarNumRep, flatten_par_conjs),
     proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, Instmap),
 

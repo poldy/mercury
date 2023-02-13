@@ -213,6 +213,7 @@
 :- import_module set.
 :- import_module string.
 :- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -532,14 +533,17 @@ mercury_output_type_repn_spec(Info, Stream, TypeRepnSpec, !IO) :-
 
 mercury_output_parse_tree_int0(Info, Stream, ParseTreeInt0, !IO) :-
     ParseTreeInt0 = parse_tree_int0(ModuleName, _ModuleContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, _InclMap,
-        IntImportMap, IntUseMap, ImpImportMap, ImpUseMap, _ImportUseMap,
-        IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap,
+        ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
         IntDeclPragmas, IntPromises,
         ImpTypeClasses, ImpInstances, ImpPredDecls, ImpModeDecls,
         ImpDeclPragmas, ImpPromises),
+    include_map_to_int_imp_modules(InclMap, IntIncls, ImpIncls),
+    map.foldl4(get_imports_uses, ImportUseMap,
+        set.init, IntImports, set.init, ImpImports,
+        set.init, IntUses, set.init, ImpUses),
     type_ctor_checked_map_get_src_defns(TypeCtorCheckedMap,
         IntTypeDefns, ImpTypeDefns, ImpForeignEnums),
     inst_ctor_checked_map_get_src_defns(InstCtorCheckedMap,
@@ -552,12 +556,12 @@ mercury_output_parse_tree_int0(Info, Stream, ParseTreeInt0, !IO) :-
         MaybeVersionNumbers, !IO),
 
     mercury_output_section_marker(Stream, ms_interface, !IO),
-    list.foldl(mercury_output_module_decl(Stream, "include_module"),
-        map.sorted_keys(IntInclMap), !IO),
-    list.foldl(mercury_output_module_decl(Stream, "import_module"),
-        map.sorted_keys(IntImportMap), !IO),
-    list.foldl(mercury_output_module_decl(Stream, "use_module"),
-        map.sorted_keys(IntUseMap), !IO),
+    set.foldl(mercury_output_module_decl(Stream, "include_module"),
+        IntIncls, !IO),
+    set.foldl(mercury_output_module_decl(Stream, "import_module"),
+        IntImports, !IO),
+    set.foldl(mercury_output_module_decl(Stream, "use_module"),
+        IntUses, !IO),
     set.foldl(mercury_output_fim_spec(Stream), IntFIMSpecs, !IO),
     list.foldl(mercury_output_item_type_defn(Info, Stream),
         IntTypeDefns, !IO),
@@ -578,9 +582,9 @@ mercury_output_parse_tree_int0(Info, Stream, ParseTreeInt0, !IO) :-
         list.sort(IntPromises), !IO),
 
     ( if
-        map.is_empty(ImpInclMap),
-        map.is_empty(ImpImportMap),
-        map.is_empty(ImpUseMap),
+        set.is_empty(ImpIncls),
+        set.is_empty(ImpImports),
+        set.is_empty(ImpUses),
         set.is_empty(ImpFIMSpecs),
         ImpTypeDefns = [],
         ImpInstDefns = [],
@@ -596,12 +600,12 @@ mercury_output_parse_tree_int0(Info, Stream, ParseTreeInt0, !IO) :-
         true
     else
         mercury_output_section_marker(Stream, ms_implementation, !IO),
-        list.foldl(mercury_output_module_decl(Stream, "include_module"),
-            map.sorted_keys(ImpInclMap), !IO),
-        list.foldl(mercury_output_module_decl(Stream, "import_module"),
-            map.sorted_keys(ImpImportMap), !IO),
-        list.foldl(mercury_output_module_decl(Stream, "use_module"),
-            map.sorted_keys(ImpUseMap), !IO),
+        set.foldl(mercury_output_module_decl(Stream, "include_module"),
+            ImpIncls, !IO),
+        set.foldl(mercury_output_module_decl(Stream, "import_module"),
+            ImpImports, !IO),
+        set.foldl(mercury_output_module_decl(Stream, "use_module"),
+            ImpUses, !IO),
         set.foldl(mercury_output_fim_spec(Stream), ImpFIMSpecs, !IO),
         list.foldl(mercury_output_item_type_defn(Info, Stream),
             ImpTypeDefns, !IO),
@@ -627,12 +631,13 @@ mercury_output_parse_tree_int0(Info, Stream, ParseTreeInt0, !IO) :-
 
 mercury_output_parse_tree_int1(Info, Stream, ParseTreeInt1, !IO) :-
     ParseTreeInt1 = parse_tree_int1(ModuleName, _ModuleContext,
-        MaybeVersionNumbers, IntInclMap, ImpInclMap, _InclMap,
-        IntUseMap, ImpUseMap, _ImportUseMap, IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, InclMap, UseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntPredDecls, IntModeDecls,
         IntDeclPragmas, IntPromises, IntTypeRepnMap,
         ImpTypeClasses),
+    include_map_to_int_imp_modules(InclMap, IntIncls, ImpIncls),
+    map.foldl2(get_uses, UseMap, set.init, IntUses, set.init, ImpUses),
     type_ctor_checked_map_get_src_defns(TypeCtorCheckedMap,
         IntTypeDefns, ImpTypeDefns, ImpForeignEnums),
     inst_ctor_checked_map_get_src_defns(InstCtorCheckedMap,
@@ -644,10 +649,10 @@ mercury_output_parse_tree_int1(Info, Stream, ParseTreeInt1, !IO) :-
     mercury_output_maybe_module_version_numbers(Stream, ModuleName,
         MaybeVersionNumbers, !IO),
     mercury_output_section_marker(Stream, ms_interface, !IO),
-    list.foldl(mercury_output_module_decl(Stream, "include_module"),
-        map.sorted_keys(IntInclMap), !IO),
-    list.foldl(mercury_output_module_decl(Stream, "use_module"),
-        map.sorted_keys(IntUseMap), !IO),
+    set.foldl(mercury_output_module_decl(Stream, "include_module"),
+        IntIncls, !IO),
+    set.foldl(mercury_output_module_decl(Stream, "use_module"),
+        IntUses, !IO),
     set.foldl(mercury_output_fim_spec(Stream), IntFIMSpecs, !IO),
     list.foldl(mercury_output_item_type_defn(Info, Stream),
         IntTypeDefns, !IO),
@@ -670,8 +675,8 @@ mercury_output_parse_tree_int1(Info, Stream, ParseTreeInt1, !IO) :-
         IntTypeRepnMap, !IO),
 
     ( if
-        map.is_empty(ImpInclMap),
-        map.is_empty(ImpUseMap),
+        set.is_empty(ImpIncls),
+        set.is_empty(ImpUses),
         set.is_empty(ImpFIMSpecs),
         ImpTypeDefns = [],
         ImpForeignEnums = [],
@@ -680,10 +685,10 @@ mercury_output_parse_tree_int1(Info, Stream, ParseTreeInt1, !IO) :-
         true
     else
         mercury_output_section_marker(Stream, ms_implementation, !IO),
-        list.foldl(mercury_output_module_decl(Stream, "include_module"),
-            map.sorted_keys(ImpInclMap), !IO),
-        list.foldl(mercury_output_module_decl(Stream, "use_module"),
-            map.sorted_keys(ImpUseMap), !IO),
+        set.foldl(mercury_output_module_decl(Stream, "include_module"),
+            ImpIncls, !IO),
+        set.foldl(mercury_output_module_decl(Stream, "use_module"),
+            ImpUses, !IO),
         set.foldl(mercury_output_fim_spec(Stream), ImpFIMSpecs, !IO),
         list.foldl(mercury_output_item_type_defn(Info, Stream),
             ImpTypeDefns, !IO),
@@ -695,10 +700,12 @@ mercury_output_parse_tree_int1(Info, Stream, ParseTreeInt1, !IO) :-
 
 mercury_output_parse_tree_int2(Info, Stream, ParseTreeInt2, !IO) :-
     ParseTreeInt2 = parse_tree_int2(ModuleName, _ModuleContext,
-        MaybeVersionNumbers, IntInclMap, _InclMap, IntUseMap, _ImportUseMap,
-        IntFIMSpecs, ImpFIMSpecs,
+        MaybeVersionNumbers, IntInclMap, UseMap, IntFIMSpecs, ImpFIMSpecs,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntTypeRepnMap),
+    InclMap = coerce(IntInclMap),
+    include_map_to_int_imp_modules(InclMap, IntIncls, _ImpIncls),
+    map.foldl2(get_uses, UseMap, set.init, IntUses, set.init, ImpUses),
     type_ctor_checked_map_get_src_defns(TypeCtorCheckedMap,
         IntTypeDefns, ImpTypeDefns, _ImpForeignEnums),
     inst_ctor_checked_map_get_src_defns(InstCtorCheckedMap,
@@ -710,10 +717,10 @@ mercury_output_parse_tree_int2(Info, Stream, ParseTreeInt2, !IO) :-
     mercury_output_maybe_module_version_numbers(Stream, ModuleName,
         MaybeVersionNumbers, !IO),
     mercury_output_section_marker(Stream, ms_interface, !IO),
-    list.foldl(mercury_output_module_decl(Stream, "include_module"),
-        map.sorted_keys(IntInclMap), !IO),
-    list.foldl(mercury_output_module_decl(Stream, "use_module"),
-        map.sorted_keys(IntUseMap), !IO),
+    set.foldl(mercury_output_module_decl(Stream, "include_module"),
+        IntIncls, !IO),
+    set.foldl(mercury_output_module_decl(Stream, "use_module"),
+        IntUses, !IO),
     set.foldl(mercury_output_fim_spec(Stream), IntFIMSpecs, !IO),
     list.foldl(mercury_output_item_type_defn(Info, Stream),
         IntTypeDefns, !IO),
@@ -728,13 +735,18 @@ mercury_output_parse_tree_int2(Info, Stream, ParseTreeInt2, !IO) :-
     map.foldl_values(mercury_output_item_type_repn(Info, Stream),
         IntTypeRepnMap, !IO),
 
+    % XXX Currently, ImpUses will always be empty, but the fix for
+    % Mantis bug #563 will require allowing ImpUses to be nonempty.
     ( if
         set.is_empty(ImpFIMSpecs),
+        set.is_empty(ImpUses),
         ImpTypeDefns = []
     then
         true
     else
         mercury_output_section_marker(Stream, ms_implementation, !IO),
+        set.foldl(mercury_output_module_decl(Stream, "use_module"),
+            ImpUses, !IO),
         set.foldl(mercury_output_fim_spec(Stream), ImpFIMSpecs, !IO),
         list.foldl(mercury_output_item_type_defn(Info, Stream),
             ImpTypeDefns, !IO)
@@ -742,7 +754,7 @@ mercury_output_parse_tree_int2(Info, Stream, ParseTreeInt2, !IO) :-
 
 mercury_output_parse_tree_int3(Info, Stream, ParseTreeInt3, !IO) :-
     ParseTreeInt3 = parse_tree_int3(ModuleName, _ModuleContext,
-        IntInclMap, _InclMap, IntImportMap, _ImportUseMap,
+        IntInclMap, IntImportMap,
         TypeCtorCheckedMap, InstCtorCheckedMap, ModeCtorCheckedMap,
         IntTypeClasses, IntInstances, IntTypeRepnMap),
     type_ctor_checked_map_get_src_defns(TypeCtorCheckedMap,
@@ -753,10 +765,12 @@ mercury_output_parse_tree_int3(Info, Stream, ParseTreeInt3, !IO) :-
         IntModeDefns, _ImpModeDefns),
     mercury_output_module_decl(Stream, "module", ModuleName, !IO),
     mercury_output_section_marker(Stream, ms_interface, !IO),
+    IntInclMap = int_incl_context_map(IntInclMap0),
     list.foldl(mercury_output_module_decl(Stream, "include_module"),
-        map.sorted_keys(IntInclMap), !IO),
+        map.sorted_keys(IntInclMap0), !IO),
+    IntImportMap = int_import_context_map(IntImportMap0),
     list.foldl(mercury_output_module_decl(Stream, "import_module"),
-        map.sorted_keys(IntImportMap), !IO),
+        map.sorted_keys(IntImportMap0), !IO),
     list.foldl(mercury_output_item_type_defn(Info, Stream), IntTypeDefns, !IO),
     list.foldl(mercury_output_item_inst_defn(Info, Stream), IntInstDefns, !IO),
     list.foldl(mercury_output_item_mode_defn(Info, Stream), IntModeDefns, !IO),
@@ -820,7 +834,7 @@ mercury_output_parse_tree_plain_opt(Info, Stream, ParseTree, !IO) :-
     list.foldl(mercury_output_item_pred_marker(Stream),
         list.map(project_pragma_type, PredMarkers), !IO),
     list.foldl(
-        mercury_output_pragma_type_spec(Stream, VarNamePrintPredDecl, Lang),
+        mercury_output_pragma_type_spec(Stream, Lang),
         list.map(project_pragma_type, TypeSpecs), !IO),
     list.foldl(mercury_output_item_clause(Info, Stream), Clauses, !IO),
     list.foldl(mercury_output_pragma_foreign_proc(Stream, Lang),
@@ -1126,7 +1140,7 @@ mercury_output_item_type_defn(Info, Stream, ItemTypeDefn, !IO) :-
             DetailsAbstract = abstract_solver_type,
             io.write_string(Stream, ":- solver type ", !IO)
         ),
-        mercury_output_term_nq(TypeVarSet, print_name_only,
+        mercury_output_term_nq_vs(TypeVarSet, print_name_only,
             next_to_graphic_token, TypeTerm, Stream, !IO),
         (
             DetailsAbstract = abstract_type_fits_in_n_bits(NumBits),
@@ -1154,7 +1168,7 @@ mercury_output_item_type_defn(Info, Stream, ItemTypeDefn, !IO) :-
         TypeDefn = parse_tree_eqv_type(DetailsEqv),
         DetailsEqv = type_details_eqv(EqvType),
         io.write_string(Stream, ":- type ", !IO),
-        mercury_output_term(TypeVarSet, print_name_only, TypeTerm,
+        mercury_output_term_vs(TypeVarSet, print_name_only, TypeTerm,
             Stream, !IO),
         io.write_string(Stream, " == ", !IO),
         mercury_output_type(TypeVarSet, print_name_only, EqvType, Stream, !IO),
@@ -1163,7 +1177,7 @@ mercury_output_item_type_defn(Info, Stream, ItemTypeDefn, !IO) :-
         TypeDefn = parse_tree_du_type(DetailsDu),
         DetailsDu = type_details_du(OoMCtors, MaybeCanonical, MaybeDirectArgs),
         io.write_string(Stream, ":- type ", !IO),
-        mercury_output_term(TypeVarSet, print_name_only, TypeTerm,
+        mercury_output_term_vs(TypeVarSet, print_name_only, TypeTerm,
             Stream, !IO),
         OoMCtors = one_or_more(HeadCtor, TailCtors),
         mercury_output_ctors(TypeVarSet, yes, HeadCtor, TailCtors,
@@ -1175,7 +1189,7 @@ mercury_output_item_type_defn(Info, Stream, ItemTypeDefn, !IO) :-
         TypeDefn = parse_tree_sub_type(DetailsDu),
         DetailsDu = type_details_sub(SuperType, OoMCtors),
         io.write_string(Stream, ":- type ", !IO),
-        mercury_output_term(TypeVarSet, print_name_only, TypeTerm,
+        mercury_output_term_vs(TypeVarSet, print_name_only, TypeTerm,
             Stream, !IO),
         io.write_string(Stream, " =< ", !IO),
         mercury_output_type(TypeVarSet, print_name_only, SuperType,
@@ -1189,7 +1203,7 @@ mercury_output_item_type_defn(Info, Stream, ItemTypeDefn, !IO) :-
         DetailsSolver =
             type_details_solver(SolverTypeDetails, MaybeCanonical),
         io.write_string(Stream, ":- solver type ", !IO),
-        mercury_output_term(TypeVarSet, print_name_only, TypeTerm,
+        mercury_output_term_vs(TypeVarSet, print_name_only, TypeTerm,
             Stream, !IO),
         mercury_output_where_attributes(Info, TypeVarSet,
             yes(SolverTypeDetails), MaybeCanonical, no, Stream, !IO),
@@ -1209,7 +1223,7 @@ mercury_output_item_type_defn(Info, Stream, ItemTypeDefn, !IO) :-
             ForeignType = csharp(_),
             io.write_string(Stream, "csharp, ", !IO)
         ),
-        mercury_output_term(TypeVarSet, print_name_only, TypeTerm,
+        mercury_output_term_vs(TypeVarSet, print_name_only, TypeTerm,
             Stream, !IO),
         io.write_string(Stream, ", \"", !IO),
         (
@@ -1523,7 +1537,7 @@ mercury_output_item_inst_defn(Info, Stream, ItemInstDefn, !IO) :-
     (
         MaybeAbstractInstDefn = abstract_inst_defn,
         io.write_string(Stream, ":- abstract_inst((", !IO),
-        mercury_output_term(InstVarSet, print_name_only, InstTerm,
+        mercury_output_term_vs(InstVarSet, print_name_only, InstTerm,
             Stream, !IO),
         io.write_string(Stream, ")).\n", !IO)
     ;
@@ -1545,14 +1559,14 @@ mercury_output_item_inst_defn(Info, Stream, ItemInstDefn, !IO) :-
             ;
                 ArgTerms = [HeadArgTerm | TailArgTerms],
                 io.write_string(Stream, "(", !IO),
-                mercury_format_comma_separated_terms(InstVarSet,
+                mercury_format_comma_separated_terms_vs(InstVarSet,
                     print_name_only, HeadArgTerm, TailArgTerms, Stream, !IO),
                 io.write_string(Stream, ")", !IO)
             )
         else
             % No it isn't, so print the extra parentheses.
             io.write_string(Stream, ":- inst (", !IO),
-            mercury_output_term(InstVarSet, print_name_only, InstTerm,
+            mercury_output_term_vs(InstVarSet, print_name_only, InstTerm,
                 Stream, !IO),
             io.write_string(Stream, ")", !IO)
         ),
@@ -1594,8 +1608,8 @@ mercury_output_item_inst_defn(Info, Stream, ItemInstDefn, !IO) :-
     is semidet.
 
 is_builtin_inst_name(InstVarSet, unqualified(Name), Args0) :-
-    Args1 = list.map(func(V) = variable(coerce_var(V), context_init), Args0),
-    Term = term.functor(term.atom(Name), Args1, term.context_init),
+    Args1 = list.map(func(V) = variable(coerce_var(V), dummy_context), Args0),
+    Term = term.functor(term.atom(Name), Args1, dummy_context),
     varset.coerce(InstVarSet, VarSet),
     ContextPieces = cord.init,  % Dummy; not used.
     parse_inst(no_allow_constrained_inst_var(wnciv_inst_defn_lhs), VarSet,
@@ -1700,7 +1714,7 @@ mercury_format_mode_defn(Lang, InstVarSet, Context, Name, Args,
 mercury_format_mode_defn_head(InstVarSet, Context, Name, Args, S, !U) :-
     ArgTerms = list.map(func(V) = variable(V, Context), Args),
     construct_qualified_term_with_context(Name, ArgTerms, Context, ModeTerm),
-    mercury_format_term(InstVarSet, print_name_only, ModeTerm, S, !U).
+    mercury_format_term_vs(InstVarSet, print_name_only, ModeTerm, S, !U).
 
 %---------------------------------------------------------------------------%
 
@@ -1972,10 +1986,10 @@ mercury_format_fundeps_and_prog_constraint_list(VarSet, VarNamePrint,
 mercury_format_fundep(TypeVarSet, VarNamePrint, fundep(Domain, Range),
         S, !U) :-
     add_string("(", S, !U),
-    add_list(mercury_format_var(TypeVarSet, VarNamePrint), ", ", Domain,
+    add_list(mercury_format_var_vs(TypeVarSet, VarNamePrint), ", ", Domain,
         S, !U),
     add_string(" -> ", S, !U),
-    add_list(mercury_format_var(TypeVarSet, VarNamePrint), ", ", Range,
+    add_list(mercury_format_var_vs(TypeVarSet, VarNamePrint), ", ", Range,
         S, !U),
     add_string(")", S, !U).
 
@@ -2083,9 +2097,12 @@ mercury_output_instance_methods(Stream, Methods, !IO) :-
         ",\n", Methods, Stream, !IO).
 
 mercury_output_instance_method(Method, Stream, !IO) :-
-    Method = instance_method(PredOrFunc, MethodName, Defn, Arity, _Context),
+    Method = instance_method(MethodId, Defn, _Context),
+    MethodId = pred_pf_name_arity(PredOrFunc, MethodSymName, UserArity),
+    UserArity = user_arity(UserArityInt),
     (
         Defn = instance_proc_def_name(PredName),
+        % XXX ARITY io.format
         io.write_char(Stream, '\t', !IO),
         (
             PredOrFunc = pf_function,
@@ -2095,16 +2112,17 @@ mercury_output_instance_method(Method, Stream, !IO) :-
             io.write_string(Stream, "pred(", !IO)
         ),
         mercury_output_bracketed_sym_name_ngt(next_to_graphic_token,
-            MethodName, Stream, !IO),
+            MethodSymName, Stream, !IO),
         io.write_string(Stream, "/", !IO),
-        io.write_int(Stream, Arity, !IO),
+        io.write_int(Stream, UserArityInt, !IO),
         io.write_string(Stream, ") is ", !IO),
         mercury_output_bracketed_sym_name(PredName, Stream, !IO)
     ;
-        Defn = instance_proc_def_clauses(Items),
+        Defn = instance_proc_def_clauses(ItemsCord),
+        Items = cord.list(ItemsCord),
         % XXX should we output the term contexts?
         io.write_string(Stream, "\t(", !IO),
-        write_out_list(output_instance_method_clause(MethodName),
+        write_out_list(output_instance_method_clause(MethodSymName),
             "),\n\t(", Items, Stream, !IO),
         io.write_string(Stream, ")", !IO)
     ).
@@ -2116,13 +2134,12 @@ mercury_output_instance_method(Method, Stream, !IO) :-
     io::di, io::uo) is det.
 
 mercury_output_item_initialise(_, Stream, ItemInitialise, !IO) :-
-    ItemInitialise = item_initialise_info(PredSymName, Arity, _, _Context,
+    ItemInitialise = item_initialise_info(PredSymName, UserArity, _, _Context,
         _SeqNum),
-    io.write_string(Stream, ":- initialise ", !IO),
-    mercury_output_sym_name(PredSymName, Stream, !IO),
-    io.write_string(Stream, "/", !IO),
-    io.write_int(Stream, Arity, !IO),
-    io.write_string(Stream, ".\n", !IO).
+    PredSymNameStr = mercury_bracketed_sym_name_to_string(PredSymName),
+    UserArity = user_arity(UserArityInt),
+    io.format(Stream, ":- initialise %s/%d.\n",
+        [s(PredSymNameStr), i(UserArityInt)], !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -2130,13 +2147,12 @@ mercury_output_item_initialise(_, Stream, ItemInitialise, !IO) :-
     io.text_output_stream::in, item_finalise_info::in, io::di, io::uo) is det.
 
 mercury_output_item_finalise(_, Stream, ItemFinalise, !IO) :-
-    ItemFinalise = item_finalise_info(PredSymName, Arity, _, _Context,
+    ItemFinalise = item_finalise_info(PredSymName, UserArity, _, _Context,
         _SeqNum),
-    io.write_string(Stream, ":- finalise ", !IO),
-    mercury_output_sym_name(PredSymName, Stream, !IO),
-    io.write_string(Stream, "/", !IO),
-    io.write_int(Stream, Arity, !IO),
-    io.write_string(Stream, ".\n", !IO).
+    PredSymNameStr = mercury_bracketed_sym_name_to_string(PredSymName),
+    UserArity = user_arity(UserArityInt),
+    io.format(Stream, ":- finalise %s/%d.\n",
+        [s(PredSymNameStr), i(UserArityInt)], !IO).
 
 %---------------------------------------------------------------------------%
 
@@ -2154,7 +2170,7 @@ mercury_output_item_mutable(Info, Stream, ItemMutable, !IO) :-
 
     % See the comments for read_mutable_decl for the reason we _must_ use
     % MutVarSet here.
-    mercury_output_term(MutVarSet, print_name_only, InitTerm, Stream, !IO),
+    mercury_output_term_vs(MutVarSet, print_name_only, InitTerm, Stream, !IO),
     io.write_string(Stream, ", ", !IO),
     Lang = get_output_lang(Info),
     mercury_output_inst(Stream, Lang, varset.init, Inst, !IO),

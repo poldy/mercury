@@ -27,9 +27,9 @@ which can be C, Java or C#,
 although it can also translate Mercury to Mercury bytecode,
 for a once-planned but never implemented bytecode interpreter,
 and once upon a time it could also translate a subset of it
-to Aditi and to .NET's IL.
+to Aditi, to Erlang, and to .NET's IL.
 <p>
-The top-level of the compiler is in the file mercury_compiler.m.
+The top-level of the compiler is in the file mercury_compile.m.
 This forwards all of the work to the file mercury_compiler_main.m,
 which is a submodule of the top_level.m package.
 The basic design is that compilation is broken into the following stages:
@@ -65,19 +65,35 @@ in llds_out.m as we are spitting out the C code.
 In addition, the compiler is actually a multi-targeted compiler
 with several different back-ends.
 <p>
-mercury_compile.m itself supervises the parsing (step 1),
-but it subcontracts the supervision of the later steps to other modules.
-Semantic analysis (step 2) is looked after by mercury_compile_front_end.m;
-high level transformations (step 3) by mercury_compile_middle_passes.m;
-and code generation, optimization and output (steps 4, 5 and 6)
-by mercury_compile_llds_backend.m and mercury_compile_mlds_backend.m
-for the LLDS and MLDS backends respectively.
+mercury_compile_main.m is mostly concerned with option and argument processing,
+which is complicated by the fact that
+options can come from files named by other options.
+mercury_compile_main.m itself does oversee
+the reading in and parsing of source files,
+but it then subcontracts the supervision of the later steps to other modules.
+<li>
+Step 1, the conversion of parse trees to the initial version of the HLDS,
+is managed by mercury_compile_make_hlds.m.
+<li>
+Step 2, semantic analysis of the HLDS,
+is managed by mercury_compile_front_end.m.
+<li>
+Step 3, high level transformations on the HLDS,
+is managed by done mercury_compile_middle_passes.m.
+<li>
+Steps 4, 5 and 6, code generation, optimization and output,
+are all managed by
+<ul>
+<li> mercury_compile_llds_backend.m for the LLDS backend, and
+<li> mercury_compile_mlds_backend.m for the MLDS backend.
+</ul>
+</ul>
 <p>
 The modules in the compiler are structured by being grouped into "packages".
 A "package" is just a meta-module,
 i.e. a module that contains other modules as submodules.
 (The submodules are almost always stored in separate files,
-which are named only for their final module name.)
+most of which are named only for their final module name.)
 We have a package for the top-level, a package for each main pass, and
 finally there are also some packages for library modules that are used
 by more than one pass.
@@ -252,14 +268,14 @@ This part produces the parse_tree.m data structure,
 which is intended to match up as closely as possible with the source code,
 so that it is suitable for tasks such as pretty-printing.
 <p>
-We transform the results of lexical analysis (done by library/lexer.m)
+We transform the results of lexical analysis (done by library/mercury_term_lexer.m)
 into the Mercury parse tree in two stages:
 
 <ul>
 <li>
 stage 1 parsing - converting token sequences to terms.
 <p>
-library/parser.m contains the code to do this,
+library/mercury_term_parser.m contains the code to do this,
 while library/term.m and library/varset.m
 define the term and varset data structures,
 and predicates for manipulating them.
@@ -369,6 +385,11 @@ that operate on (parts of) the parse tree.
 builtin_lib_types.m contains definitions about types, type constructors
 and function symbols that the Mercury implementation needs to know about.
 <li>
+pred_name.m contains code that constructs predicate names.
+As we create transformed versions of predicates and functions,
+this module constructs new names for them,
+derived from the name of the original version.
+<li>
 prog_item_stats.m has facilities for gathering and printing statistics
 about the parse tree.
 <li>
@@ -398,16 +419,23 @@ for manipulating mutable variables.
 <li>
 prog_event.m contains utility predicates for working with events.
 <li>
-error_util.m contains predicates
-for printing nicely formatted error messages.
+error_spec.m defines the error_spec type,
+which is a structured representation of diagnostic messages.
 <li>
 maybe_error.m contains types that allow the representation
-of computations that can either succeed or generate such error messages.
+of the results of computations
+that either succeed, or generate some error_specs.
+<li>
+write_error_spec.m contains code for generating
+nicely formatted printouts of error_specs.
+<li>
+error_type_util.m, error_util.m, and error_sort.m contain
+utility predicates and functions operating on error_specs.
 </ul>
 
 <p>
 The second main use of the parse tree,
-because transformation into HLDS,
+besides transformation into HLDS,
 is the generation and consumption of interface files.
 This is done by the following modules.
 
@@ -451,17 +479,19 @@ to prevent the need to recompile the modules that import them
 if the only change to a module is a reordering of some declarations
 (which causes no change in the module's semantics).
 <li>
-check_raw_comp_unit.m checks whether a compilation unit
-exports anything.
+check_module_interface.m checks whether a module exports anything.
 <li>
 generate_dep_d_files.m generates the information from which
 write_deps_file.m writes out Makefile fragments.
 <li>
-module_imports.m contains the module_imports type and its access
-predicates.
+module_baggage.m contains the module_baggage type,
+the types of its components, and utility predicates.
 <li>
 get_dependencies.m contains predicates that compute various sorts of
 direct dependencies (those caused by imports) between modules.
+<li>
+module_dep_info.m defines data structures for recording,
+for a given module, which other modules it depends on, and how.
 <li>
 deps_map.m and module_deps_graph.m contain data structures
 for recording indirect dependencies between modules,
@@ -483,7 +513,7 @@ item_util.m contains some utility predicates dealing with items.
 <p>
 We do most, though not all, forms of module qualification
 on programs when they are represented as parse trees.
-This mans that we add module qualifiers to all types, insts and modes,
+This means that we add module qualifiers to all types, insts and modes,
 check that every referred-to type, inst and mode actually exists,
 and that there is only possible match.
 This is done here because it must be done
@@ -555,9 +585,12 @@ and it is defined in the hlds.m package.
 <p>
 The last stage of parsing is this conversion to HLDS,
 which is done mostly by the following submodules
-of the make_hlds module in the hlds package.
+of the make_hlds subpackage in the hlds package.
 
 <ul>
+<li>
+make_hlds_types.m defines the types used
+by many of the submodules of make_hlds.m.
 <li>
 make_hlds_passes.m calls the other modules to perform the conversion.
 <li>
@@ -601,7 +634,10 @@ add_solver.m adds to the HLDS the casting predicates needed by solver types.
 add_mutable_aux_preds.m adds to the HLDS
 the auxiliary predicates (init, get, set, lock, unlock) needed by mutables.
 <li>
-add_class.m handles typeclass and instance declarations.
+add_class.m checks and records typeclass and instance declarations.
+<li>
+instance_method_clauses.m generates the definitions
+of the predicates that implement instance methods.
 <li>
 qual_info.m handles the abstract data types used for module qualification.
 <li>
@@ -680,7 +716,18 @@ including the type module_info.
 status.m defines the type that record the import/export status
 of entities such as types, insts, modes, and predicates.
 <li>
-vartypes.m defines the data structure that maps variables to their types.
+vartypes.m defines the data structure that maps each variable to its types.
+New code should use var_table.m, if possible.
+<li>
+var_table.m defines the data structure that maps each variable
+to its name, type, and an indication of whether that type is a dummy type.
+<li>
+Some modules need to provide functionality
+both to modules that use var_tables
+and other modules that use varsets, vartypes, or both.
+var_db.m defines operations that can provide information
+about variables' names and/or types
+that can operate on top of either var_tables, or its alternatives.
 </ul>
 
 Some modules implement a pass that decides
@@ -722,6 +769,13 @@ in the original module exactly once.
 are typically so few in number that
 one can keep track of them in one's head.)
 <p>
+The module hlds_call_tree.m contains code to print out
+the call tree of the local predicates and functions in the HLDS,
+ordered by a depth-first left-to-right traversal.
+This can suggest to programmers an order that
+the predicates and functions of the module can be put into in the source file,
+or at least provide a starting point for such an order.
+<p>
 The hlds.m package also contains some utility modules
 that contain various library routines
 which are used by other modules that manipulate the HLDS:
@@ -745,6 +799,15 @@ passes_aux.m contains code to write progress messages,
 and higher-order code to traverse
 all the predicates defined in the current module
 and do something with each one.
+<li>
+introduced_call_table.m contains what is effectively
+a database of the predicates and functions
+that may have calls introduced to them by various compiler passes.
+The reason why we need this is that if dead_proc_elim.m
+deleted those predicates and functions from the HLDS as dead code
+before the pass that introduces calls to them has been run,
+those calls would have no destination.
+By consulting this database, dead_proc_elim.m can avoid this problem.
 <li>
 hlds_error_util.m contains utility routines
 for printing nicely formatted error messages
@@ -871,7 +934,9 @@ The type checker consists of several modules.
     type_assign.m and typecheck_info.m define
     the main data structures used by typechecking.
     <li>
-    typecheck_errors.m generates error messages for type errors.
+    typecheck_error_overload.m, typecheck_error_undef.m and typecheck_errors.m
+    generate error messages for type errors,
+    with support from typecheck_error_type_assign.m and typecheck_error_util.m.
     <li>
     typecheck_msgs.m generates other kinds of messages from the type checker,
     such as those containing inferred type declarations,
@@ -935,8 +1000,8 @@ implementation_defined_literals.m replaces unifications
 of the form <code>Var = $name</code>
 by unifications to string or integer constants.
 <li>
-polymorphism.m handles
-the introduction of type_info arguments for polymorphic predicates
+polymorphism.m, with the help of polymorphism_clause.m and polymorphism_goal.m,
+handles the introduction of type_info arguments for polymorphic predicates
 and introduction of typeclass_info arguments
 for typeclass-constrained predicates.
 This phase needs to come before mode analysis
@@ -1181,6 +1246,9 @@ obey the requirements placed on them by those pragmas.
 <li>
 try_expand.m expands `try' goals
 into calls to predicates in the `exception' module instead.
+<li>
+check_pragma_format_call.m checks the validity of any format_call pragmas
+recorded for the predicates and functions in the HLDS.
 <li>
 Simplification finds and exploits opportunities
 for simplifying the internal form of the program,
@@ -1441,7 +1509,7 @@ Most of the remaining HLDS-to-HLDS transformations are optimizations:
 
 <ul>
 <li>
-higher_order.m specializes of higher-order and polymorphic predicates
+higher_order.m specializes higher-order and polymorphic predicates
 in contexts where the value of the relevant
 higher-order, type_info, and/or typeclass_info arguments are known.
 
@@ -1574,6 +1642,30 @@ Its submodules are
 float_regs.m wraps higher-order terms which use float registers
 if passed in contexts where regular registers would be expected,
 and vice versa.
+<li>
+The rbmm.m subpackage implements
+region based memory management (usually abbreviated to RBMM),
+that
+    <ol>
+    <li>
+    analyses programs looking for memory allocations with similar lifetimes,
+    with each such set of memory allocations being grouped into a region,
+    <li>
+    puts annotates on those allocations that tell the code generator
+    to get the new memory from the allocation's region, and
+    <li>
+    adds operations to allocate the regions themselves
+    just before their first use,
+    and to deallocate them just after their last use.
+    </ol>
+This last step, which deallocates an entire region in a few instructions,
+is what gives RBMM the potential to be more efficient
+than traditional garbage collection.
+<p>
+The RBMM system in the Mercury compiler is experimental,
+and not ready for general use.
+The detailed documentation of its component modules
+awaits the next person to work on it.
 </ul>
 
 <p>
@@ -1588,7 +1680,7 @@ Both passes insert into procedure bodies, among other things,
 calls to procedures (some of which are impure)
 that record profiling information.
 
-<h2>3-6 The LLDS, MLDS and ELDS backends</h2>
+<h2>3-6 The LLDS and MLDS backends</h2>
 
 <h2>a. LLDS backend</h2>
 
@@ -2229,6 +2321,9 @@ and some operations on that type.
 process_util.m contains predicates
 that deal with process creation and signal handling.
 This module is mainly used by make.m and its submodules.
+<li>
+shell_util.m contains a utility function for quoting arguments to shell
+commands.
 <li>
 timestamp.m contains an ADT representing timestamps.
 It is used by smart recompilation and `mmc --make'.

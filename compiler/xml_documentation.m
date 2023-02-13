@@ -37,14 +37,16 @@
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.status.
+:- import_module libs.
+:- import_module libs.file_util.
 :- import_module mdbcomp.
 :- import_module mdbcomp.builtin_modules.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_item.
@@ -59,7 +61,7 @@
 :- import_module one_or_more.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module term_to_xml.
 :- import_module varset.
 
@@ -315,12 +317,12 @@ get_comment_backwards(Comments, Line) = Comment :-
             [], TypeXmls),
         TypeXml = elem("types", [], TypeXmls),
 
-        module_info_get_preds(ModuleInfo, PredTable),
-        map.foldl(pred_documentation(Comments), PredTable, [], PredXmls),
+        module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+        map.foldl(pred_documentation(Comments), PredIdTable, [], PredXmls),
         PredXml = elem("preds", [], PredXmls),
 
         module_info_get_class_table(ModuleInfo, ClassTable),
-        map.foldl(class_documentation(Comments, PredTable), ClassTable,
+        map.foldl(class_documentation(Comments, PredIdTable), ClassTable,
             [], ClassXmls),
         ClassXml = elem("typeclasses", [], ClassXmls),
 
@@ -534,7 +536,7 @@ pred_documentation(C, _PredId, PredInfo, !Xml) :-
 
     ( if
         pred_status_defined_in_this_module(PredStatus) = yes,
-        Origin = origin_user(_),
+        Origin = origin_user(user_made_pred(_, _, _)),
         not check_marker(Markers, marker_class_method)
     then
         Xml = predicate_documentation(C, PredInfo),
@@ -768,7 +770,7 @@ determinism_to_xml(detism_failure) = tagged_string("determinism", "failure").
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
-:- pred class_documentation(comments::in, pred_table::in,
+:- pred class_documentation(comments::in, pred_id_table::in,
     class_id::in, hlds_class_defn::in,
     list(xml)::in, list(xml)::out) is det.
 
@@ -792,7 +794,7 @@ class_documentation(C, PredTable, class_id(Name, Arity), ClassDefn, !Xml) :-
         XmlFundeps = xml_list("fundeps",
             fundep_to_xml(TVarset, Vars), ClassDefn ^ classdefn_fundeps),
         XmlMethods = class_methods_to_xml(C, PredTable,
-            ClassDefn ^ classdefn_hlds_interface),
+            ClassDefn ^ classdefn_method_infos),
         XmlVisibility = typeclass_visibility_to_xml(TypeClassStatus),
         XmlContext = prog_context_to_xml(Context),
 
@@ -821,12 +823,17 @@ fundep_to_xml_2(Tag, TVarset, Vars, Set) =
     xml_list(Tag, type_param_to_xml(TVarset),
         restrict_list_elements(Set, Vars)).
 
-:- func class_methods_to_xml(comments, pred_table, hlds_class_interface) = xml.
+:- func class_methods_to_xml(comments, pred_id_table, list(method_info)) = xml.
 
-class_methods_to_xml(C, PredTable, Methods) = Xml :-
-    AllPredIds = list.map(pred_proc_id_project_pred_id, Methods),
+class_methods_to_xml(C, PredTable, MethodInfos) = Xml :-
+    MethodInfoPredId = 
+        ( func(method_info(_, _, PredProcId, _)) = PredId :-
+            PredProcId = proc(PredId, _)
+        ),
+    AllPredIds = list.map(MethodInfoPredId, MethodInfos),
     PredIds = list.sort_and_remove_dups(AllPredIds),
-    PredInfos = list.map(func(Id) = map.lookup(PredTable, Id), PredIds),
+    PredInfos =
+        list.map(func(PredId) = map.lookup(PredTable, PredId), PredIds),
     Xml = xml_list("methods", predicate_documentation(C), PredInfos).
 
 %-----------------------------------------------------------------------------%

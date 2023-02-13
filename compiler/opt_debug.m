@@ -23,11 +23,11 @@
 :- import_module hlds.
 :- import_module hlds.code_model.
 :- import_module hlds.hlds_llds.
-:- import_module mdbcomp.
-:- import_module mdbcomp.prim_data.
 :- import_module ll_backend.layout.
 :- import_module ll_backend.livemap.
 :- import_module ll_backend.llds.
+:- import_module mdbcomp.
+:- import_module mdbcomp.prim_data.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -152,12 +152,10 @@
 
 :- import_module backend_libs.c_util.
 :- import_module backend_libs.proc_label.
-:- import_module check_hlds.
-:- import_module check_hlds.type_util.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_rtti.
-:- import_module hlds.special_pred.
+:- import_module hlds.pred_name.
 :- import_module ll_backend.llds_out.
 :- import_module ll_backend.llds_out.llds_out_code_addr.
 :- import_module mdbcomp.sym_name.
@@ -166,6 +164,7 @@
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
 :- import_module parse_tree.prog_foreign.
+:- import_module parse_tree.prog_type.
 
 :- import_module char.
 :- import_module int.
@@ -488,7 +487,7 @@ dump_const(MaybeProcLabel, Const) = Str :-
         Str = float_to_string(F)
     ;
         Const = llconst_string(S),
-        Str = """" ++ quote_string(S) ++ """"
+        Str = quote_string_c(S)
     ;
         Const = llconst_multi_string(_S),
         Str = "multi_string(...)"
@@ -1076,7 +1075,7 @@ dump_proclabel(ProcLabel) = Str :-
             TypeName, TypeArity, Mode),
         TypeCtor = type_ctor(qualified(TypeModule, TypeName), TypeArity),
         Str = sym_name_mangle(Module) ++ "__"
-            ++ special_pred_name(SpecialPredId, TypeCtor) ++ "_"
+            ++ uci_pred_name(SpecialPredId, TypeCtor) ++ "_"
             ++ qualify_name(sym_name_mangle(TypeModule), TypeName) ++ "_"
             ++ int_to_string(TypeArity) ++ "_" ++ int_to_string(Mode)
     ).

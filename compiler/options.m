@@ -2,7 +2,7 @@
 % vim: ft=mercury ts=4 sw=4 et
 %---------------------------------------------------------------------------%
 % Copyright (C) 1994-2012 The University of Melbourne.
-% Copyright (C) 2013-2021 The Mercury team.
+% Copyright (C) 2013-2023 The Mercury team.
 % This file may only be copied under the terms of the GNU General
 % Public License - see the file COPYING in the Mercury distribution.
 %---------------------------------------------------------------------------%
@@ -128,10 +128,6 @@
 :- pred set_all_options_to(list(option)::in, option_data::in,
     option_table::in, option_table::out) is det.
 
-    % Quote an argument to a shell command.
-    %
-:- func quote_arg(string) = string.
-
 %---------------------------------------------------------------------------%
 
 :- pred options_help(io.text_output_stream::in, io::di, io::uo) is det.
@@ -234,8 +230,10 @@
     ;       warn_suspicious_foreign_procs
     ;       warn_suspicious_foreign_code
     ;       warn_state_var_shadowing
+    ;       warn_unneeded_mode_specific_clause
     ;       warn_suspected_occurs_check_failure
     ;       warn_potentially_ambiguous_pragma
+    ;       warn_ambiguous_pragma
     ;       warn_stdlib_shadowing
     ;       inform_inferred
     ;       inform_inferred_types
@@ -269,6 +267,8 @@
     ;       debug_dep_par_conj
     ;       debug_det
     ;       debug_code_gen_pred_id
+    ;       debug_dead_proc_elim
+    ;       debug_higher_order_specialization
     ;       debug_opt
     ;       debug_term          % term = constraint termination analysis
     ;       debug_opt_pred_id
@@ -377,14 +377,17 @@
     ;       auto_comments
     ;       frameopt_comments
     ;       max_error_line_width
+    ;       reverse_error_order
     ;       show_definitions
     ;       show_definition_line_counts
     ;       show_definition_extents
+    ;       show_local_call_tree
     ;       show_local_type_repns
     ;       show_all_type_repns
     ;       show_developer_type_repns
     ;       show_dependency_graph
     ;       imports_graph
+    ;       trans_opt_deps_spec
     ;       dump_trace_counts
     ;       dump_hlds
     ;       dump_hlds_pred_id
@@ -510,7 +513,6 @@
     ;       parallel
     ;       threadscope
     ;       use_trail
-    ;       trail_segments
     ;       use_minimal_model_stack_copy
     ;       use_minimal_model_own_stacks
     ;       minimal_model_debug
@@ -563,6 +565,7 @@
 
     % MLDS back-end compilation model options
     ;       highlevel_code
+    ;       c_debug_grade
     ;       det_copy_out
     ;       nondet_copy_out
     ;       put_commit_in_own_func
@@ -699,7 +702,6 @@
     ;       type_check_constraints
 
     % Code generation options
-    ;       low_level_debug
     ;       table_debug
     ;       trad_passes
     ;       parallel_liveness
@@ -960,10 +962,12 @@
     % Java
     ;       java_compiler
     ;       java_interpreter
-    ;       java_flags
-    ;       quoted_java_flag
+    ;       java_compiler_flags
+    ;       quoted_java_compiler_flag
     ;       java_classpath
     ;       java_object_file_extension
+    ;       java_runtime_flags
+    ;       quoted_java_runtime_flag
 
     % C#
     ;       csharp_compiler
@@ -1158,6 +1162,7 @@
 :- implementation.
 
 :- import_module libs.compute_grade.
+:- import_module libs.shell_util.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -1299,8 +1304,10 @@ optdef(oc_warn, warn_unresolved_polymorphism,           bool(yes)).
 optdef(oc_warn, warn_suspicious_foreign_procs,          bool(no)).
 optdef(oc_warn, warn_suspicious_foreign_code,           bool(no)).
 optdef(oc_warn, warn_state_var_shadowing,               bool(yes)).
+optdef(oc_warn, warn_unneeded_mode_specific_clause,     bool(yes)).
 optdef(oc_warn, warn_suspected_occurs_check_failure,    bool(yes)).
 optdef(oc_warn, warn_potentially_ambiguous_pragma,      bool(no)).
+optdef(oc_warn, warn_ambiguous_pragma,                  bool(yes)).
 optdef(oc_warn, warn_stdlib_shadowing,                  bool(yes)).
 optdef(oc_warn, inform_inferred,                        bool_special).
 optdef(oc_warn, inform_inferred_types,                  bool(yes)).
@@ -1336,6 +1343,8 @@ optdef(oc_verbosity, debug_dep_par_conj,                accumulating([])).
 optdef(oc_verbosity, debug_det,                         bool(no)).
 optdef(oc_verbosity, debug_code_gen_pred_id,            int(-1)).
 optdef(oc_verbosity, debug_term,                        bool(no)).
+optdef(oc_verbosity, debug_dead_proc_elim,              bool(no)).
+optdef(oc_verbosity, debug_higher_order_specialization, bool(no)).
 optdef(oc_verbosity, debug_opt,                         bool(no)).
 optdef(oc_verbosity, debug_opt_pred_id,                 accumulating([])).
 optdef(oc_verbosity, debug_opt_pred_name,               accumulating([])).
@@ -1418,14 +1427,17 @@ optdef(oc_aux_output, type_repns_for_humans,            bool(no)).
 optdef(oc_aux_output, auto_comments,                    bool(no)).
 optdef(oc_aux_output, frameopt_comments,                bool(no)).
 optdef(oc_aux_output, max_error_line_width,             maybe_int(yes(79))).
+optdef(oc_aux_output, reverse_error_order,              bool(no)).
 optdef(oc_aux_output, show_definitions,                 bool(no)).
 optdef(oc_aux_output, show_definition_line_counts,      bool(no)).
 optdef(oc_aux_output, show_definition_extents,          bool(no)).
+optdef(oc_aux_output, show_local_call_tree,             bool(no)).
 optdef(oc_aux_output, show_local_type_repns,            bool(no)).
 optdef(oc_aux_output, show_all_type_repns,              bool(no)).
 optdef(oc_aux_output, show_developer_type_repns,        bool(no)).
 optdef(oc_aux_output, show_dependency_graph,            bool(no)).
 optdef(oc_aux_output, imports_graph,                    bool(no)).
+optdef(oc_aux_output, trans_opt_deps_spec,              maybe_string(no)).
 optdef(oc_aux_output, dump_trace_counts,                accumulating([])).
 optdef(oc_aux_output, dump_hlds,                        accumulating([])).
 optdef(oc_aux_output, dump_hlds_pred_id,                accumulating([])).
@@ -1518,7 +1530,6 @@ optdef(oc_grade, gc,                                    string("boehm")).
 optdef(oc_grade, parallel,                              bool(no)).
 optdef(oc_grade, threadscope,                           bool(no)).
 optdef(oc_grade, use_trail,                             bool(no)).
-optdef(oc_grade, trail_segments,                        bool(no)).
 optdef(oc_grade, maybe_thread_safe_opt,                 string("no")).
 optdef(oc_grade, extend_stacks_when_needed,             bool(no)).
 optdef(oc_grade, stack_segments,                        bool(no)).
@@ -1576,6 +1587,7 @@ optdef(oc_grade, use_float_registers,                   bool(yes)).
  
     % MLDS back-end compilation model options
 optdef(oc_grade, highlevel_code,                        bool(no)).
+optdef(oc_grade, c_debug_grade,                         bool(no)).
 optdef(oc_grade, det_copy_out,                          bool(no)).
 optdef(oc_grade, nondet_copy_out,                       bool(no)).
 optdef(oc_grade, put_commit_in_own_func,                bool(no)).
@@ -1621,7 +1633,6 @@ optdef(oc_internal, type_check_constraints,             bool(no)).
 
     % Code generation options.
 
-optdef(oc_codegen, low_level_debug,                     bool(no)).
 optdef(oc_codegen, table_debug,                         bool(no)).
 optdef(oc_codegen, trad_passes,                         bool(yes)).
 optdef(oc_codegen, parallel_liveness,                   bool(no)).
@@ -1894,10 +1905,12 @@ optdef(oc_target_comp, csharp_compiler_type,            string("mono")).
     % Java
 optdef(oc_target_comp, java_compiler,                   string("javac")).
 optdef(oc_target_comp, java_interpreter,                string("java")).
-optdef(oc_target_comp, java_flags,                      accumulating([])).
-optdef(oc_target_comp, quoted_java_flag,                string_special).
+optdef(oc_target_comp, java_compiler_flags,             accumulating([])).
+optdef(oc_target_comp, quoted_java_compiler_flag,       string_special).
 optdef(oc_target_comp, java_classpath,                  accumulating([])).
 optdef(oc_target_comp, java_object_file_extension,      string(".class")).
+optdef(oc_target_comp, java_runtime_flags,              accumulating([])).
+optdef(oc_target_comp, quoted_java_runtime_flag,        string_special).
 
     % C#
 optdef(oc_target_comp, csharp_compiler,                 string("csc")).
@@ -2197,6 +2210,8 @@ long_option("warn-unresolved-polymorphism", warn_unresolved_polymorphism).
 long_option("warn-suspicious-foreign-procs", warn_suspicious_foreign_procs).
 long_option("warn-suspicious-foreign-code", warn_suspicious_foreign_code).
 long_option("warn-state-var-shadowing", warn_state_var_shadowing).
+long_option("warn-unneeded-mode-specific-clause",
+                                        warn_unneeded_mode_specific_clause).
 long_option("warn-suspected-occurs-failure",
                                         warn_suspected_occurs_check_failure).
 long_option("warn-suspected-occurs-check-failure",
@@ -2205,8 +2220,9 @@ long_option("warn-potentially-ambiguous-pragma",
                                         warn_potentially_ambiguous_pragma).
 long_option("warn-potentially-ambiguous-pragmas",
                                         warn_potentially_ambiguous_pragma).
-long_option("warn-stdlib-shadowing",
-                                        warn_stdlib_shadowing).
+long_option("warn-ambiguous-pragma",    warn_ambiguous_pragma).
+long_option("warn-ambiguous-pragmas",   warn_ambiguous_pragma).
+long_option("warn-stdlib-shadowing",    warn_stdlib_shadowing).
 long_option("inform-inferred",          inform_inferred).
 long_option("inform-inferred-types",    inform_inferred_types).
 long_option("inform-inferred-modes",    inform_inferred_modes).
@@ -2244,6 +2260,9 @@ long_option("debug-det",                debug_det).
 long_option("debug-code-gen-pred-id",   debug_code_gen_pred_id).
 long_option("debug-termination",        debug_term).
 long_option("debug-term",               debug_term).
+long_option("debug-dead-proc-elim",     debug_dead_proc_elim).
+long_option("debug-higher-order-specialization",
+                                        debug_higher_order_specialization).
 long_option("debug-opt",                debug_opt).
 long_option("debug-opt-pred-id",        debug_opt_pred_id).
 long_option("debug-opt-pred-name",      debug_opt_pred_name).
@@ -2358,9 +2377,11 @@ long_option("type-repns-for-humans",    type_repns_for_humans).
 long_option("auto-comments",            auto_comments).
 long_option("frameopt-comments",        frameopt_comments).
 long_option("max-error-line-width",     max_error_line_width).
+long_option("reverse-error-order",      reverse_error_order).
 long_option("show-definitions",         show_definitions).
 long_option("show-definition-line-counts",  show_definition_line_counts).
 long_option("show-definition-extents",  show_definition_extents).
+long_option("show-local-call-tree",     show_local_call_tree).
 long_option("show-all-type-repns",              show_all_type_repns).
 long_option("show-all-type-representations",    show_all_type_repns).
 long_option("show-local-type-repns",            show_local_type_repns).
@@ -2369,6 +2390,7 @@ long_option("show-developer-type-repns",            show_developer_type_repns).
 long_option("show-developer-type-representations",  show_developer_type_repns).
 long_option("show-dependency-graph",    show_dependency_graph).
 long_option("imports-graph",            imports_graph).
+long_option("trans-opt-deps-spec",      trans_opt_deps_spec).
 long_option("dump-trace-counts",        dump_trace_counts).
 long_option("dump-hlds",                dump_hlds).
 long_option("hlds-dump",                dump_hlds).
@@ -2483,7 +2505,6 @@ long_option("gc",                   gc).
 long_option("garbage-collection",   gc).
 long_option("parallel",             parallel).
 long_option("use-trail",            use_trail).
-long_option("trail-segments",       trail_segments).
 long_option("type-layout",          type_layout).
 long_option("maybe-thread-safe",    maybe_thread_safe_opt).
 long_option("extend-stacks-when-needed",    extend_stacks_when_needed).
@@ -2533,6 +2554,7 @@ long_option("highlevel-C",          highlevel_code).
 long_option("highlevel-c",          highlevel_code).
 long_option("high-level-C",         highlevel_code).
 long_option("high-level-c",         highlevel_code).
+long_option("c-debug-grade",        c_debug_grade).
 long_option("det-copy-out",         det_copy_out).
 long_option("nondet-copy-out",      nondet_copy_out).
 long_option("put-commit-in-own-func",   put_commit_in_own_func).
@@ -2569,7 +2591,6 @@ long_option("allow-multi-arm-switches", allow_multi_arm_switches).
 long_option("type-check-constraints",   type_check_constraints).
 
 % code generation options
-long_option("low-level-debug",      low_level_debug).
 long_option("table-debug",          table_debug).
 long_option("trad-passes",          trad_passes).
 long_option("parallel-liveness",    parallel_liveness).
@@ -2942,14 +2963,18 @@ long_option("csharp-compiler-type", csharp_compiler_type).
 long_option("java-compiler",        java_compiler).
 long_option("javac",                java_compiler).
 long_option("java-interpreter",     java_interpreter).
-long_option("java-flags",           java_flags).
-long_option("java-flag",            quoted_java_flag).
+long_option("javac-flags",          java_compiler_flags).
+long_option("javac-flag",           quoted_java_compiler_flag).
+long_option("java-flags",           java_compiler_flags).
+long_option("java-flag",            quoted_java_compiler_flag).
 % XXX we should consider the relationship between java_debug and target_debug
 % more carefully. Perhaps target_debug could imply Java debug if the target
 % is Java. However for the moment they are just synonyms.
 long_option("java-debug",           target_debug).
 long_option("java-classpath",       java_classpath).
 long_option("java-object-file-extension", java_object_file_extension).
+long_option("java-runtime-flags",   java_runtime_flags).
+long_option("java-runtime-flag",    quoted_java_runtime_flag).
 
 long_option("csharp-compiler",      csharp_compiler).
 long_option("csharp-flags",         csharp_flags).
@@ -3177,6 +3202,20 @@ long_option("prolog-is-2020-08-21",
 long_option("partial-inst-copy-2021-01-04",
                                     compiler_sufficiently_recent).
 long_option("mantis-bug-529-2021-02-25",
+                                    compiler_sufficiently_recent).
+long_option("subtype-opt-2022-02-19",
+                                    compiler_sufficiently_recent).
+long_option("typespec-pragma-2022-07-20",
+                                    compiler_sufficiently_recent).
+long_option("ushift-2022-12-06",
+                                    compiler_sufficiently_recent).
+long_option("ushift-2022-12-07",
+                                    compiler_sufficiently_recent).
+long_option("strtrie-2022-12-08",
+                                    compiler_sufficiently_recent).
+long_option("term-pass2-2022-12-28",
+                                    compiler_sufficiently_recent).
+long_option("format-2023-01-27",
                                     compiler_sufficiently_recent).
 long_option("experiment",           experiment).
 long_option("experiment1",          experiment1).
@@ -3420,9 +3459,13 @@ special_handler(Option, SpecialData, !.OptionTable, Result, !OptOptions) :-
             SpecialData = string(Flag),
             handle_quoted_flag(msvc_flags, Flag, !OptionTable)
         ;
-            Option = quoted_java_flag,
+            Option = quoted_java_compiler_flag,
             SpecialData = string(Flag),
-            handle_quoted_flag(java_flags, Flag, !OptionTable)
+            handle_quoted_flag(java_compiler_flags, Flag, !OptionTable)
+        ;
+            Option = quoted_java_runtime_flag,
+            SpecialData = string(Flag),
+            handle_quoted_flag(java_runtime_flags, Flag, !OptionTable)
         ;
             Option = quoted_csharp_flag,
             SpecialData = string(Flag),
@@ -3984,6 +4027,7 @@ style_warning_options = [
     inform_incomplete_switch,
     warn_suspicious_foreign_procs,
     warn_state_var_shadowing,
+    warn_unneeded_mode_specific_clause,
     inform_suboptimal_packing
 ].
 
@@ -4013,6 +4057,7 @@ non_style_warning_options = [
     warn_non_term_special_preds,
     warn_suspected_occurs_check_failure,
     warn_potentially_ambiguous_pragma,
+    warn_ambiguous_pragma,
     inform_inferred_types
 ].
 
@@ -4076,72 +4121,8 @@ set_all_options_to([Option | Options], Value, !OptionTable) :-
     option_table::in, option_table::out) is det.
 
 handle_quoted_flag(Option, Flag, !OptionTable) :-
-    append_to_accumulating_option(Option - quote_arg(Flag), !OptionTable).
-
-quote_arg(Arg0) = Arg :-
-    % XXX Instead of using dir.use_windows_paths, this should really
-    % test whether we are using a Unix or Windows shell.
-    ( if dir.use_windows_paths then
-        ( if
-            ( string_contains_whitespace(Arg0)
-            ; Arg0 = ""
-            )
-        then
-            Arg = """" ++ Arg0 ++ """"
-        else
-            Arg = Arg0
-        )
-    else
-        ArgList = quote_arg_unix(string.to_char_list(Arg0)),
-        (
-            ArgList = [],
-            Arg = """"""
-        ;
-            ArgList = [_ | _],
-            ( if
-                list.member(Char, ArgList),
-                not
-                    ( char.is_alnum_or_underscore(Char)
-                    ; Char = ('-')
-                    ; Char = ('/')
-                    ; Char = ('.')
-                    ; Char = (',')
-                    ; Char = (':')
-                    )
-            then
-                Arg = """" ++ string.from_char_list(ArgList) ++ """"
-            else
-                Arg = string.from_char_list(ArgList)
-            )
-        )
-    ).
-
-:- pred string_contains_whitespace(string::in) is semidet.
-
-string_contains_whitespace(Str) :-
-    Chars = string.to_char_list(Str),
-    some [Char] (
-        list.member(Char, Chars),
-        char.is_whitespace(Char)
-    ).
-
-:- func quote_arg_unix(list(char)) = list(char).
-
-quote_arg_unix([]) = [].
-quote_arg_unix([Char | Chars0]) = Chars :-
-    Chars1 = quote_arg_unix(Chars0),
-    ( if quote_char_unix(Char) then
-        Chars = [('\\'), Char | Chars1]
-    else
-        Chars = [Char | Chars1]
-    ).
-
-:- pred quote_char_unix(char::in) is semidet.
-
-quote_char_unix('\\').
-quote_char_unix('"').
-quote_char_unix('`').
-quote_char_unix('$').
+    append_to_accumulating_option(Option - quote_shell_cmd_arg(Flag),
+        !OptionTable).
 
 %---------------------------------------------------------------------------%
 
@@ -4366,9 +4347,10 @@ options_help_warning(Stream, !IO) :-
         "\tThe later mismatches may be avalanche errors caused by earlier",
         "\tmismatches.",
         "--warn-unknown-format-calls",
-        "\tWarn about calls to string.format or io.format for which",
-        "\tthe compiler cannot tell whether there are any mismatches",
-        "\tbetween the format string and the supplied values.",
+        "\tWarn about calls to string.format, io.format or",
+        "\tstream.string_writer.format for which the compiler cannot tell",
+        "\twhether there are any mismatches between the format string and",
+        "\tthe supplied values.",
         "--no-warn-obsolete",
         "\tDo not warn about calls to predicates or functions that have",
         "\tbeen marked as obsolete.",
@@ -4393,6 +4375,9 @@ options_help_warning(Stream, !IO) :-
         "\tpragmas.",
         "--no-warn-state-var-shadowing",
         "\tDo not warn about one state variable shadowing another.",
+        "--no-warn-unneeded-mode-specific-clause",
+        "\tDo not warn about clauses that needlessly specify",
+        "\tthe modes of their arguments.",
         "--no-warn-suspected-occurs-check-failure",
         "\tDo not warn about code that looks like it unifies a variable",
         "\twith a term that contains that same variable. Such code cannot",
@@ -4400,6 +4385,10 @@ options_help_warning(Stream, !IO) :-
         "--warn-potentially-ambiguous-pragma",
         "\tGenerate warnings for pragmas that do not specify whether they are",
         "\tfor a predicate or a function.",
+        "--no-warn-ambiguous-pragma",
+        "\tDo not generate warnings for pragmas that do not specify whether",
+        "\tthey are for a predicate or a function, even when there is both",
+        "\ta predicate and a function with the given name and arity.",
         "--no-warn-stdlib-shadowing",
         "\tDo not generate warnings for module names that either duplicate",
         "\tthe name of a module in the Mercury standard library, or contain",
@@ -4514,9 +4503,16 @@ options_help_verbosity(Stream, !IO) :-
 %       "\tOutput detailed debugging traces of code generation for the",
 %       "\tpredicate or function with the given pred id.",
 % The new termination analyser is currently a work-in-progress.
-%
-        %"--debug-term, --debug-termination",
-        %"\tOutput detailed debugging traces of the termination2 analysis.",
+%       "--debug-term, --debug-termination",
+%       "\tOutput detailed debugging traces of the termination2 analysis.",
+% --debug-dead-proc-elim is a developer only option.
+%       "--debug-dead-proc-elim",
+%       "\tOutput the needed-entity-map generated by dead procedure",
+%       "\telimination.",
+% --debug-higher-order-specialization is a developer only option.
+%       "--debug-higher-order-specialization",
+%       "\tOutput messages about the procedure specializations done",
+%       "\tby higher_order.m.",
         "--debug-opt",
         "\tOutput detailed debugging traces of the optimization process.",
         "--debug-opt-pred-id <n>",
@@ -4843,6 +4839,10 @@ options_help_aux_output(Stream, !IO) :-
         "\tSet the maximum width of an error message line to <n> characters",
         "\t(unless a long single word forces the line over this limit).",
         "\tSpecifying --no-max-error-line-width removes the limit.",
+        "--reverse-error-order",
+        "\tPrint error messages in descending order of their line numbers,",
+        "\tinstead of the usual ascending order. This is useful if you want",
+        "\tto work on the last errors in a file first.",
         "--show-definitions",
         "\tWrite out a list of the types, insts, modes, predicates, functions",
         "\ttypeclasses and instances defined in the module to",
@@ -4859,6 +4859,22 @@ options_help_aux_output(Stream, !IO) :-
         "\tfirst and last lines, to `<module>.defn_extents'.",
         "\tThe list will be ordered on the starting line numbers",
         "\tof the predicates and functions.",
+        "--show-local-call-tree",
+        "\tConstruct the call tree of the predicates and functions",
+        "\tdefined in the module. Each node of this tree is a local",
+        "\tpredicate or function, and each node has edges linking it to the",
+        "\tnodes of the other local predicates and functions it refers to.",
+        "\tWrite out to `<module>.local_call_tree' a list of these nodes.",
+        "\tPut these nodes into the order in which they are encountered",
+        "\tby a depth-first left-to-right traversal of the bodies",
+        "\t(as reordered by mode analysis),",
+        "\tof the first procedure of each predicate or function,",
+        "\tstarting the traversal at the exported predicates and/or functions",
+        "\tof the module.",
+        "\tList the callees of each node in the same order.",
+        "\tWrite a flattened form of this call tree, containing just",
+        "\tthe predicates and functions in the same traversal order,",
+        "\tto `<module>.local_call_tree_order'.",
         "--show-local-type-representations",
         "\tWrite out information about the representations of all types",
         "\tdefined in the module being compiled to `<module>.type_repns'.",
@@ -4876,6 +4892,10 @@ options_help_aux_output(Stream, !IO) :-
         "\timports module B.",
         "\tThe resulting file can be processed by the graphviz tools.",
         "\tEffective only if --generate-dependencies is also specified.",
+% This option is for developers only for now.
+%       "--trans-opt-deps-spec <filename>",
+%       "\tSpecify a file to remove edges from the trans-opt dependency",
+%       "\tgraph.",
 % This option is for developers only.
 %       "--dump-trace-counts <stage number or name>",
 %       "\tIf the compiler was compiled with debugging enabled and is being",
@@ -5366,9 +5386,6 @@ options_help_compilation_model(Stream, !IO) :-
         "\tThis is necessary for interfacing with constraint solvers,",
         "\tor for backtrackable destructive update.",
         "\tThis option is not yet supported for the C# or Java backends.",
-        "--trail-segments\t\t\t(grade modifier: `.trseg')",
-        "\tThis option is deprecated as trail segments are now used by",
-        "\tdefault. The `.trseg' grade modifier is a synonym for `.tr'.",
         "--parallel\t\t(grade modifier: `.par')",
         "\tEnable parallel execution support for the low-level C grades.",
         "\tEnable concurrency (via pthreads) for the high-level C grades.",
@@ -5400,7 +5417,6 @@ options_help_compilation_model(Stream, !IO) :-
     io.write_string(Stream,
         "\n    LLDS back-end compilation model options:\n", !IO),
     write_tabbed_lines(Stream, [
-
         %"--gcc-global-registers\t\t(grades: reg, fast, asm_fast)",
         %"--no-gcc-global-registers\t(grades: none, jump, asm_jump)",
         "--gcc-global-registers\t\t(grades: reg, asm_fast)",
@@ -5443,7 +5459,13 @@ options_help_compilation_model(Stream, !IO) :-
         "-H, --high-level-code\t\t\t(grades: hlc, csharp, java)",
         "\tUse an alternative back-end that generates high-level code",
         "\trather than the very low-level code that is generated by our",
-        "\toriginal back-end."
+        "\toriginal back-end.",
+        "--c-debug-grade\t\t\t(grades: hlc)",
+        "\tRequire that all modules in the program be compiled to object code",
+        "\tin a way that allows the program executable to be debuggable",
+        "\twith debuggers for C, such as gdb. This option is intended mainly",
+        "\tfor the developers of Mercury, though it can also help to debug",
+        "\tC code included in Mercury programs."
 % The --det-copy-out option is not yet documented,
 % because it is not yet tested much and probably not very useful,
 % except for Java, where it is the default.
@@ -5665,14 +5687,6 @@ options_help_compilation_model(Stream, !IO) :-
 options_help_code_generation(Stream, !IO) :-
     io.write_string(Stream, "\nCode generation options:\n", !IO),
     write_tabbed_lines(Stream, [
-%       "--low-level-debug",
-%       "\tEnables various low-level debugging stuff, that was in",
-%       "\tthe distant past used to debug the low-level code generation.",
-%       "\tYou don't want to use this option unless you are hacking",
-%       "\tthe Mercury compiler itself (and probably not even then).",
-%       "\tCauses the generated code to become VERY big and VERY",
-%       "\tinefficient. Slows down compilation a LOT.",
-
 %       "--table-debug",
 %       "\tEnables the generation of code that helps to debug tabling",
 %       "\tprimitives.",
@@ -6364,17 +6378,23 @@ options_help_target_code_compilation(Stream, !IO) :-
         "\tSpecify which Java interpreter to use.",
         "\tThe default is `java'",
 
+        "--javac-flags <options>, --javac-flag <option>",
         "--java-flags <options>, --java-flag <option>",
         "\tSpecify options to be passed to the Java compiler.",
-        "\t`--java-flag' should be used for single words which need",
-        "\tto be quoted when passed to the shell.",
+        "\t`--java-flag' or `--javac-flag' should be used for single words",
+        "\twhich need to be quoted when passed to the shell.",
 
         "--java-classpath <path>",
-        "\tSet the classpath for the Java compiler.",
+        "\tSet the classpath for the Java compiler and interpreter.",
 
         "--java-object-file-extension <ext>",
         "\tSpecify an extension for Java object (bytecode) files",
         "\tBy default this is `.class'.",
+
+        "--java-runtime-flags <options>, java-runtime-flag <option>",
+        "\tSpecify options to be passed to the Java interpreter.",
+        "\t`--java-runtime-flag' should be used for single words which need",
+        "\tto be quoted when passed to the shell.",
 
         "--csharp-compiler <csc>",
         "\tSpecify the name of the C# Compiler. The default is `csc'.",

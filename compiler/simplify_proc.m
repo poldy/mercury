@@ -28,9 +28,10 @@
 :- import_module hlds.instmap.
 :- import_module parse_tree.
 :- import_module parse_tree.error_util.
-:- import_module parse_tree.prog_data.
 
+:- import_module io.
 :- import_module list.
+:- import_module maybe.
 
 %-----------------------------------------------------------------------------%
 
@@ -39,9 +40,9 @@
     %
     % Used by mercury_compiler_front_end.m when doing compilation pass-by-pass.
     %
-:- pred simplify_pred_procs(simplify_tasks::in, pred_id::in,
-    list(proc_id)::in, module_info::in, module_info::out,
-    pred_info::in, pred_info::out,
+:- pred simplify_pred_procs(maybe(io.text_output_stream)::in,
+    simplify_tasks::in, pred_id::in, list(proc_id)::in,
+    module_info::in, module_info::out, pred_info::in, pred_info::out,
     error_spec_accumulator::in, error_spec_accumulator::out) is det.
 
     % Simplify the given procedure. Throw away any resulting error messages.
@@ -49,8 +50,9 @@
     % Used by compiler passes after the front end that need (or maybe just
     % want) to eliminate unnecessary parts of the procedure.
     %
-:- pred simplify_proc(simplify_tasks::in, pred_id::in, proc_id::in,
-    module_info::in, module_info::out, proc_info::in, proc_info::out) is det.
+:- pred simplify_proc(maybe(io.text_output_stream)::in, simplify_tasks::in,
+    pred_id::in, proc_id::in, module_info::in, module_info::out,
+    proc_info::in, proc_info::out) is det.
 
     % simplify_goal_update_vars_in_proc(SimplifyTasks, !ModuleInfo,
     %   PredId, ProcId, !ProcInfo, InstMap0, !Goal, CostDelta):
@@ -74,15 +76,6 @@
     proc_info::in, proc_info::out, instmap::in, hlds_goal::in, hlds_goal::out,
     int::out) is det.
 
-    % simplify_may_introduce_calls(ModuleName, PredName, Arity):
-    %
-    % Succeed if the simplify package may introduce calls to a predicate
-    % or function with the given name. ModuleName should be a standard library
-    % module.
-    %
-:- pred simplify_may_introduce_calls(string::in, string::in, arity::in)
-    is semidet.
-
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
@@ -99,21 +92,22 @@
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
 :- import_module hlds.status.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.optimization_options.
 :- import_module libs.options.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
+:- import_module parse_tree.error_spec.
+:- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
+:- import_module parse_tree.var_table.
 :- import_module transform_hlds.
 :- import_module transform_hlds.direct_arg_in_out.
 
 :- import_module bool.
 :- import_module int.
 :- import_module map.
-:- import_module maybe.
 :- import_module require.
 :- import_module set.
 :- import_module string.
@@ -121,20 +115,23 @@
 
 %-----------------------------------------------------------------------------%
 
-simplify_pred_procs(_, _, [], !ModuleInfo, !PredInfo, !Specs).
-simplify_pred_procs(SimplifyTasks, PredId, [ProcId | ProcIds], !ModuleInfo,
-        !PredInfo, !Specs) :-
-    simplify_pred_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo,
-        !PredInfo, !Specs),
-    simplify_pred_procs(SimplifyTasks, PredId, ProcIds, !ModuleInfo,
-        !PredInfo, !Specs).
+simplify_pred_procs(_, _, _, [], !ModuleInfo, !PredInfo, !Specs).
+simplify_pred_procs(MaybeProgressStream, SimplifyTasks, PredId,
+        [ProcId | ProcIds], !ModuleInfo, !PredInfo, !Specs) :-
+    simplify_pred_proc(MaybeProgressStream, SimplifyTasks, PredId, ProcId,
+        !ModuleInfo, !PredInfo, !Specs),
+    simplify_pred_procs(MaybeProgressStream, SimplifyTasks, PredId, ProcIds,
+        !ModuleInfo, !PredInfo, !Specs).
 
-:- pred simplify_pred_proc(simplify_tasks::in, pred_id::in, proc_id::in,
+:- pred simplify_pred_proc(maybe(io.text_output_stream)::in,
+    simplify_tasks::in, pred_id::in, proc_id::in,
     module_info::in, module_info::out, pred_info::in, pred_info::out,
     error_spec_accumulator::in, error_spec_accumulator::out) is det.
 
-simplify_pred_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo,
-        !PredInfo, !Specs) :-
+simplify_pred_proc(_MaybeProgressStream, SimplifyTasks, PredId, ProcId,
+        !ModuleInfo, !PredInfo, !Specs) :-
+    % XXX It is strange that simplify_proc prints progress messages,
+    % but simplify_pred_proc does not.
     pred_info_get_proc_table(!.PredInfo, ProcTable0),
     map.lookup(ProcTable0, ProcId, ProcInfo0),
     simplify_proc_return_msgs(SimplifyTasks, PredId, ProcId,
@@ -162,9 +159,16 @@ simplify_pred_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo,
     pred_info_set_proc_table(ProcTable, !PredInfo),
     accumulate_error_specs_for_proc(ProcSpecs, !Specs).
 
-simplify_proc(SimplifyTasks, PredId, ProcId, !ModuleInfo, !ProcInfo)  :-
+simplify_proc(MaybeProgressStream, SimplifyTasks, PredId, ProcId,
+        !ModuleInfo, !ProcInfo)  :-
     trace [io(!IO)] (
-        write_pred_progress_message(!.ModuleInfo, "Simplifying", PredId, !IO)
+        (
+            MaybeProgressStream = no
+        ;
+            MaybeProgressStream = yes(ProgressStream),
+            maybe_write_pred_progress_message(ProgressStream, !.ModuleInfo,
+                "Simplifying", PredId, !IO)
+        )
     ),
     simplify_proc_return_msgs(SimplifyTasks, PredId, ProcId, !ModuleInfo,
         !ProcInfo, _).
@@ -188,11 +192,9 @@ simplify_goal_update_vars_in_proc(SimplifyTasks, !ModuleInfo,
 
     simplify_info_get_module_info(SimplifyInfo, !:ModuleInfo),
 
-    simplify_info_get_varset(SimplifyInfo, VarSet),
-    simplify_info_get_var_types(SimplifyInfo, VarTypes),
+    simplify_info_get_var_table(SimplifyInfo, VarTable),
     simplify_info_get_rtti_varmaps(SimplifyInfo, RttiVarMaps),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
 
     simplify_info_get_cost_delta(SimplifyInfo, CostDelta).
@@ -244,8 +246,8 @@ simplify_proc_return_msgs(SimplifyTasks0, PredId, ProcId, !ModuleInfo,
             SimplifyTasks ^ do_warn_implicit_streams = warn_implicit_streams,
             ImplicitStreamWarnings = generate_implicit_stream_warnings
         ),
-        simplify_proc_analyze_and_format_calls(!ModuleInfo,
-            ImplicitStreamWarnings, PredId, ProcId, FormatSpecs, !ProcInfo)
+        simplify_proc_analyze_and_format_calls(!ModuleInfo, PredId, PredInfo0,
+            ProcId, !ProcInfo, ImplicitStreamWarnings, FormatSpecs)
     else
         % Either there are no format calls to check, or we don't want to
         % optimize them and would ignore the added messages anyway.
@@ -276,31 +278,34 @@ simplify_proc_return_msgs(SimplifyTasks0, PredId, ProcId, !ModuleInfo,
         Info0, Info),
     proc_info_set_goal(Goal, !ProcInfo),
 
-    simplify_info_get_varset(Info, VarSet0),
-    simplify_info_get_var_types(Info, VarTypes0),
+    simplify_info_get_var_table(Info, VarTable0),
     simplify_info_get_rtti_varmaps(Info, RttiVarMaps),
     simplify_info_get_elim_vars(Info, ElimVarsLists0),
     % We sort the lists basically on the number of the first variable.
     list.sort(ElimVarsLists0, ElimVarsLists),
     list.condense(ElimVarsLists, ElimVars),
-    varset.delete_sorted_vars(ElimVars, VarSet0, VarSet1),
-    delete_sorted_var_types(ElimVars, VarTypes0, VarTypes),
+    delete_var_entries(ElimVars, VarTable0, VarTable1),
     simplify_info_get_module_info(Info, !:ModuleInfo),
     % We only eliminate vars that cannot occur in RttiVarMaps.
     ( if simplify_do_after_front_end(Info) then
         proc_info_get_var_name_remap(!.ProcInfo, VarNameRemap),
-        map.foldl(varset.name_var, VarNameRemap, VarSet1, VarSet),
+        RenameVar =
+            ( pred(V::in, N::in, VT0::in, VT::out) is det :-
+                lookup_var_entry(VT0, V, E0),
+                E = E0 ^ vte_name := N,
+                update_var_entry(V, E, VT0, VT)
+            ),
+        map.foldl(RenameVar, VarNameRemap, VarTable1, VarTable),
         proc_info_set_var_name_remap(map.init, !ProcInfo),
 
         proc_info_get_headvars(!.ProcInfo, HeadVars),
         proc_info_get_argmodes(!.ProcInfo, ArgModes),
-        find_and_record_any_direct_arg_in_out_posns(PredId, ProcId, VarTypes,
+        find_and_record_any_direct_arg_in_out_posns(PredId, ProcId, VarTable,
             HeadVars, ArgModes, !ModuleInfo)
     else
-        VarSet = VarSet0
+        VarTable = VarTable1
     ),
-    proc_info_set_varset(VarSet, !ProcInfo),
-    proc_info_set_vartypes(VarTypes, !ProcInfo),
+    proc_info_set_var_table(VarTable, !ProcInfo),
     proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo),
 
     simplify_info_get_has_parallel_conj(Info, HasParallelConj),
@@ -357,8 +362,8 @@ simplify_proc_maybe_vary_parameters(ModuleInfo, PredId, ProcInfo,
             TurnOffCommonStructByRequest = no
         )
     ),
-    proc_info_get_vartypes(ProcInfo, VarTypes0),
-    vartypes_count(VarTypes0, NumVars),
+    proc_info_get_var_table(ProcInfo, VarTable0),
+    var_table_count(VarTable0, NumVars),
     ( if
         ( TurnOffCommonStructByRequest = yes
         ; NumVars > turn_off_common_struct_threshold
@@ -412,22 +417,21 @@ simplify_proc_maybe_mark_modecheck_clauses(!ProcInfo) :-
 %-----------------------------------------------------------------------------%
 
 :- pred simplify_proc_analyze_and_format_calls(
-    module_info::in, module_info::out,
-    maybe_generate_implicit_stream_warnings::in, pred_id::in, proc_id::in,
-    list(error_spec)::out, proc_info::in, proc_info::out) is det.
+    module_info::in, module_info::out, pred_id::in, pred_info::in,
+    proc_id::in, proc_info::in, proc_info::out,
+    maybe_generate_implicit_stream_warnings::in, list(error_spec)::out) is det.
 
-simplify_proc_analyze_and_format_calls(!ModuleInfo, ImplicitStreamWarnings,
-        PredId, ProcId, FormatSpecs, !ProcInfo) :-
+simplify_proc_analyze_and_format_calls(!ModuleInfo, PredId, PredInfo0,
+        ProcId, !ProcInfo, ImplicitStreamWarnings, FormatSpecs) :-
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, VarSet0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
-    analyze_and_optimize_format_calls(!.ModuleInfo, ImplicitStreamWarnings,
-        Goal0, MaybeGoal, FormatSpecs, VarSet0, VarSet, VarTypes0, VarTypes),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
+    analyze_and_optimize_format_calls(!.ModuleInfo, PredInfo0, !.ProcInfo,
+        ImplicitStreamWarnings, Goal0, MaybeGoal, FormatSpecs,
+        VarTable0, VarTable),
     (
         MaybeGoal = yes(Goal),
         proc_info_set_goal(Goal, !ProcInfo),
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
 
         % The goals we replace format calls with are created with the
         % correct nonlocals, but analyze_and_optimize_format_calls can
@@ -439,34 +443,26 @@ simplify_proc_analyze_and_format_calls(!ModuleInfo, ImplicitStreamWarnings,
         % the nonlocal fields of the original scopes. And since
         % instmap_deltas are restricted to the goal's nonlocals,
         % they need to be recomputed as well.
-        requantify_proc_general(ordinary_nonlocals_maybe_lambda, !ProcInfo),
-        recompute_instmap_delta_proc(do_not_recompute_atomic_instmap_deltas,
+        requantify_proc_general(ord_nl_maybe_lambda, !ProcInfo),
+        recompute_instmap_delta_proc(no_recomp_atomics,
             !ProcInfo, !ModuleInfo),
 
         % Put the new proc_info back into !ModuleInfo, since some of the
         % following code could otherwise find obsolete information in there.
+        pred_info_set_proc_info(ProcId, !.ProcInfo, PredInfo0, PredInfo1),
 
         % Remove the has_format_call marker from the pred_info before
         % putting it back, since any optimizable format calls will already
         % have been optimized. Since currently there is no program
         % transformation that inserts calls to these predicates,
-        % there is no point in invoking find_format_call again later.
-
-        module_info_get_preds(!.ModuleInfo, PredTable0),
-        map.lookup(PredTable0, PredId, PredInfo0),
-        pred_info_get_proc_table(PredInfo0, ProcTable0),
-        map.det_update(ProcId, !.ProcInfo, ProcTable0, ProcTable),
-        pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo1),
-
+        % there is no point in trying to optimize format_calls again later.
         pred_info_get_markers(PredInfo1, Markers1),
         remove_marker(marker_has_format_call, Markers1, Markers),
         pred_info_set_markers(Markers, PredInfo1, PredInfo),
-
-        map.det_update(PredId, PredInfo, PredTable0, PredTable),
-        module_info_set_preds(PredTable, !ModuleInfo)
+        module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
     ;
         MaybeGoal = no
-        % There should not be any updates to the varset and the vartypes,
+        % There should not be any updates to the var_table,
         % but even if there are, throw them away, since they apply to a version
         % of the goal that we will not be using.
     ).
@@ -660,15 +656,13 @@ maybe_recompute_fields_after_top_level_goal(GoalInfo0, InstMap0,
     (
         RerunQuantDelta = rerun_quant_instmap_deltas,
         NonLocals = goal_info_get_nonlocals(GoalInfo0),
-        some [!VarSet, !VarTypes, !RttiVarMaps, !ModuleInfo] (
-            simplify_info_get_varset(!.Info, !:VarSet),
-            simplify_info_get_var_types(!.Info, !:VarTypes),
+        some [!VarTable, !RttiVarMaps, !ModuleInfo] (
+            simplify_info_get_var_table(!.Info, !:VarTable),
             simplify_info_get_rtti_varmaps(!.Info, !:RttiVarMaps),
-            implicitly_quantify_goal_general(ordinary_nonlocals_maybe_lambda,
-                NonLocals, _, !Goal, !VarSet, !VarTypes, !RttiVarMaps),
+            implicitly_quantify_goal_general(ord_nl_maybe_lambda, NonLocals, _,
+                !Goal, !VarTable, !RttiVarMaps),
 
-            simplify_info_set_varset(!.VarSet, !Info),
-            simplify_info_set_var_types(!.VarTypes, !Info),
+            simplify_info_set_var_table(!.VarTable, !Info),
             simplify_info_set_rtti_varmaps(!.RttiVarMaps, !Info),
 
             % Always recompute instmap_deltas for atomic goals - this is safer
@@ -676,8 +670,8 @@ maybe_recompute_fields_after_top_level_goal(GoalInfo0, InstMap0,
             % in the instmap_delta for a goal.
             simplify_info_get_module_info(!.Info, !:ModuleInfo),
             simplify_info_get_inst_varset(!.Info, InstVarSet),
-            recompute_instmap_delta(recompute_atomic_instmap_deltas, !Goal,
-                !.VarTypes, InstVarSet, InstMap0, !ModuleInfo),
+            recompute_instmap_delta(recomp_atomics, !.VarTable, InstVarSet,
+                InstMap0, !Goal, !ModuleInfo),
             simplify_info_set_module_info(!.ModuleInfo, !Info)
         )
     ;
@@ -688,34 +682,32 @@ maybe_recompute_fields_after_top_level_goal(GoalInfo0, InstMap0,
     (
         RerunDet = rerun_det,
         Detism = goal_info_get_determinism(GoalInfo0),
-        some [!VarSet, !VarTypes, !RttiVarMaps, !ModuleInfo, !ProcInfo]
+        some [!VarTable, !RttiVarMaps, !ModuleInfo, !ProcInfo]
         (
             det_get_soln_context(Detism, SolnContext),
 
-            % Det_infer_goal looks up the proc_info in the module_info
-            % for the vartypes, so we have to put them back in the module_info.
+            % Det_infer_goal looks up the proc_info in the module_info for
+            % the var_table, so we have to put them back in the module_info.
             simplify_info_get_module_info(!.Info, !:ModuleInfo),
-            simplify_info_get_varset(!.Info, !:VarSet),
-            simplify_info_get_var_types(!.Info, !:VarTypes),
+            simplify_info_get_var_table(!.Info, !:VarTable),
             simplify_info_get_rtti_varmaps(!.Info, !:RttiVarMaps),
             simplify_info_get_pred_proc_id(!.Info, PredProcId),
             module_info_pred_proc_info(!.ModuleInfo, PredProcId,
                 PredInfo, !:ProcInfo),
-            proc_info_set_vartypes(!.VarTypes, !ProcInfo),
-            proc_info_set_varset(!.VarSet, !ProcInfo),
+            proc_info_set_var_table(!.VarTable, !ProcInfo),
             proc_info_set_rtti_varmaps(!.RttiVarMaps, !ProcInfo),
             module_info_set_pred_proc_info(PredProcId,
                 PredInfo, !.ProcInfo, !ModuleInfo),
             simplify_info_set_module_info(!.ModuleInfo, !Info),
 
-            det_info_init(!.ModuleInfo, PredProcId, !.VarSet, !.VarTypes,
+            det_info_init(!.ModuleInfo, PredProcId, !.VarTable,
                 pess_extra_vars_report, [], DetInfo0),
             det_infer_goal(!Goal, InstMap0, SolnContext, [], no,
                 _, _, DetInfo0, DetInfo),
             det_info_get_module_info(DetInfo, !:ModuleInfo),
-            det_info_get_vartypes(DetInfo, !:VarTypes),
+            det_info_get_var_table(DetInfo, !:VarTable),
             simplify_info_set_module_info(!.ModuleInfo, !Info),
-            simplify_info_set_var_types(!.VarTypes, !Info)
+            simplify_info_set_var_table(!.VarTable, !Info)
         )
     ;
         RerunDet = do_not_rerun_det
@@ -869,202 +861,6 @@ set_goal_contains_trace_features_in_cases([Case0 | Cases0], [Case | Cases],
     Case = case(MainConsId, OtherConsIds, Goal),
     !:ContainsTrace = worst_contains_trace(GoalContainsTrace, !.ContainsTrace),
     set_goal_contains_trace_features_in_cases(Cases0, Cases, !ContainsTrace).
-
-%-----------------------------------------------------------------------------%
-
-simplify_may_introduce_calls(ModuleName, PredName, _Arity) :-
-    % For some reason, the compiler records the original arity of
-    % int.unchecked_quotient as 3, not 2. Don't check the arities
-    % until this is fixed.
-    (
-        ModuleName = "private_builtin",
-        ( PredName = "builtin_compound_eq"
-        ; PredName = "builtin_compound_lt"
-        ; PredName = "builtin_int16_gt"
-        ; PredName = "builtin_int16_lt"
-        ; PredName = "builtin_int32_gt"
-        ; PredName = "builtin_int32_lt"
-        ; PredName = "builtin_int64_gt"
-        ; PredName = "builtin_int64_lt"
-        ; PredName = "builtin_int8_gt"
-        ; PredName = "builtin_int8_lt"
-        ; PredName = "builtin_int_gt"
-        ; PredName = "builtin_int_lt"
-        ; PredName = "builtin_uint16_gt"
-        ; PredName = "builtin_uint16_lt"
-        ; PredName = "builtin_uint32_gt"
-        ; PredName = "builtin_uint32_lt"
-        ; PredName = "builtin_uint64_gt"
-        ; PredName = "builtin_uint64_lt"
-        ; PredName = "builtin_uint8_gt"
-        ; PredName = "builtin_uint8_lt"
-        ; PredName = "builtin_uint_gt"
-        ; PredName = "builtin_uint_lt"
-        ; PredName = "state_var_copy"
-        )
-    ;
-        ( ModuleName = "int"
-        ; ModuleName = "uint"
-        ; ModuleName = "int8"
-        ; ModuleName = "uint8"
-        ; ModuleName = "int16"
-        ; ModuleName = "uint16"
-        ; ModuleName = "int32"
-        ; ModuleName = "uint32"
-        ; ModuleName = "int64"
-        ; ModuleName = "uint64"
-        ),
-        ( PredName = "*"
-        ; PredName = "unchecked_quotient"
-        ; PredName = "unchecked_rem"
-        ; PredName = "unchecked_left_shift"
-        ; PredName = "unchecked_right_shift"
-        )
-    ;
-        ModuleName = "io",
-        PredName = "write_string"
-    ;
-        ModuleName = "string",
-        ( PredName = "int_to_string"
-        ; PredName = "char_to_string"
-        ; PredName = "float_to_string"
-        ; PredName = "++"
-        )
-    ;
-        ModuleName = "string.format",
-        ( PredName = "format_char_component_nowidth"
-        ; PredName = "format_char_component_width"
-        ; PredName = "format_string_component_nowidth_noprec"
-        ; PredName = "format_string_component_nowidth_prec"
-        ; PredName = "format_string_component_width_noprec"
-        ; PredName = "format_string_component_width_prec"
-        ; PredName = "format_signed_int_component_nowidth_noprec"
-        ; PredName = "format_signed_int_component_nowidth_prec"
-        ; PredName = "format_signed_int_component_width_noprec"
-        ; PredName = "format_signed_int_component_width_prec"
-        ; PredName = "format_unsigned_int_component_nowidth_noprec"
-        ; PredName = "format_unsigned_int_component_nowidth_prec"
-        ; PredName = "format_unsigned_int_component_width_noprec"
-        ; PredName = "format_unsigned_int_component_width_prec"
-        ; PredName = "format_signed_int64_component_nowidth_noprec"
-        ; PredName = "format_signed_int64_component_nowidth_prec"
-        ; PredName = "format_signed_int64_component_width_noprec"
-        ; PredName = "format_signed_int64_component_width_prec"
-        ; PredName = "format_unsigned_int64_component_nowidth_noprec"
-        ; PredName = "format_unsigned_int64_component_nowidth_prec"
-        ; PredName = "format_unsigned_int64_component_width_noprec"
-        ; PredName = "format_unsigned_int64_component_width_prec"
-        ; PredName = "format_uint_component_nowidth_noprec"
-        ; PredName = "format_uint_component_nowidth_prec"
-        ; PredName = "format_uint_component_width_noprec"
-        ; PredName = "format_uint_component_width_prec"
-        ; PredName = "format_uint64_component_nowidth_noprec"
-        ; PredName = "format_uint64_component_nowidth_prec"
-        ; PredName = "format_uint64_component_width_noprec"
-        ; PredName = "format_uint64_component_width_prec"
-        ; PredName = "format_float_component_nowidth_noprec"
-        ; PredName = "format_float_component_nowidth_prec"
-        ; PredName = "format_float_component_width_noprec"
-        ; PredName = "format_float_component_width_prec"
-        ; PredName = "format_cast_int8_to_int"
-        ; PredName = "format_cast_int16_to_int"
-        ; PredName = "format_cast_int32_to_int"
-        ; PredName = "format_cast_uint8_to_uint"
-        ; PredName = "format_cast_uint16_to_uint"
-        ; PredName = "format_cast_uint32_to_uint"
-        )
-    ;
-        ModuleName = "stream",
-        PredName = "put"
-    ;
-        ModuleName = "table_builtin",
-
-        ( PredName = "table_lookup_insert_start_int"
-        ; PredName = "table_lookup_insert_int"
-        ; PredName = "table_lookup_insert_float"
-        ; PredName = "table_lookup_insert_char"
-        ; PredName = "table_lookup_insert_string"
-        ; PredName = "table_lookup_insert_enum"
-        ; PredName = "table_lookup_insert_foreign_enum"
-        ; PredName = "table_lookup_insert_gen"
-        ; PredName = "table_lookup_insert_addr"
-        ; PredName = "table_lookup_insert_poly"
-        ; PredName = "table_lookup_insert_poly_addr"
-        ; PredName = "table_lookup_insert_typeinfo"
-        ; PredName = "table_lookup_insert_typeclassinfo"
-
-        ; PredName = "table_lookup_save_int_answer"
-        ; PredName = "table_lookup_save_char_answer"
-        ; PredName = "table_lookup_save_string_answer"
-        ; PredName = "table_lookup_save_float_answer"
-        ; PredName = "table_lookup_save_io_state_answer"
-        ; PredName = "table_lookup_save_any_answer"
-
-        ; PredName = "table_lookup_restore_int_answer"
-        ; PredName = "table_lookup_restore_char_answer"
-        ; PredName = "table_lookup_restore_string_answer"
-        ; PredName = "table_lookup_restore_float_answer"
-        ; PredName = "table_lookup_restore_io_state_answer"
-        ; PredName = "table_lookup_restore_any_answer"
-
-        ; PredName = "table_loop_setup"
-        ; PredName = "table_loop_setup_shortcut"
-        ; PredName = "table_loop_mark_as_inactive"
-        ; PredName = "table_loop_mark_as_inactive_and_fail"
-        ; PredName = "table_loop_mark_as_active_and_fail"
-
-        ; PredName = "table_memo_det_setup"
-        ; PredName = "table_memo_det_setup_shortcut"
-        ; PredName = "table_memo_semi_setup"
-        ; PredName = "table_memo_semi_setup_shortcut"
-        ; PredName = "table_memo_non_setup"
-        ; PredName = "table_memo_mark_as_failed"
-        ; PredName = "table_memo_mark_as_succeeded"
-        ; PredName = "table_memo_mark_as_incomplete"
-        ; PredName = "table_memo_mark_as_active_and_fail"
-        ; PredName = "table_memo_mark_as_complete_and_fail"
-        ; PredName = "table_memo_create_answer_block"
-        ; PredName = "table_memo_get_answer_block"
-        ; PredName = "table_memo_non_get_answer_table"
-        ; PredName = "table_memo_non_answer_is_not_duplicate"
-        ; PredName = "table_memo_non_answer_is_not_duplicate_shortcut"
-        ; PredName = "table_memo_return_all_answers_nondet"
-        ; PredName = "table_memo_return_all_answers_multi"
-        ; PredName = "table_memo_non_return_all_shortcut"
-
-        ; PredName = "table_io_in_range"
-        ; PredName = "table_io_has_occurred"
-        ; PredName = "table_io_copy_io_state"
-        ; PredName = "table_io_left_bracket_unitized_goal"
-        ; PredName = "table_io_right_bracket_unitized_goal"
-
-        ; PredName = "table_mm_setup"
-        ; PredName = "table_mm_suspend_consumer"
-        ; PredName = "table_mm_completion"
-        ; PredName = "table_mm_get_answer_table"
-        ; PredName = "table_mm_answer_is_not_duplicate"
-        ; PredName = "table_mm_answer_is_not_duplicate_shortcut"
-        ; PredName = "table_mm_create_answer_block"
-        ; PredName = "table_mm_fill_answer_block_shortcut"
-        ; PredName = "table_mm_return_all_nondet"
-        ; PredName = "table_mm_return_all_multi"
-        ; PredName = "table_mm_return_all_shortcut"
-
-        ; PredName = "table_mmos_save_inputs"
-        ; PredName = "table_mmos_setup_consumer"
-        ; PredName = "table_mmos_answer_is_not_duplicate"
-        ; PredName = "table_mmos_answer_is_not_duplicate_shortcut"
-        ; PredName = "table_mmos_consume_next_answer_nondet"
-        ; PredName = "table_mmos_consume_next_answer_multi"
-        ; PredName = "table_mmos_restore_answers"
-        ; PredName = "table_mmos_pickup_inputs"
-        ; PredName = "table_mmos_create_answer_block"
-        ; PredName = "table_mmos_return_answer"
-        ; PredName = "table_mmos_completion"
-
-        ; PredName = "table_error"
-        )
-    ).
 
 %-----------------------------------------------------------------------------%
 :- end_module check_hlds.simplify.simplify_proc.

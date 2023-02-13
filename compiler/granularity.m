@@ -34,8 +34,8 @@
 
 :- import_module hlds.goal_util.
 :- import_module hlds.hlds_dependency_graph.
-:- import_module hlds.hlds_pred.
 :- import_module hlds.hlds_goal.
+:- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
 :- import_module hlds.pred_table.
 :- import_module hlds.quantification.
@@ -51,7 +51,6 @@
 
 :- import_module bool.
 :- import_module list.
-:- import_module map.
 :- import_module maybe.
 :- import_module require.
 :- import_module set.
@@ -74,10 +73,8 @@ runtime_granularity_test_in_scc(SCC, !ModuleInfo) :-
     module_info::in, module_info::out) is det.
 
 runtime_granularity_test_in_proc(SCC, proc(PredId, ProcId), !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
-    pred_info_get_proc_table(PredInfo0, ProcTable0),
-    map.lookup(ProcTable0, ProcId, ProcInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    pred_info_proc_info(PredInfo0, ProcId, ProcInfo0),
     proc_info_get_has_parallel_conj(ProcInfo0, HasParallelConj),
     (
         HasParallelConj = has_parallel_conj,
@@ -89,12 +86,9 @@ runtime_granularity_test_in_proc(SCC, proc(PredId, ProcId), !ModuleInfo) :-
         ;
             Changed = yes,
             proc_info_set_goal(Goal, ProcInfo0, ProcInfo1),
-            requantify_proc_general(ordinary_nonlocals_no_lambda,
-                ProcInfo1, ProcInfo),
-            map.det_update(ProcId, ProcInfo, ProcTable0, ProcTable),
-            pred_info_set_proc_table(ProcTable, PredInfo0, PredInfo),
-            map.det_update(PredId, PredInfo, PredTable0, PredTable),
-            module_info_set_preds(PredTable, !ModuleInfo)
+            requantify_proc_general(ord_nl_no_lambda, ProcInfo1, ProcInfo),
+            pred_info_set_proc_info(ProcId, ProcInfo, PredInfo0, PredInfo),
+            module_info_set_pred_info(PredId, PredInfo, !ModuleInfo)
         )
     ;
         HasParallelConj = has_no_parallel_conj
@@ -141,11 +135,11 @@ runtime_granularity_test_in_goal(Goal0, Goal, !Changed, SCC, ModuleInfo) :-
                         !Attributes),
                     Attributes = !.Attributes
                 ),
-                generate_foreign_proc(ModuleInfo, ModuleName, ProcName,
-                    pf_predicate, only_mode, detism_semi, purity_impure,
-                    Attributes, Args, ExtraArgs, MaybeRuntimeCond,
-                    runtime_test_code, Features, instmap_delta_bind_no_var,
-                    Context, Cond),
+                generate_call_foreign_proc(ModuleInfo, pf_predicate,
+                    ModuleName, ProcName,
+                    [], Args, ExtraArgs, instmap_delta_bind_no_var, only_mode,
+                    detism_semi, purity_impure, Features, Attributes,
+                    MaybeRuntimeCond, runtime_test_code, Context, Cond),
 
                 Then = hlds_goal(conj(parallel_conj, Goals), GoalInfo),
                 Else = hlds_goal(conj(plain_conj, Goals), GoalInfo),

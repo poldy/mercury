@@ -82,10 +82,14 @@
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
 
-:- pred detect_cse_in_module(module_info::in, module_info::out) is det.
+:- import_module io.
+:- import_module maybe.
 
-:- pred detect_cse_in_proc(pred_id::in, proc_id::in,
+:- pred detect_cse_in_module(io.text_output_stream::in,
     module_info::in, module_info::out) is det.
+
+:- pred detect_cse_in_proc(maybe(io.text_output_stream)::in,
+    pred_id::in, proc_id::in, module_info::in, module_info::out) is det.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -104,89 +108,85 @@
 :- import_module hlds.make_goal.
 :- import_module hlds.passes_aux.
 :- import_module hlds.quantification.
-:- import_module hlds.vartypes.
 :- import_module libs.
 :- import_module libs.file_util.
 :- import_module libs.globals.
 :- import_module libs.options.
 :- import_module parse_tree.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.error_util.
+:- import_module parse_tree.write_error_spec.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.set_of_var.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
-:- import_module io.
 :- import_module list.
 :- import_module map.
 :- import_module pair.
 :- import_module require.
 :- import_module string.
 :- import_module term.
-:- import_module varset.
 
 %---------------------------------------------------------------------------%
 
-detect_cse_in_module(!ModuleInfo) :-
+detect_cse_in_module(ProgressStream, !ModuleInfo) :-
     % Traverse the module structure, calling `detect_cse_in_goal'
     % for each procedure body.
     module_info_get_valid_pred_ids(!.ModuleInfo, PredIds),
-    detect_cse_in_preds(PredIds, !ModuleInfo).
+    detect_cse_in_preds(ProgressStream, PredIds, !ModuleInfo).
 
-:- pred detect_cse_in_preds(list(pred_id)::in,
+:- pred detect_cse_in_preds(io.text_output_stream::in, list(pred_id)::in,
     module_info::in, module_info::out) is det.
 
-detect_cse_in_preds([], !ModuleInfo).
-detect_cse_in_preds([PredId | PredIds], !ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, PredTable),
-    map.lookup(PredTable, PredId, PredInfo),
-    detect_cse_in_pred(PredId, PredInfo, !ModuleInfo),
-    detect_cse_in_preds(PredIds, !ModuleInfo).
+detect_cse_in_preds(_, [], !ModuleInfo).
+detect_cse_in_preds(ProgressStream, [PredId | PredIds], !ModuleInfo) :-
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo),
+    detect_cse_in_pred(ProgressStream, PredId, PredInfo, !ModuleInfo),
+    detect_cse_in_preds(ProgressStream, PredIds, !ModuleInfo).
 
-:- pred detect_cse_in_pred(pred_id::in, pred_info::in,
-    module_info::in, module_info::out) is det.
+:- pred detect_cse_in_pred(io.text_output_stream::in,
+    pred_id::in, pred_info::in, module_info::in, module_info::out) is det.
 
-detect_cse_in_pred(PredId, PredInfo, !ModuleInfo) :-
-    ProcIds = pred_info_valid_non_imported_procids(PredInfo),
-    detect_cse_in_procs(PredId, ProcIds, !ModuleInfo).
-
-:- pred detect_cse_in_procs(pred_id::in, list(proc_id)::in,
-    module_info::in, module_info::out) is det.
-
-detect_cse_in_procs(_PredId, [], !ModuleInfo).
-detect_cse_in_procs(PredId, [ProcId | ProcIds], !ModuleInfo) :-
-    detect_cse_in_proc(PredId, ProcId, !ModuleInfo),
-    detect_cse_in_procs(PredId, ProcIds, !ModuleInfo).
-
-detect_cse_in_proc(PredId, ProcId, !ModuleInfo) :-
+detect_cse_in_pred(ProgressStream, PredId, PredInfo, !ModuleInfo) :-
     module_info_get_globals(!.ModuleInfo, Globals),
     globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
     (
         VeryVerbose = yes,
         trace [io(!IO)] (
-            get_progress_output_stream(!.ModuleInfo, ProgressStream, !IO),
             io.format(ProgressStream,
                 "%% Detecting common deconstructions for %s\n",
-                [s(pred_id_to_string(!.ModuleInfo, PredId))], !IO)
+                [s(pred_id_to_user_string(!.ModuleInfo, PredId))], !IO)
         )
     ;
         VeryVerbose = no
     ),
+    ProcIds = pred_info_valid_non_imported_procids(PredInfo),
+    detect_cse_in_procs(ProgressStream, PredId, ProcIds, !ModuleInfo).
+
+:- pred detect_cse_in_procs(io.text_output_stream::in,
+    pred_id::in, list(proc_id)::in, module_info::in, module_info::out) is det.
+
+detect_cse_in_procs(_ProgressStream,_PredId, [], !ModuleInfo).
+detect_cse_in_procs(ProgressStream, PredId, [ProcId | ProcIds], !ModuleInfo) :-
+    detect_cse_in_proc(yes(ProgressStream), PredId, ProcId, !ModuleInfo),
+    detect_cse_in_procs(ProgressStream, PredId, ProcIds, !ModuleInfo).
+
+detect_cse_in_proc(MaybeProgressStream, PredId, ProcId, !ModuleInfo) :-
+    module_info_get_globals(!.ModuleInfo, Globals),
+    globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
 
     % XXX We wouldn't have to keep getting the proc_info out of and back into
     % the module_info if modecheck didn't take a whole module_info.
-    module_info_get_preds(!.ModuleInfo, PredTable0),
-    map.lookup(PredTable0, PredId, PredInfo0),
-    pred_info_get_proc_table(PredInfo0, ProcTable0),
-    map.lookup(ProcTable0, ProcId, ProcInfo0),
+    module_info_pred_info(!.ModuleInfo, PredId, PredInfo0),
+    pred_info_proc_info(PredInfo0, ProcId, ProcInfo0),
 
     detect_cse_in_proc_pass(!.ModuleInfo, Redo, ProcInfo0, ProcInfo1),
 
-    map.det_update(ProcId, ProcInfo1, ProcTable0, ProcTable1),
-    pred_info_set_proc_table(ProcTable1, PredInfo0, PredInfo1),
-    map.det_update(PredId, PredInfo1, PredTable0, PredTable1),
-    module_info_set_preds(PredTable1, !ModuleInfo),
+    pred_info_set_proc_info(ProcId, ProcInfo1, PredInfo0, PredInfo1),
+    module_info_set_pred_info(PredId, PredInfo1, !ModuleInfo),
 
     globals.lookup_bool_option(Globals, detailed_statistics, Statistics),
     trace [io(!IO)] (
@@ -197,16 +197,17 @@ detect_cse_in_proc(PredId, ProcId, !ModuleInfo) :-
         Redo = no
     ;
         Redo = yes,
-        (
-            VeryVerbose = yes,
-            trace [io(!IO)] (
-                get_progress_output_stream(!.ModuleInfo, ProgressStream, !IO),
+        trace [io(!IO)] (
+            ( if
+                VeryVerbose = yes,
+                MaybeProgressStream = yes(ProgressStream)
+            then
                 io.format(ProgressStream,
                     "%% Repeating mode check for %s\n",
-                    [s(pred_id_to_string(!.ModuleInfo, PredId))], !IO)
+                    [s(pred_id_to_user_string(!.ModuleInfo, PredId))], !IO)
+            else
+                true
             )
-        ;
-            VeryVerbose = no
         ),
         modecheck_proc(PredId, ProcId, !ModuleInfo, _Changed, ModeSpecs),
         trace [io(!IO)] (
@@ -217,10 +218,15 @@ detect_cse_in_proc(PredId, ProcId, !ModuleInfo) :-
         (
             ContainsErrors = yes,
             trace [io(!IO)] (
-                maybe_dump_hlds(!.ModuleInfo, 46, "cse_repeat_modecheck",
-                    no_prev_dump, _DumpInfo, !IO),
-                get_error_output_stream(!.ModuleInfo, ErrorStream, !IO),
-                write_error_specs(ErrorStream, Globals, ModeSpecs, !IO)
+                (
+                    MaybeProgressStream = yes(ProgressStream),
+                    maybe_dump_hlds(ProgressStream, !.ModuleInfo, 46,
+                        "cse_repeat_modecheck", no_prev_dump, _DumpInfo, !IO)
+                ;
+                    MaybeProgressStream = no
+                ),
+                get_debug_output_stream(!.ModuleInfo, DebugStream, !IO),
+                write_error_specs(DebugStream, Globals, ModeSpecs, !IO)
             ),
             unexpected($pred, "mode check fails when repeated")
         ;
@@ -229,56 +235,54 @@ detect_cse_in_proc(PredId, ProcId, !ModuleInfo) :-
             % messages to our caller, since any such messages should already
             % have been gathered during the initial mode analysis pass.
         ),
-        (
-            VeryVerbose = yes,
-            trace [io(!IO)] (
-                get_progress_output_stream(!.ModuleInfo, ProgressStream, !IO),
+        trace [io(!IO)] (
+            ( if
+                VeryVerbose = yes,
+                MaybeProgressStream = yes(ProgressStream)
+            then
                 io.format(ProgressStream,
                     "%% Repeating switch detection for %s\n",
-                    [s(pred_id_to_string(!.ModuleInfo, PredId))], !IO)
+                    [s(pred_id_to_user_string(!.ModuleInfo, PredId))], !IO)
+            else
+                true
             )
-        ;
-            VeryVerbose = no
         ),
 
-        module_info_get_preds(!.ModuleInfo, PredTable2),
-        map.lookup(PredTable2, PredId, PredInfo2),
-        pred_info_get_proc_table(PredInfo2, ProcTable2),
-        map.lookup(ProcTable2, ProcId, ProcInfo2),
+        module_info_pred_info(!.ModuleInfo, PredId, PredInfo2),
+        pred_info_proc_info(PredInfo2, ProcId, ProcInfo2),
 
         SwitchDetectInfo = init_switch_detect_info(!.ModuleInfo),
         detect_switches_in_proc(SwitchDetectInfo, ProcInfo2, ProcInfo),
 
-        map.det_update(ProcId, ProcInfo, ProcTable2, ProcTable3),
-        pred_info_set_proc_table(ProcTable3, PredInfo2, PredInfo3),
-        map.det_update(PredId, PredInfo3, PredTable2, PredTable3),
-        module_info_set_preds(PredTable3, !ModuleInfo),
+        pred_info_set_proc_info(ProcId, ProcInfo, PredInfo2, PredInfo3),
+        module_info_set_pred_info(PredId, PredInfo3, !ModuleInfo),
 
         trace [io(!IO)] (
             get_progress_output_stream(!.ModuleInfo, ProgressStream, !IO),
             maybe_report_stats(ProgressStream, Statistics, !IO)
         ),
-        (
-            VeryVerbose = yes,
-            trace [io(!IO)] (
-                get_progress_output_stream(!.ModuleInfo, ProgressStream, !IO),
+        trace [io(!IO)] (
+            ( if
+                VeryVerbose = yes,
+                MaybeProgressStream = yes(ProgressStream)
+            then
                 io.format(ProgressStream,
                     "%% Repeating common deconstruction detection for %s\n",
-                    [s(pred_id_to_string(!.ModuleInfo, PredId))], !IO)
+                    [s(pred_id_to_user_string(!.ModuleInfo, PredId))], !IO)
+            else
+                true
             )
-        ;
-            VeryVerbose = no
         ),
         disable_warning [suspicious_recursion] (
-            detect_cse_in_proc(PredId, ProcId, !ModuleInfo)
+            detect_cse_in_proc(MaybeProgressStream, PredId, ProcId,
+                !ModuleInfo)
         )
     ).
 
 :- type cse_info
     --->    cse_info(
                 csei_module_info        :: module_info,
-                csei_varset             :: prog_varset,
-                csei_vartypes           :: vartypes,
+                csei_var_table          :: var_table,
                 csei_rtti_varmaps       :: rtti_varmaps,
                 csei_redo               :: bool,
                 csei_nopull_contexts    :: list(prog_context)
@@ -291,17 +295,14 @@ detect_cse_in_proc_pass(ModuleInfo, Redo, !ProcInfo) :-
     % To process each ProcInfo, we get the goal, initialize the instmap
     % based on the modes of the head vars, and pass these to
     % `detect_cse_in_goal'.
-
     proc_info_get_goal(!.ProcInfo, Goal0),
     proc_info_get_initial_instmap(ModuleInfo, !.ProcInfo, InstMap0),
-    proc_info_get_varset(!.ProcInfo, Varset0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
     Redo0 = no,
-    CseInfo0 =
-        cse_info(ModuleInfo, Varset0, VarTypes0, RttiVarMaps0, Redo0, []),
+    CseInfo0 = cse_info(ModuleInfo, VarTable0, RttiVarMaps0, Redo0, []),
     detect_cse_in_goal(Goal0, Goal1, CseInfo0, CseInfo, InstMap0),
-    CseInfo = cse_info(_, _, _, _, Redo, CseNoPullContexts),
+    CseInfo = cse_info(_, _, _, Redo, CseNoPullContexts),
     proc_info_get_cse_nopull_contexts(!.ProcInfo, NoPullContexts0),
     NoPullContexts = CseNoPullContexts ++ NoPullContexts0,
     proc_info_set_cse_nopull_contexts(NoPullContexts, !ProcInfo),
@@ -310,17 +311,15 @@ detect_cse_in_proc_pass(ModuleInfo, Redo, !ProcInfo) :-
     ;
         Redo = yes,
         % ModuleInfo should not be changed by detect_cse_in_goal.
-        CseInfo =
-            cse_info(_ModuleInfo, VarSet1, VarTypes1, RttiVarMaps1, _, _),
+        CseInfo = cse_info(_, VarTable1, RttiVarMaps1, _, _),
 
         proc_info_get_headvars(!.ProcInfo, HeadVars),
-        implicitly_quantify_clause_body_general(
-            ordinary_nonlocals_maybe_lambda, HeadVars, _Warnings, Goal1, Goal,
-            VarSet1, VarSet, VarTypes1, VarTypes, RttiVarMaps1, RttiVarMaps),
+        implicitly_quantify_clause_body_general(ord_nl_maybe_lambda,
+            HeadVars, _Warnings, Goal1, Goal,
+            VarTable1, VarTable, RttiVarMaps1, RttiVarMaps),
 
         proc_info_set_goal(Goal, !ProcInfo),
-        proc_info_set_varset(VarSet, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo)
     ).
 
@@ -935,20 +934,21 @@ create_new_arg_var(OldArgVar, Context, UnifyContext, !CseInfo, !OldNewVars,
     % about a live variable named "S" or "Ss", when the names of those fields
     % at that point in the code are actually "A" and "As".
 
-    VarSet0 = !.CseInfo ^ csei_varset,
-    VarTypes0 = !.CseInfo ^ csei_vartypes,
-    lookup_var_type(VarTypes0, OldArgVar, Type),
+    VarTable0 = !.CseInfo ^ csei_var_table,
+    lookup_var_entry(VarTable0, OldArgVar, OldArgVarEntry),
+    OldArgVarEntry = vte(OldArgVarName, OldArgVarType, OldArgVarIsDummy),
     ModuleInfo = !.CseInfo ^ csei_module_info,
-    TypeCat = classify_type(ModuleInfo, Type),
+    TypeCat = classify_type(ModuleInfo, OldArgVarType),
     ( if
         TypeCat = ctor_cat_system(_),
-        varset.search_name(VarSet0, OldArgVar, OldName)
+        OldArgVarName \= ""
     then
-        varset.new_named_var(OldName, NewArgVar, VarSet0, VarSet)
+        NewArgVarName = OldArgVarName
     else
-        varset.new_var(NewArgVar, VarSet0, VarSet)
+        NewArgVarName = ""
     ),
-    add_var_type(NewArgVar, Type, VarTypes0, VarTypes),
+    NewArgVarEntry = vte(NewArgVarName, OldArgVarType, OldArgVarIsDummy),
+    add_var_entry(NewArgVarEntry, NewArgVar, VarTable0, VarTable),
     !:OldNewVars = [OldArgVar - NewArgVar | !.OldNewVars],
     UnifyContext = unify_context(MainCtxt, SubCtxt),
     % It is ok to create complicated unifications here, because we rerun
@@ -957,8 +957,7 @@ create_new_arg_var(OldArgVar, Context, UnifyContext, !CseInfo, !OldNewVars,
     % track of the inst of OldArgVar.
     create_pure_atomic_complicated_unification(OldArgVar, rhs_var(NewArgVar),
         Context, MainCtxt, SubCtxt, Goal),
-    !CseInfo ^ csei_varset := VarSet,
-    !CseInfo ^ csei_vartypes := VarTypes.
+    !CseInfo ^ csei_var_table := VarTable.
 
 %---------------------------------------------------------------------------%
 
@@ -1081,8 +1080,8 @@ maybe_update_existential_data_structures(UnifyGoal, FirstOldNew, LaterOldNew,
         UnifyGoal = hlds_goal(unify(_, _, _, UnifyInfo, _), _),
         UnifyInfo = deconstruct(Var, ConsId, _, _, _, _),
         ModuleInfo = !.CseInfo ^ csei_module_info,
-        VarTypes = !.CseInfo ^ csei_vartypes,
-        lookup_var_type(VarTypes, Var, Type),
+        VarTable = !.CseInfo ^ csei_var_table,
+        lookup_var_type(VarTable, Var, Type),
         cons_id_is_existq_cons(ModuleInfo, Type, ConsId)
     then
         update_existential_data_structures(FirstOldNew, LaterOldNew, !CseInfo)
@@ -1100,7 +1099,7 @@ update_existential_data_structures(FirstOldNew, LaterOldNews, !CseInfo) :-
     map.from_assoc_list(LaterOldNew, LaterOldNewMap),
 
     RttiVarMaps0 = !.CseInfo ^ csei_rtti_varmaps,
-    VarTypes0 = !.CseInfo ^ csei_vartypes,
+    VarTable0 = !.CseInfo ^ csei_var_table,
 
     % Build a map for all locations in the rtti_varmaps that are changed
     % by the application of FirstOldNewMap. The keys of this map are the
@@ -1118,15 +1117,15 @@ update_existential_data_structures(FirstOldNew, LaterOldNews, !CseInfo) :-
         TvarsList, map.init, Renaming),
 
     % Apply the full old->new map and the type substitution to the
-    % rtti_varmaps, and apply the type substitution to the vartypes.
+    % rtti_varmaps, and apply the type substitution to the var_table.
     list.append(FirstOldNew, LaterOldNew, OldNew),
     map.from_assoc_list(OldNew, OldNewMap),
     apply_substitutions_to_rtti_varmaps(Renaming, map.init, OldNewMap,
         RttiVarMaps0, RttiVarMaps),
-    apply_variable_renaming_to_vartypes(Renaming, VarTypes0, VarTypes),
+    apply_variable_renaming_to_var_table(Renaming, VarTable0, VarTable),
 
     !CseInfo ^ csei_rtti_varmaps := RttiVarMaps,
-    !CseInfo ^ csei_vartypes := VarTypes.
+    !CseInfo ^ csei_var_table := VarTable.
 
 :- pred find_type_info_locn_tvar_map(rtti_varmaps::in,
     map(prog_var, prog_var)::in, tvar::in,

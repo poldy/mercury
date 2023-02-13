@@ -23,22 +23,23 @@
 :- import_module libs.globals.
 :- import_module libs.options.
 :- import_module libs.timestamp.
-:- import_module mdbcomp.
-:- import_module mdbcomp.sym_name.
 :- import_module make.dependencies.
 :- import_module make.make_info.
+:- import_module mdbcomp.
+:- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.file_names.
 
 :- import_module io.
 :- import_module list.
 :- import_module maybe.
-:- import_module pair.
 
 %---------------------------------------------------------------------------%
 %
 % Timestamp handling.
 %
+
+:- func init_target_file_timestamps = target_file_timestamps.
 
     % Find the timestamp updated when a target is produced.
     %
@@ -230,15 +231,14 @@
     % If the given target was specified on the command line, warn that it
     % was already up to date.
     %
-:- pred maybe_warn_up_to_date_target(globals::in,
-    pair(module_name, target_type)::in,
+:- pred maybe_warn_up_to_date_target(globals::in, top_target_file::in,
     make_info::in, make_info::out, io::di, io::uo) is det.
 
     % Write a message "Made symlink/copy of <filename>"
     % if `--verbose-make' is set.
     %
 :- pred maybe_symlink_or_copy_linked_target_message(globals::in,
-    pair(module_name, target_type)::in, io::di, io::uo) is det.
+    top_target_file::in, io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
 %
@@ -256,6 +256,9 @@
 
 :- pred dependency_file_hash(dependency_file::in, int::out) is det.
 
+:- pred dependency_file_with_module_index_hash(
+    dependency_file_with_module_index::in, int::out) is det.
+
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
@@ -264,21 +267,29 @@
 :- import_module analysis.
 :- import_module make.build.
 :- import_module make.module_dep_file.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.find_module.
+:- import_module parse_tree.module_dep_info.
 :- import_module parse_tree.prog_foreign.
 :- import_module transform_hlds.
 :- import_module transform_hlds.mmc_analysis.
 
 :- import_module bool.
 :- import_module dir.
+:- import_module enum.
 :- import_module int.
+:- import_module io.file.
 :- import_module map.
 :- import_module require.
 :- import_module set.
 :- import_module string.
+:- import_module uint.
+:- import_module version_hash_table.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
+
+init_target_file_timestamps =
+    version_hash_table.unsafe_init_default(target_file_hash).
 
 get_timestamp_file_timestamp(Globals, target_file(ModuleName, TargetType),
         MaybeTimestamp, !Info, !IO) :-
@@ -324,13 +335,37 @@ get_dependency_timestamp(Globals, DependencyFile, MaybeTimestamp, !Info,
 get_target_timestamp(Globals, Search, TargetFile, MaybeTimestamp, !Info,
         !IO) :-
     TargetFile = target_file(_ModuleName, TargetType),
-    get_file_name(Globals, Search, TargetFile, FileName, !Info, !IO),
     ( if TargetType = module_target_analysis_registry then
+        get_file_name(Globals, Search, TargetFile, FileName, !Info, !IO),
         get_target_timestamp_analysis_registry(Globals, Search, TargetFile,
             FileName, MaybeTimestamp, !Info, !IO)
     else
-        get_target_timestamp_2(Globals, Search, TargetFile,
-            FileName, MaybeTimestamp, !Info, !IO)
+        % This path is hit very frequently so it is worth caching timestamps by
+        % target_file. It avoids having to compute a file name for a
+        % target_file first, before looking up the timestamp for that file.
+        TargetFileTimestamps0 = !.Info ^ mki_target_file_timestamps,
+        ( if
+            version_hash_table.search(TargetFileTimestamps0, TargetFile,
+                Timestamp)
+        then
+            MaybeTimestamp = ok(Timestamp)
+        else
+            get_file_name(Globals, Search, TargetFile, FileName, !Info, !IO),
+            get_target_timestamp_2(Globals, Search, TargetFile,
+                FileName, MaybeTimestamp, !Info, !IO),
+            (
+                MaybeTimestamp = ok(Timestamp),
+                TargetFileTimestamps1 = !.Info ^ mki_target_file_timestamps,
+                version_hash_table.det_insert(TargetFile, Timestamp,
+                    TargetFileTimestamps1, TargetFileTimestamps),
+                !Info ^ mki_target_file_timestamps := TargetFileTimestamps
+            ;
+                MaybeTimestamp = error(_)
+                % Do not record errors. These would usually be due to files not
+                % yet made, and the result would have to be updated once the
+                % file is made.
+            )
+        )
     ).
 
     % Special treatment for `.analysis' files. If the corresponding
@@ -431,11 +466,10 @@ get_file_name(Globals, Search, TargetFile, FileName, !Info, !IO) :-
         ( if target_type_to_extension(Globals, TargetType, Ext) then
             (
                 Search = do_search,
-                module_name_to_search_file_name_cache(Globals, Ext,
-                    ModuleName, FileName, !Info, !IO)
+                module_name_to_search_file_name(Globals, $pred, Ext,
+                    ModuleName, FileName, !IO)
             ;
                 Search = do_not_search,
-                % Not common enough to cache.
                 module_name_to_file_name(Globals, $pred, do_not_create_dirs,
                     Ext, ModuleName, FileName, !IO)
             )
@@ -443,23 +477,6 @@ get_file_name(Globals, Search, TargetFile, FileName, !Info, !IO) :-
             module_target_to_file_name_maybe_search(Globals, Search,
                 do_not_create_dirs, TargetType, ModuleName, FileName, !IO)
         )
-    ).
-
-:- pred module_name_to_search_file_name_cache(globals::in, ext::in,
-    module_name::in, string::out, make_info::in, make_info::out,
-    io::di, io::uo) is det.
-
-module_name_to_search_file_name_cache(Globals, Ext, ModuleName, FileName,
-        !Info, !IO) :-
-    Key = module_name_ext(ModuleName, Ext),
-    Cache0 = !.Info ^ mki_search_file_name_cache,
-    ( if map.search(Cache0, Key, FileName0) then
-        FileName = FileName0
-    else
-        module_name_to_search_file_name(Globals, $pred, Ext,
-            ModuleName, FileName, !IO),
-        map.det_insert(Key, FileName, Cache0, Cache),
-        !Info ^ mki_search_file_name_cache := Cache
     ).
 
 get_file_timestamp(SearchDirs, FileName, MaybeTimestamp, !Info, !IO) :-
@@ -553,10 +570,13 @@ make_remove_module_file(Globals, VerboseOption, ModuleName, Ext, !Info, !IO) :-
 make_remove_file(Globals, VerboseOption, FileName, !Info, !IO) :-
     verbose_make_msg_option(Globals, VerboseOption,
         report_remove_file(FileName), !IO),
-    io.remove_file_recursively(FileName, _, !IO),
+    io.file.remove_file_recursively(FileName, _, !IO),
     FileTimestamps0 = !.Info ^ mki_file_timestamps,
     map.delete(FileName, FileTimestamps0, FileTimestamps),
-    !Info ^ mki_file_timestamps := FileTimestamps.
+    !Info ^ mki_file_timestamps := FileTimestamps,
+
+    % For simplicity, clear out all target file timestamps.
+    !Info ^ mki_target_file_timestamps := init_target_file_timestamps.
 
 :- pred report_remove_file(string::in, io::di, io::uo) is det.
 
@@ -1059,11 +1079,11 @@ maybe_symlink_or_copy_linked_target_message(Globals, Target, !IO) :-
             io.format("Made symlink/copy of %s\n", [s(FileName)], !IO)
         ), !IO).
 
-:- pred module_or_linked_target_file_name(globals::in,
-    pair(module_name, target_type)::in, string::out, io::di, io::uo) is det.
+:- pred module_or_linked_target_file_name(globals::in, top_target_file::in,
+    string::out, io::di, io::uo) is det.
 
-module_or_linked_target_file_name(Globals, ModuleName - TargetType,
-        FileName, !IO) :-
+module_or_linked_target_file_name(Globals, TopTargetFile, FileName, !IO) :-
+    TopTargetFile = top_target_file(ModuleName, TargetType),
     (
         TargetType = module_target(ModuleTargetType),
         TargetFile = target_file(ModuleName, ModuleTargetType),
@@ -1125,15 +1145,26 @@ module_name_hash(SymName, Hash) :-
 dependency_file_hash(DepFile, Hash) :-
     (
         DepFile = dep_target(TargetFile),
-        Hash = target_file_hash(TargetFile)
+        target_file_hash(TargetFile, Hash)
     ;
         DepFile = dep_file(FileName),
         Hash = string.hash(FileName)
     ).
 
-:- func target_file_hash(target_file) = int.
+dependency_file_with_module_index_hash(DepFile, Hash) :-
+    (
+        DepFile = dfmi_target(ModuleIndex, Type),
+        Hash0 = cast_to_int(to_uint(ModuleIndex)),
+        Hash1 = module_target_type_to_nonce(Type),
+        Hash = mix(Hash0, Hash1)
+    ;
+        DepFile = dfmi_file(FileName),
+        Hash = string.hash(FileName)
+    ).
 
-target_file_hash(TargetFile) = Hash :-
+:- pred target_file_hash(target_file::in, int::out) is det.
+
+target_file_hash(TargetFile, Hash) :-
     TargetFile = target_file(ModuleName, Type),
     module_name_hash(ModuleName, Hash0),
     Hash1 = module_target_type_to_nonce(Type),

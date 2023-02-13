@@ -20,13 +20,12 @@
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.deps_map.
 :- import_module parse_tree.file_names.
+:- import_module parse_tree.module_baggage.
 :- import_module parse_tree.module_deps_graph.
-:- import_module parse_tree.module_imports.
 
 :- import_module bool.
 :- import_module io.
 :- import_module list.
-:- import_module maybe.
 :- import_module set.
 
 :- type maybe_intermod_deps
@@ -35,38 +34,58 @@
                 id_int_deps         :: set(module_name),
                 id_imp_deps         :: set(module_name),
                 id_indirect_deps    :: set(module_name),
-                id_fim_deps         :: set(module_name)
+                id_fim_deps         :: set(module_name),
+                % id_trans_opt_deps is the set of modules whose .trans_opt
+                % files that we may want to read when *making* this module's
+                % .trans_opt file. However, it still may need to be reduced
+                % further to prevent circularities in trans_opt_deps mmake
+                % rules.
+                id_trans_opt_deps   :: set(module_name)
             ).
 
-    % write_dependency_file(Globals, ModuleAndImports, MaybeIntermodDeps,
-    %   AllDeps, MaybeTransOptDeps, !IO):
+:- type maybe_include_trans_opt_rule
+    --->    do_not_include_trans_opt_rule
+    ;       include_trans_opt_rule(trans_opt_rule_info).
+
+    % The set of trans-opt dependencies can come from two sources:
+    % - from a topological sort of the trans-opt dependency graph
+    %   if we built the graph; or
+    % - from a trans_opt_deps rule in a .d file.
+    %
+:- type trans_opt_rule_info
+    --->    trans_opt_deps_from_order(set(module_name))
+    ;       trans_opt_deps_from_d_file(set(module_name)).
+
+    % write_dependency_file(Globals, BurdenedAugCompUnit, MaybeIntermodDeps,
+    %   AllDeps, MaybeInclTransOptRule, !IO):
     %
     % Write out the per-module makefile dependencies (`.d') file for the
     % specified module. AllDeps is the set of all module names which the
     % generated code for this module might depend on, i.e. all that have been
     % used or imported, directly or indirectly, into this module, including
     % via .opt or .trans_opt files, and including parent modules of nested
-    % modules. MaybeTransOptDeps is a list of module names which the
-    % `.trans_opt' file may depend on. This is set to `no' if the
-    % dependency list is not available.
+    % modules. MaybeInclTransOptRule controls whether to include a
+    % trans_opt_deps rule in the file, and if so, what the rule should say.
     %
     % XXX The MaybeIntermodDeps allows generate_dependencies_write_d_file
     % to supply some information derived from the overall dependency graph
     % that is intended to override the values of some of the fields in
-    % ModuleAndImports. These used to be passed in ModuleAndImports itself,
-    % but they do not actually belong there, since the overridden fields
-    % are supposed to be *solely* from the main module in ModuleAndImports.
-    % As to *why* this overriding is desirable, I (zs) don't know,
-    % and I am pretty sure that the original author (fjh) does not know
-    % anymore either :-(
+    % BurdenedAugCompUnit. These used to be passed in a ModuleAndImports
+    % argument itself (the predecessor of BurdenedAugCompUnit), but they
+    % do not actually belong there, since the overridden fields are
+    % supposed to be *solely* from the main module in BurdenedAugCompUnit.
+    % As to *why* this overriding is desirable, I (zs) don't know, and
+    % I am pretty sure that the original author (fjh) does not know anymore
+    % either :-(
     %
 :- pred write_dependency_file(globals::in, burdened_aug_comp_unit::in,
     maybe_intermod_deps::in, set(module_name)::in,
-    maybe(list(module_name))::in, io::di, io::uo) is det.
+    maybe_include_trans_opt_rule::in,
+    io::di, io::uo) is det.
 
     % generate_dependencies_write_d_files(Globals, Modules,
-    %   IntDepsRel, ImplDepsRel, IndirectDepsRel, IndirectOptDepsRel,
-    %   TransOptOrder, DepsMap, !IO):
+    %   IntDepsGraph, ImplDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
+    %   TransOptDepsGraph, TransOptOrder, DepsMap, !IO):
     %
     % This predicate writes out the .d files for all the modules in the
     % Modules list.
@@ -77,12 +96,16 @@
     % IndirectOptDepsGraph gives the indirect optimization dependencies
     % (this includes dependencies via `.opt' and `.trans_opt' files).
     % These are all computed from the DepsMap.
+    %
+    % TransOptDepsGraph gives the trans-opt dependency graph for the
+    % purpose of making `.trans_opt' files.
     % TransOptOrder gives the ordering that is used to determine
     % which other modules the .trans_opt files may depend on.
     %
 :- pred generate_dependencies_write_d_files(globals::in, list(deps)::in,
     deps_graph::in, deps_graph::in, deps_graph::in, deps_graph::in,
-    list(module_name)::in, deps_map::in, io::di, io::uo) is det.
+    deps_graph::in, list(module_name)::in, deps_map::in, io::di, io::uo)
+    is det.
 
     % Write out the `.dv' file, using the information collected in the
     % deps_map data structure.
@@ -96,7 +119,7 @@
 :- pred generate_dependencies_write_dep_file(globals::in, file_name::in,
     module_name::in, deps_map::in, io::di, io::uo) is det.
 
-:- pred maybe_output_module_order(globals::in, module_name::in,
+:- pred output_module_order(globals::in, module_name::in, other_ext::in,
     list(set(module_name))::in, io::di, io::uo) is det.
 
 %---------------------------------------------------------------------------%
@@ -121,8 +144,8 @@
 
 :- implementation.
 
-:- import_module libs.options.
 :- import_module libs.mmakefiles.
+:- import_module libs.options.
 :- import_module parse_tree.find_module.        % XXX undesirable dependency
 :- import_module parse_tree.get_dependencies.
 :- import_module parse_tree.module_cmds.
@@ -138,20 +161,38 @@
 :- import_module cord.
 :- import_module digraph.
 :- import_module dir.
+:- import_module io.file.
 :- import_module library.
 :- import_module map.
+:- import_module maybe.
 :- import_module one_or_more.
 :- import_module one_or_more_map.
 :- import_module pair.
 :- import_module require.
 :- import_module sparse_bitset.
 :- import_module string.
-:- import_module term.
+
+:- type module_file_name_cache == map(module_name_and_ext, file_name).
+
+:- type module_name_and_ext
+    --->    module_name_and_ext(module_name, other_ext).
 
 %---------------------------------------------------------------------------%
 
 write_dependency_file(Globals, BurdenedAugCompUnit, IntermodDeps, AllDeps,
-        MaybeTransOptDeps, !IO) :-
+        MaybeInclTransOptRule, !IO) :-
+    map.init(Cache0),
+    write_dependency_file_fn_cache(Globals, BurdenedAugCompUnit, IntermodDeps,
+        AllDeps, MaybeInclTransOptRule, Cache0, _Cache, !IO).
+
+:- pred write_dependency_file_fn_cache(globals::in,
+    burdened_aug_comp_unit::in, maybe_intermod_deps::in, set(module_name)::in,
+    maybe_include_trans_opt_rule::in,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
+
+write_dependency_file_fn_cache(Globals, BurdenedAugCompUnit, IntermodDeps,
+        AllDeps, MaybeInclTransOptRule, !Cache, !IO) :-
     % To avoid problems with concurrent updates of `.d' files during
     % parallel makes, we first create the file with a temporary name,
     % and then rename it to the desired name when we have finished.
@@ -160,7 +201,7 @@ write_dependency_file(Globals, BurdenedAugCompUnit, IntermodDeps, AllDeps,
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     module_name_to_file_name(Globals, $pred, do_create_dirs,
         ext_other(other_ext(".d")), ModuleName, DependencyFileName, !IO),
-    io.make_temp_file(dir.dirname(DependencyFileName), "tmp_d", "",
+    io.file.make_temp_file(dir.dirname(DependencyFileName), "tmp_d", "",
         TmpDependencyFileNameRes, !IO),
     get_error_output_stream(Globals, ModuleName, ErrorStream, !IO),
     get_progress_output_stream(Globals, ModuleName, ProgressStream, !IO),
@@ -192,17 +233,17 @@ write_dependency_file(Globals, BurdenedAugCompUnit, IntermodDeps, AllDeps,
         ;
             Result = ok(DepStream),
             generate_d_file(Globals, BurdenedAugCompUnit, IntermodDeps,
-                AllDeps, MaybeTransOptDeps, MmakeFile, !IO),
+                AllDeps, MaybeInclTransOptRule, MmakeFile, !Cache, !IO),
             write_mmakefile(DepStream, MmakeFile, !IO),
             io.close_output(DepStream, !IO),
 
-            io.rename_file(TmpDependencyFileName, DependencyFileName,
+            io.file.rename_file(TmpDependencyFileName, DependencyFileName,
                 FirstRenameResult, !IO),
             (
                 FirstRenameResult = error(_),
                 % On some systems, we need to remove the existing file first,
                 % if any. So try again that way.
-                io.remove_file(DependencyFileName, RemoveResult, !IO),
+                io.file.remove_file(DependencyFileName, RemoveResult, !IO),
                 (
                     RemoveResult = error(Error4),
                     maybe_write_string(ProgressStream, Verbose,
@@ -214,8 +255,8 @@ write_dependency_file(Globals, BurdenedAugCompUnit, IntermodDeps, AllDeps,
                     report_error(ErrorStream, Message, !IO)
                 ;
                     RemoveResult = ok,
-                    io.rename_file(TmpDependencyFileName, DependencyFileName,
-                        SecondRenameResult, !IO),
+                    io.file.rename_file(TmpDependencyFileName,
+                        DependencyFileName, SecondRenameResult, !IO),
                     (
                         SecondRenameResult = error(Error5),
                         maybe_write_string(ProgressStream, Verbose,
@@ -263,13 +304,13 @@ write_dependency_file(Globals, BurdenedAugCompUnit, IntermodDeps, AllDeps,
     %
 :- pred generate_d_file(globals::in, burdened_aug_comp_unit::in,
     maybe_intermod_deps::in,
-    set(module_name)::in, maybe(list(module_name))::in,
-    mmakefile::out, io::di, io::uo) is det.
+    set(module_name)::in, maybe_include_trans_opt_rule::in,
+    mmakefile::out, module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 generate_d_file(Globals, BurdenedAugCompUnit, IntermodDeps,
-        AllDeps, MaybeTransOptDeps, !:MmakeFile, !IO) :-
-    BurdenedAugCompUnit =
-        burdened_aug_comp_unit(Baggage, AugCompUnit),
+        AllDeps, MaybeInclTransOptRule, !:MmakeFile, !Cache, !IO) :-
+    BurdenedAugCompUnit = burdened_aug_comp_unit(Baggage, AugCompUnit),
     SourceFileName = Baggage ^ mb_source_file_name,
     SourceFileModuleName = Baggage ^ mb_source_file_module_name,
     MaybeTopModule = Baggage ^ mb_maybe_top_module,
@@ -283,7 +324,8 @@ generate_d_file(Globals, BurdenedAugCompUnit, IntermodDeps,
         IndirectIntSpecs = AugCompUnit ^ acu_indirect_int2_specs,
         map.keys_as_set(IndirectIntSpecs, IndirectDeps)
     ;
-        IntermodDeps = intermod_deps(IntDeps, ImpDeps, IndirectDeps, _FIMDeps),
+        IntermodDeps = intermod_deps(IntDeps, ImpDeps, IndirectDeps, _FIMDeps,
+            _TransOptDeps),
         set.union(IntDeps, ImpDeps, LongDeps0)
     ),
     PublicChildrenMap = ParseTreeModuleSrc ^ ptms_int_includes,
@@ -303,11 +345,11 @@ generate_d_file(Globals, BurdenedAugCompUnit, IntermodDeps,
     set.difference(ShortDeps0, LongDeps, ShortDeps1),
     set.delete(ModuleName, ShortDeps1, ShortDeps),
 
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
+    make_module_file_name(Globals, $pred,
         ext_other(other_ext(".trans_opt_date")),
-        ModuleName, TransOptDateFileName, !IO),
-    construct_trans_opt_deps_rule(Globals, MaybeTransOptDeps, LongDeps,
-        TransOptDateFileName, MmakeRulesTransOpt, !IO),
+        ModuleName, TransOptDateFileName, !Cache, !IO),
+    construct_trans_opt_deps_rule(Globals, MaybeInclTransOptRule, IntermodDeps,
+        TransOptDateFileName, MmakeRulesTransOpt, !Cache, !IO),
 
     construct_fact_tables_entries(ModuleMakeVarName,
         SourceFileName, ObjFileName, FactTableFileNamesSet,
@@ -319,63 +361,70 @@ generate_d_file(Globals, BurdenedAugCompUnit, IntermodDeps,
         unexpected($pred, "source file name doesn't end in `.m'")
     ),
 
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".optdate")), ModuleName, OptDateFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".c_date")), ModuleName, CDateFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".$O")), ModuleName, ObjFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".java_date")), ModuleName, JavaDateFileName, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".optdate")), ModuleName, OptDateFileName,
+        !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".c_date")), ModuleName, CDateFileName,
+        !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".$O")), ModuleName, ObjFileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".java_date")), ModuleName, JavaDateFileName,
+        !Cache, !IO),
     % XXX Why is the extension hardcoded to .pic_o here?  That looks wrong.
     % It should probably be .$(EXT_FOR_PIC_OBJECT) - juliensf.
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".pic_o")), ModuleName, PicObjFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".int0")), ModuleName, Int0FileName, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".pic_o")), ModuleName, PicObjFileName,
+        !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".int0")), ModuleName, Int0FileName, !Cache, !IO),
 
     construct_date_file_deps_rule(Globals, ModuleName, SourceFileName,
         Ancestors, LongDeps, ShortDeps, PublicChildren, Int0FileName,
         OptDateFileName, TransOptDateFileName, ForeignIncludeFiles,
         CDateFileName, JavaDateFileName, ErrFileName,
-        FactTableSourceGroups, MmakeRuleDateFileDeps, !IO),
+        FactTableSourceGroups, MmakeRuleDateFileDeps, !Cache, !IO),
 
     construct_build_nested_children_first_rule(Globals,
-        ModuleName, MaybeTopModule, MmakeRulesNestedDeps, !IO),
+        ModuleName, MaybeTopModule, MmakeRulesNestedDeps, !Cache, !IO),
 
     construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
         ErrFileName, TransOptDateFileName, CDateFileName, JavaDateFileName,
-        ObjFileName, MmakeRulesIntermod, !IO),
+        ObjFileName, MmakeRulesIntermod, !Cache, !IO),
 
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".c")), ModuleName, CFileName, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".c")), ModuleName, CFileName, !Cache, !IO),
     construct_c_header_rules(Globals, ModuleName, AllDeps,
-        CFileName, ObjFileName, PicObjFileName, MmakeRulesCHeaders, !IO),
+        CFileName, ObjFileName, PicObjFileName, MmakeRulesCHeaders,
+        !Cache, !IO),
 
     construct_module_dep_fragment(Globals, ModuleName, CFileName,
-        MmakeFragmentModuleDep, !IO),
+        MmakeFragmentModuleDep, !Cache, !IO),
 
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".date")), ModuleName, DateFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".date0")), ModuleName, Date0FileName, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".date")), ModuleName, DateFileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".date0")), ModuleName, Date0FileName,
+        !Cache, !IO),
     construct_self_and_parent_date_date0_rules(Globals, SourceFileName,
         Date0FileName, DateFileName, Ancestors, LongDeps, ShortDeps,
-        MmakeRulesParentDates, !IO),
+        MmakeRulesParentDates, !Cache, !IO),
 
     construct_foreign_import_rules(Globals, AugCompUnit, IntermodDeps,
         SourceFileModuleName, ObjFileName, PicObjFileName,
-        MmakeRulesForeignImports, !IO),
+        MmakeRulesForeignImports, !Cache, !IO),
 
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".date3")), ModuleName, Date3FileName, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".date3")), ModuleName, Date3FileName,
+        !Cache, !IO),
     construct_install_shadow_rules(Globals, ModuleName,
         Int0FileName, Date0FileName, DateFileName, Date3FileName,
         OptDateFileName, TransOptDateFileName,
-        MmakeRulesInstallShadows, !IO),
+        MmakeRulesInstallShadows, !Cache, !IO),
 
     construct_subdir_short_rules(Globals, ModuleName,
-        MmakeRulesSubDirShorthand, !IO),
+        MmakeRulesSubDirShorthand, !Cache, !IO),
 
     have_source_file_map(HaveMap, !IO),
     construct_any_needed_pattern_rules(HaveMap,
@@ -403,29 +452,70 @@ generate_d_file(Globals, BurdenedAugCompUnit, IntermodDeps,
 %---------------------%
 
 :- pred construct_trans_opt_deps_rule(globals::in,
-    maybe(list(module_name))::in, set(module_name)::in, string::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    maybe_include_trans_opt_rule::in, maybe_intermod_deps::in,
+    string::in, list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
-construct_trans_opt_deps_rule(Globals, MaybeTransOptDeps, LongDeps,
-        TransOptDateFileName, MmakeRulesTransOpt, !IO) :-
+construct_trans_opt_deps_rule(Globals, MaybeInclTransOptRule, IntermodDeps,
+        TransOptDateFileName, MmakeRulesTransOpt, !Cache, !IO) :-
     (
-        MaybeTransOptDeps = yes(TransOptDeps0),
-        set.intersect(set.list_to_set(TransOptDeps0), LongDeps,
-            TransOptDateDeps),
+        MaybeInclTransOptRule = include_trans_opt_rule(TransOptRuleInfo),
+        % There are two cases when we will write a trans_opt_deps rule.
+        (
+            TransOptRuleInfo = trans_opt_deps_from_order(TransOptOrder),
+            % We reach this case when explicitly generating dependencies.
+            %
+            % TransOptDeps0 are the dependencies taken from the trans-opt
+            % dependency graph (which may have edges deleted by the user).
+            %
+            % TransOptOrder contains the list of modules that occur later
+            % than the current module in a topological ordering of the
+            % trans-opt dependency graph.
+            %
+            % We take the intersection of TransOptOrder and TransOptDeps0
+            % to eliminate any circularities that might arise in the
+            % trans_opt_deps rules if we were to use TransOptDeps0 as-is.
+            (
+                IntermodDeps = intermod_deps(_, _, _, _, TransOptDeps0),
+                set.intersect(TransOptOrder, TransOptDeps0, TransOptDeps)
+            ;
+                IntermodDeps = no_intermod_deps,
+                unexpected($pred, "no_intermod_deps")
+            )
+        ;
+            TransOptRuleInfo = trans_opt_deps_from_d_file(DFileTransOptDeps),
+            % We reach this case when the `.d' file is being automatically
+            % rewritten after producing target code, etc. We will not have
+            % computed the trans-opt dependency graph, and we will not have
+            % read the trans-opt-deps-spec file.
+            %
+            % What we can do is write the new `.d' file with the same trans-opt
+            % dependencies as the old `.d' file. As source files are modified,
+            % the trans-opt dependencies listed in the `.d' file may become out
+            % of date, so the user will need to explicitly regenerate
+            % dependencies.
+            %
+            % Note: we used to take the intersection with LongDeps (in the
+            % caller), but this case was not separated from the previous case
+            % and it greatly reduces the set of dependencies, so I'm not sure
+            % if it was intentional. --pw
+            TransOptDeps = DFileTransOptDeps
+        ),
         % Note that maybe_read_dependency_file searches for
         % this exact pattern.
         make_module_file_names_with_suffix(Globals,
             ext_other(other_ext(".trans_opt")),
-            set.to_sorted_list(TransOptDateDeps), TransOptDateDepsFileNames,
-            !IO),
+            set.to_sorted_list(TransOptDeps), TransOptDepsFileNames,
+            !Cache, !IO),
         MmakeRuleTransOpt = mmake_simple_rule("trans_opt_deps",
             mmake_rule_is_not_phony,
             TransOptDateFileName,
-            TransOptDateDepsFileNames,
+            TransOptDepsFileNames,
             []),
         MmakeRulesTransOpt = [MmakeRuleTransOpt]
     ;
-        MaybeTransOptDeps = no,
+        MaybeInclTransOptRule = do_not_include_trans_opt_rule,
         MmakeRulesTransOpt = []
     ).
 
@@ -493,13 +583,15 @@ construct_fact_tables_entries(ModuleMakeVarName, SourceFileName, ObjFileName,
     set(module_name)::in, string::in, string::in, string::in,
     set(foreign_include_file_info)::in, string::in, string::in, string::in,
     list(mmake_file_name_group)::in,
-    mmake_entry::out, io::di, io::uo) is det.
+    mmake_entry::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_date_file_deps_rule(Globals, ModuleName, SourceFileName,
         Ancestors, LongDeps, ShortDeps, PublicChildren, Int0FileName,
         OptDateFileName, TransOptDateFileName, ForeignIncludeFilesSet,
         CDateFileName, JavaDateFileName, ErrFileName,
-        FactTableSourceGroups, MmakeRuleDateFileDeps, !IO) :-
+        FactTableSourceGroups, MmakeRuleDateFileDeps, !Cache, !IO) :-
     % For the reason for why there is no mention of a date file for C# here,
     % see the comment at the top of generate_d_file.
     TargetGroup = mmake_file_name_group("dates_and_err",
@@ -518,19 +610,21 @@ construct_date_file_deps_rule(Globals, ModuleName, SourceFileName,
     ),
     make_module_file_name_group_with_suffix(Globals,
         "ancestors", ext_other(other_ext(".int0")),
-        Ancestors, AncestorSourceGroups, !IO),
+        Ancestors, AncestorSourceGroups, !Cache, !IO),
     make_module_file_name_group_with_suffix(Globals,
         "long deps", ext_other(other_ext(".int")),
-        LongDeps, LongDepsSourceGroups, !IO),
+        LongDeps, LongDepsSourceGroups, !Cache, !IO),
     make_module_file_name_group_with_suffix(Globals,
         "short deps", ext_other(other_ext(".int2")),
-        ShortDeps, ShortDepsSourceGroups, !IO),
+        ShortDeps, ShortDepsSourceGroups, !Cache, !IO),
     make_module_file_name_group_with_suffix(Globals,
         "type_repn self dep", ext_other(other_ext(".int")),
-        set.make_singleton_set(ModuleName), TypeRepnSelfDepGroups, !IO),
+        set.make_singleton_set(ModuleName), TypeRepnSelfDepGroups,
+        !Cache, !IO),
     make_module_file_name_group_with_suffix(Globals,
         "type_repn ancestor dep", ext_other(other_ext(".int")),
-        get_ancestors_set(ModuleName), TypeRepnAncestorsDepGroups, !IO),
+        get_ancestors_set(ModuleName), TypeRepnAncestorsDepGroups,
+        !Cache, !IO),
     ForeignIncludeFiles = set.to_sorted_list(ForeignIncludeFilesSet),
     % This is conservative: a target file for foreign language A
     % does not truly depend on a file included for foreign language B.
@@ -558,10 +652,11 @@ construct_date_file_deps_rule(Globals, ModuleName, SourceFileName,
     %
 :- pred construct_build_nested_children_first_rule(globals::in,
     module_name::in, maybe_top_module::in, list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
     io::di, io::uo) is det.
 
 construct_build_nested_children_first_rule(Globals, ModuleName, MaybeTopModule,
-        MmakeRulesNestedDeps, !IO) :-
+        MmakeRulesNestedDeps, !Cache, !IO) :-
     NestedModuleNames = get_nested_children_list_of_top_module(MaybeTopModule),
     (
         NestedModuleNames = [],
@@ -574,9 +669,9 @@ construct_build_nested_children_first_rule(Globals, ModuleName, MaybeTopModule,
             other_ext(".c_date"),
             other_ext(".dir/*.$O"),
             other_ext(".java_date")],
-        list.map_foldl(
+        list.map_foldl2(
             gather_nested_deps(Globals, ModuleName, NestedModuleNames),
-            NestedOtherExts, MmakeRulesNestedDeps, !IO)
+            NestedOtherExts, MmakeRulesNestedDeps, !Cache, !IO)
     ).
 
 %---------------------%
@@ -584,11 +679,13 @@ construct_build_nested_children_first_rule(Globals, ModuleName, MaybeTopModule,
 :- pred construct_intermod_rules(globals::in, module_name::in,
     set(module_name)::in, set(module_name)::in,
     string::in, string::in, string::in, string::in, string::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
         ErrFileName, TransOptDateFileName, CDateFileName, JavaDateFileName,
-        ObjFileName, MmakeRulesIntermod, !IO) :-
+        ObjFileName, MmakeRulesIntermod, !Cache, !IO) :-
     % XXX Note that currently, due to a design problem, handle_option.m
     % *always* sets use_opt_files to no.
     globals.lookup_bool_option(Globals, use_opt_files, UseOptFiles),
@@ -604,7 +701,7 @@ construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
         Intermod = yes,
         make_module_file_names_with_suffix(Globals,
             ext_other(other_ext(".mh")),
-            set.to_sorted_list(AllDeps), AllDepsFileNames, !IO),
+            set.to_sorted_list(AllDeps), AllDepsFileNames, !Cache, !IO),
         MmakeRuleMhDeps = mmake_simple_rule("machine_dependent_header_deps",
             mmake_rule_is_not_phony,
             ObjFileName,
@@ -645,7 +742,7 @@ construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
         then
             get_both_opt_deps(Globals, BuildOptFiles, IntermodDirs,
                 [ModuleName | set.to_sorted_list(LongDeps)],
-                OptDeps, TransOptDeps1, !IO),
+                OptDeps, TransOptDeps1, !Cache, !IO),
             MaybeTransOptDeps1 = yes(TransOptDeps1)
         else
             get_opt_deps(Globals, BuildOptFiles, IntermodDirs,
@@ -658,10 +755,10 @@ construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
         OptInt0Deps = set.union_list(list.map(get_ancestors_set, OptDeps)),
         make_module_file_names_with_suffix(Globals,
             ext_other(other_ext(".opt")),
-            OptDeps, OptDepsFileNames, !IO),
+            OptDeps, OptDepsFileNames, !Cache, !IO),
         make_module_file_names_with_suffix(Globals,
             ext_other(other_ext(".int0")),
-            set.to_sorted_list(OptInt0Deps), OptInt0DepsFileNames, !IO),
+            set.to_sorted_list(OptInt0Deps), OptInt0DepsFileNames, !Cache, !IO),
         MmakeRuleDateOptInt0Deps = mmake_flat_rule("dates_on_opts_and_int0s",
             mmake_rule_is_not_phony,
             Targets,
@@ -674,7 +771,7 @@ construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
                 [CDateFileName, JavaDateFileName]),
             make_module_file_names_with_suffix(Globals,
                 ext_other(other_ext(".trans_opt")),
-                TransOptDeps2, TransOptDepsOptFileNames, !IO),
+                TransOptDeps2, TransOptDepsOptFileNames, !Cache, !IO),
             MmakeRuleTransOptOpts = mmake_flat_rule("dates_on_trans_opts",
                 mmake_rule_is_not_phony,
                 ErrDateTargets,
@@ -694,10 +791,13 @@ construct_intermod_rules(Globals, ModuleName, LongDeps, AllDeps,
 
 :- pred construct_c_header_rules(globals::in, module_name::in,
     set(module_name)::in, string::in, string::in, string::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_c_header_rules(Globals, ModuleName, AllDeps,
-        CFileName, ObjFileName, PicObjFileName, MmakeRulesCHeaders, !IO) :-
+        CFileName, ObjFileName, PicObjFileName, MmakeRulesCHeaders,
+        !Cache, !IO) :-
     globals.lookup_bool_option(Globals, highlevel_code, HighLevelCode),
     globals.get_target(Globals, CompilationTarget),
     ( if
@@ -710,7 +810,7 @@ construct_c_header_rules(Globals, ModuleName, AllDeps,
         Targets = one_or_more(PicObjFileName, [ObjFileName]),
         make_module_file_names_with_suffix(Globals,
             ext_other(other_ext(".mih")),
-            set.to_sorted_list(AllDeps), AllDepsFileNames, !IO),
+            set.to_sorted_list(AllDeps), AllDepsFileNames, !Cache, !IO),
         MmakeRuleObjOnMihs = mmake_flat_rule("objs_on_mihs",
             mmake_rule_is_not_phony,
             Targets,
@@ -728,10 +828,12 @@ construct_c_header_rules(Globals, ModuleName, AllDeps,
     % `:- pragma foreign_import_module' declarations. In some grades the header
     % file won't actually be built (e.g. LLDS grades for modules not containing
     % `:- pragma export' declarations), but this rule won't do any harm.
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".mh")), ModuleName, MhHeaderFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".mih")), ModuleName, MihHeaderFileName, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".mh")), ModuleName, MhHeaderFileName,
+        !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".mih")), ModuleName, MihHeaderFileName,
+        !Cache, !IO),
     MmakeRuleMhMihOnC = mmake_flat_rule("mh_and_mih_on_c",
         mmake_rule_is_not_phony,
         one_or_more(MhHeaderFileName, [MihHeaderFileName]),
@@ -747,15 +849,17 @@ construct_c_header_rules(Globals, ModuleName, AllDeps,
     % (See the main comment on generate_d_file above.
     %
 :- pred construct_module_dep_fragment(globals::in, module_name::in,
-    string::in, mmake_fragment::out, io::di, io::uo) is det.
+    string::in, mmake_fragment::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_module_dep_fragment(Globals, ModuleName, CFileName,
-        MmakeFragmentModuleDep, !IO) :-
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".java")), ModuleName, JavaFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
+        MmakeFragmentModuleDep, !Cache, !IO) :-
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".java")), ModuleName, JavaFileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
         ext_other(make_module_dep_file_extension),
-        ModuleName, ModuleDepFileName, !IO),
+        ModuleName, ModuleDepFileName, !Cache, !IO),
     MmakeFragmentModuleDep = mmf_conditional_entry(
         mmake_cond_grade_has_component("java"),
         mmake_simple_rule("module_dep_on_java",
@@ -787,23 +891,25 @@ construct_module_dep_fragment(Globals, ModuleName, CFileName,
 :- pred construct_self_and_parent_date_date0_rules(globals::in,
     string::in, string::in, string::in,
     set(module_name)::in, set(module_name)::in, set(module_name)::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_self_and_parent_date_date0_rules(Globals, SourceFileName,
         Date0FileName, DateFileName, Ancestors, LongDeps, ShortDeps,
-        MmakeRulesParentDates, !IO) :-
+        MmakeRulesParentDates, !Cache, !IO) :-
     make_module_file_names_with_suffix(Globals,
         ext_other(other_ext(".date")),
-        set.to_sorted_list(Ancestors), AncestorDateFileNames, !IO),
+        set.to_sorted_list(Ancestors), AncestorDateFileNames, !Cache, !IO),
     make_module_file_names_with_suffix(Globals,
         ext_other(other_ext(".int0")),
-        set.to_sorted_list(Ancestors), AncestorInt0FileNames, !IO),
+        set.to_sorted_list(Ancestors), AncestorInt0FileNames, !Cache, !IO),
     make_module_file_names_with_suffix(Globals,
         ext_other(other_ext(".int3")),
-        set.to_sorted_list(LongDeps), LongDepInt3FileNames, !IO),
+        set.to_sorted_list(LongDeps), LongDepInt3FileNames, !Cache, !IO),
     make_module_file_names_with_suffix(Globals,
         ext_other(other_ext(".int3")),
-        set.to_sorted_list(ShortDeps), ShortDepInt3FileNames, !IO),
+        set.to_sorted_list(ShortDeps), ShortDepInt3FileNames, !Cache, !IO),
 
     MmakeRuleParentDates = mmake_general_rule("self_and_parent_date_deps",
         mmake_rule_is_not_phony,
@@ -819,7 +925,7 @@ construct_self_and_parent_date_date0_rules(Globals, SourceFileName,
         []),
     make_module_file_names_with_suffix(Globals,
         ext_other(other_ext(".date0")),
-        set.to_sorted_list(Ancestors), AncestorDate0FileNames, !IO),
+        set.to_sorted_list(Ancestors), AncestorDate0FileNames, !Cache, !IO),
     MmakeRuleParentDate0s = mmake_general_rule("self_and_parent_date0_deps",
         mmake_rule_is_not_phony,
         one_or_more(
@@ -839,18 +945,20 @@ construct_self_and_parent_date_date0_rules(Globals, SourceFileName,
     %
 :- pred construct_foreign_import_rules(globals::in, aug_compilation_unit::in,
     maybe_intermod_deps::in, module_name::in, string::in, string::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_foreign_import_rules(Globals, AugCompUnit, IntermodDeps,
         SourceFileModuleName, ObjFileName, PicObjFileName,
-        MmakeRulesForeignImports, !IO) :-
+        MmakeRulesForeignImports, !Cache, !IO) :-
     AugCompUnit = aug_compilation_unit(ParseTreeModuleSrc,
         AncestorIntSpecs, DirectInt1Specs, IndirectInt2Specs,
         PlainOpts, _TransOpts, IntForOptSpecs, _TypeRepnSpecs,
         _ModuleVersionNumber),
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     (
-        IntermodDeps = intermod_deps(_, _, _, ForeignImportedModuleNamesSet)
+        IntermodDeps = intermod_deps(_, _, _, ForeignImportedModuleNamesSet, _)
     ;
         IntermodDeps = no_intermod_deps,
         some [!FIMSpecs] (
@@ -907,18 +1015,18 @@ construct_foreign_import_rules(Globals, AugCompUnit, IntermodDeps,
             ForeignImportOtherExt = other_ext(".mh"),
             gather_foreign_import_deps(Globals, ForeignImportOtherExt,
                 ForeignImportTargets, ForeignImportedModuleNames,
-                MmakeRuleForeignImports, !IO),
+                MmakeRuleForeignImports, !Cache, !IO),
             MmakeRulesForeignImports = [MmakeRuleForeignImports]
         ;
             Target = target_java,
-            module_name_to_file_name(Globals, $pred, do_not_create_dirs,
+            make_module_file_name(Globals, $pred,
                 ext_other(other_ext(".class")),
-                ModuleName, ClassFileName, !IO),
+                ModuleName, ClassFileName, !Cache, !IO),
             ForeignImportTargets = one_or_more(ClassFileName, []),
             ForeignImportOtherExt = other_ext(".java"),
             gather_foreign_import_deps(Globals, ForeignImportOtherExt,
                 ForeignImportTargets, ForeignImportedModuleNames,
-                MmakeRuleForeignImports, !IO),
+                MmakeRuleForeignImports, !Cache, !IO),
             MmakeRulesForeignImports = [MmakeRuleForeignImports]
         ;
             Target = target_csharp,
@@ -940,22 +1048,25 @@ construct_foreign_import_rules(Globals, AugCompUnit, IntermodDeps,
     %
 :- pred construct_install_shadow_rules(globals::in, module_name::in,
     string::in, string::in, string::in, string::in, string::in, string::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_install_shadow_rules(Globals, ModuleName,
         Int0FileName, Date0FileName, DateFileName, Date3FileName,
         OptDateFileName, TransOptDateFileName,
-        MmakeRulesInstallShadows, !IO) :-
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".int")), ModuleName, IntFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".int2")), ModuleName, Int2FileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".int3")), ModuleName, Int3FileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".opt")), ModuleName, OptFileName, !IO),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(other_ext(".trans_opt")), ModuleName, TransOptFileName, !IO),
+        MmakeRulesInstallShadows, !Cache, !IO) :-
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".int")), ModuleName, IntFileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".int2")), ModuleName, Int2FileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".int3")), ModuleName, Int3FileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".opt")), ModuleName, OptFileName, !Cache, !IO),
+    make_module_file_name(Globals, $pred,
+        ext_other(other_ext(".trans_opt")), ModuleName, TransOptFileName,
+        !Cache, !IO),
 
     MmakeRulesInstallShadows = [
         mmake_simple_rule("int0_on_date0",
@@ -981,19 +1092,21 @@ construct_install_shadow_rules(Globals, ModuleName,
 %---------------------%
 
 :- pred construct_subdir_short_rules(globals::in, module_name::in,
-    list(mmake_entry)::out, io::di, io::uo) is det.
+    list(mmake_entry)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_subdir_short_rules(Globals, ModuleName,
-        MmakeRulesSubDirShorthand, !IO) :-
+        MmakeRulesSubDirShorthand, !Cache, !IO) :-
     globals.lookup_bool_option(Globals, use_subdirs, UseSubdirs),
     (
         UseSubdirs = yes,
         SubDirShorthandOtherExts =
             [other_ext(".c"), other_ext(".$O"), other_ext(".pic_o"),
             other_ext(".java"), other_ext(".class"), other_ext(".dll")],
-        list.map_foldl(
+        list.map_foldl2(
             construct_subdirs_shorthand_rule(Globals, ModuleName),
-            SubDirShorthandOtherExts, MmakeRulesSubDirShorthand, !IO)
+            SubDirShorthandOtherExts, MmakeRulesSubDirShorthand, !Cache, !IO)
     ;
         UseSubdirs = no,
         MmakeRulesSubDirShorthand = []
@@ -1144,14 +1257,16 @@ gather_fim_specs_in_parse_tree_plain_opt(ParseTreePlainOpt, !FIMSpecs) :-
 %---------------------------------------------------------------------------%
 
 :- pred gather_nested_deps(globals::in, module_name::in, list(module_name)::in,
-    other_ext::in, mmake_entry::out, io::di, io::uo) is det.
+    other_ext::in, mmake_entry::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 gather_nested_deps(Globals, ModuleName, NestedDeps, OtherExt,
-        MmakeRule, !IO) :-
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(OtherExt), ModuleName, ModuleExtName, !IO),
+        MmakeRule, !Cache, !IO) :-
+    make_module_file_name(Globals, $pred,
+        ext_other(OtherExt), ModuleName, ModuleExtName, !Cache, !IO),
     make_module_file_names_with_suffix(Globals,
-        ext_other(OtherExt), NestedDeps, NestedDepsFileNames, !IO),
+        ext_other(OtherExt), NestedDeps, NestedDepsFileNames, !Cache, !IO),
     ExtStr = other_extension_to_string(OtherExt),
     MmakeRule = mmake_simple_rule("nested_deps_for_" ++ ExtStr,
         mmake_rule_is_not_phony,
@@ -1161,13 +1276,15 @@ gather_nested_deps(Globals, ModuleName, NestedDeps, OtherExt,
 
 :- pred gather_foreign_import_deps(globals::in, other_ext::in,
     one_or_more(string)::in, list(module_name)::in, mmake_entry::out,
+    module_file_name_cache::in, module_file_name_cache::out,
     io::di, io::uo) is det.
 
 gather_foreign_import_deps(Globals, ForeignImportOtherExt,
-        ForeignImportTargets, ForeignImportedModuleNames, MmakeRule, !IO) :-
+        ForeignImportTargets, ForeignImportedModuleNames, MmakeRule,
+        !Cache, !IO) :-
     make_module_file_names_with_suffix(Globals,
         ext_other(ForeignImportOtherExt),
-        ForeignImportedModuleNames, ForeignImportedFileNames, !IO),
+        ForeignImportedModuleNames, ForeignImportedFileNames, !Cache, !IO),
     ForeignImportExtStr = other_extension_to_string(ForeignImportOtherExt),
     RuleName = "foreign_deps_for_" ++
         string.remove_prefix_if_present(".", ForeignImportExtStr),
@@ -1179,23 +1296,51 @@ gather_foreign_import_deps(Globals, ForeignImportOtherExt,
 
 %---------------------------------------------------------------------------%
 
-:- pred make_module_file_names_with_suffix(globals::in, ext::in,
-    list(module_name)::in, list(mmake_file_name)::out, io::di, io::uo) is det.
+:- pred make_module_file_name(globals::in, string::in, ext::in,
+    module_name::in, file_name::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
-make_module_file_names_with_suffix(Globals, Ext, Modules, FileNames, !IO) :-
-    list.map_foldl(
-        module_name_to_file_name(Globals, $pred, do_not_create_dirs, Ext),
-        Modules, FileNames, !IO).
+make_module_file_name(Globals, From, Ext, ModuleName, FileName,
+        !Cache, !IO) :-
+    (
+        Ext = ext_src,
+        % No point caching these.
+        module_name_to_file_name(Globals, From, do_not_create_dirs,
+            Ext, ModuleName, FileName, !IO)
+    ;
+        Ext = ext_other(OtherExt),
+        ModuleNameExt = module_name_and_ext(ModuleName, OtherExt),
+        ( if map.search(!.Cache, ModuleNameExt, FileName0) then
+            FileName = FileName0
+        else
+            % The result of module_name_to_file_name is cached to save on
+            % temporary string constructions.
+            module_name_to_file_name(Globals, From, do_not_create_dirs,
+                Ext, ModuleName, FileName, !IO),
+            map.det_insert(ModuleNameExt, FileName, !Cache)
+        )
+    ).
+
+:- pred make_module_file_names_with_suffix(globals::in, ext::in,
+    list(module_name)::in, list(mmake_file_name)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
+
+make_module_file_names_with_suffix(Globals, Ext, Modules, FileNames,
+        !Cache, !IO) :-
+    list.map_foldl2(make_module_file_name(Globals, $pred, Ext),
+        Modules, FileNames, !Cache, !IO).
 
 :- pred make_module_file_name_group_with_suffix(globals::in, string::in,
     ext::in, set(module_name)::in, list(mmake_file_name_group)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
     io::di, io::uo) is det.
 
 make_module_file_name_group_with_suffix(Globals, GroupName, Ext,
-        Modules, Groups, !IO) :-
-    list.map_foldl(
-        module_name_to_file_name(Globals, $pred, do_not_create_dirs, Ext),
-        set.to_sorted_list(Modules), FileNames, !IO),
+        Modules, Groups, !Cache, !IO) :-
+    list.map_foldl2(make_module_file_name(Globals, $pred, Ext),
+        set.to_sorted_list(Modules), FileNames, !Cache, !IO),
     Groups = make_file_name_group(GroupName, FileNames).
 
 %---------------------------------------------------------------------------%
@@ -1222,13 +1367,15 @@ get_fact_table_dependencies(Globals, OtherExt,
     % rather than `mmake Mercury/cs/module.c'.
     %
 :- pred construct_subdirs_shorthand_rule(globals::in, module_name::in,
-    other_ext::in, mmake_entry::out, io::di, io::uo) is det.
+    other_ext::in, mmake_entry::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 construct_subdirs_shorthand_rule(Globals, ModuleName, OtherExt,
-        MmakeRule, !IO) :-
+        MmakeRule, !Cache, !IO) :-
     module_name_to_file_name_stem(ModuleName, ModuleStr),
-    module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-        ext_other(OtherExt), ModuleName, Target, !IO),
+    make_module_file_name(Globals, $pred, ext_other(OtherExt), ModuleName,
+        Target, !Cache, !IO),
     ExtStr = other_extension_to_string(OtherExt),
     ShorthandTarget = ModuleStr ++ ExtStr,
     MmakeRule = mmake_simple_rule("subdir_shorthand_for_" ++ ExtStr,
@@ -1236,33 +1383,48 @@ construct_subdirs_shorthand_rule(Globals, ModuleName, OtherExt,
 
 %---------------------------------------------------------------------------%
 
-generate_dependencies_write_d_files(_, [], _, _, _, _, _, _, !IO).
-generate_dependencies_write_d_files(Globals, [Dep | Deps],
+generate_dependencies_write_d_files(Globals, Deps,
         IntDepsGraph, ImpDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
-        TransOptOrder, DepsMap, !IO) :-
+        TransOptDepsGraph, TransOptOrder, DepsMap, !IO) :-
+    map.init(Cache0),
+    generate_dependencies_write_d_files_loop(Globals, Deps,
+        IntDepsGraph, ImpDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
+        TransOptDepsGraph, TransOptOrder, DepsMap, Cache0, _Cache, !IO).
+
+:- pred generate_dependencies_write_d_files_loop(globals::in, list(deps)::in,
+    deps_graph::in, deps_graph::in, deps_graph::in, deps_graph::in,
+    deps_graph::in, list(module_name)::in, deps_map::in,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
+
+generate_dependencies_write_d_files_loop(_, [], _, _, _, _, _, _, _, !Cache, !IO).
+generate_dependencies_write_d_files_loop(Globals, [Dep | Deps],
+        IntDepsGraph, ImpDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
+        TransOptDepsGraph, TransOptOrder, DepsMap, !Cache, !IO) :-
     generate_dependencies_write_d_file(Globals, Dep,
         IntDepsGraph, ImpDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
-        TransOptOrder, DepsMap, !IO),
-    generate_dependencies_write_d_files(Globals, Deps,
+        TransOptDepsGraph, TransOptOrder, DepsMap, !Cache, !IO),
+    generate_dependencies_write_d_files_loop(Globals, Deps,
         IntDepsGraph, ImpDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
-        TransOptOrder, DepsMap, !IO).
+        TransOptDepsGraph, TransOptOrder, DepsMap, !Cache, !IO).
 
 :- pred generate_dependencies_write_d_file(globals::in, deps::in,
     deps_graph::in, deps_graph::in, deps_graph::in, deps_graph::in,
-    list(module_name)::in, deps_map::in, io::di, io::uo) is det.
+    deps_graph::in, list(module_name)::in, deps_map::in,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 generate_dependencies_write_d_file(Globals, Dep,
         IntDepsGraph, ImpDepsGraph, IndirectDepsGraph, IndirectOptDepsGraph,
-        TransOptOrder, _DepsMap, !IO) :-
+        TransOptDepsGraph, FullTransOptOrder, _DepsMap, !Cache, !IO) :-
     % XXX The fact that _DepsMap is unused here may be a bug.
-    Dep = deps(_, BurdenedAugCompUnit),
-    BurdenedAugCompUnit = burdened_aug_comp_unit(Baggage, AugCompUnit),
+    Dep = deps(_, BurdenedModule),
+    BurdenedModule = burdened_module(Baggage, ParseTreeModuleSrc),
 
     % Look up the interface/implementation/indirect dependencies
     % for this module from the respective dependency graphs,
     % and save them in the module_and_imports structure.
 
-    ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
     get_dependencies_from_graph(IndirectOptDepsGraph, ModuleName,
         IndirectOptDeps),
@@ -1285,33 +1447,40 @@ generate_dependencies_write_d_file(Globals, Dep,
             IndirectDeps)
     ),
 
+    get_dependencies_from_graph(TransOptDepsGraph, ModuleName, TransOptDeps0),
+    set.delete(ModuleName, TransOptDeps0, TransOptDeps),
+
     IntermodDeps = intermod_deps(IntDeps, ImpDeps, IndirectDeps,
-        IndirectOptDeps),
+        IndirectOptDeps, TransOptDeps),
 
-    % Compute the trans-opt dependencies for this module. To avoid
-    % the possibility of cycles, each module is only allowed to depend
-    % on modules that occur later than it in the TransOptOrder.
+    % Compute the maximum allowable trans-opt dependencies for this module.
+    % To avoid the possibility of cycles, each module is only allowed to depend
+    % on modules that occur after it in the FullTransOptOrder.
 
-    FindModule =
+    NotThisModule =
         ( pred(OtherModule::in) is semidet :-
             ModuleName \= OtherModule
         ),
-    list.drop_while(FindModule, TransOptOrder, TransOptDeps0),
-    ( if TransOptDeps0 = [_ | TransOptDeps1] then
+    list.drop_while(NotThisModule, FullTransOptOrder, TailTransOptOrder),
+    ( if TailTransOptOrder = [_ | TransOptOrderList] then
         % The module was found in the list.
-        TransOptDeps = TransOptDeps1
+        set.list_to_set(TransOptOrderList, TransOptOrder)
     else
-        TransOptDeps = []
+        set.init(TransOptOrder)
     ),
+    TransOptRuleInfo = trans_opt_deps_from_order(TransOptOrder),
+    MaybeInclTransOptRule = include_trans_opt_rule(TransOptRuleInfo),
 
     % Note that even if a fatal error occured for one of the files
     % that the current Module depends on, a .d file is still produced,
     % even though it probably contains incorrect information.
-    Errors = Baggage ^ mb_errors,
-    set.intersect(Errors, fatal_read_module_errors, FatalErrors),
+    ModuleErrors = Baggage ^ mb_errors,
+    FatalErrors = ModuleErrors ^ rm_fatal_errors,
     ( if set.is_empty(FatalErrors) then
-        write_dependency_file(Globals, BurdenedAugCompUnit, IntermodDeps,
-            IndirectOptDeps, yes(TransOptDeps), !IO)
+        init_aug_compilation_unit(ParseTreeModuleSrc, AugCompUnit),
+        BurdenedAugCompUnit = burdened_aug_comp_unit(Baggage, AugCompUnit),
+        write_dependency_file_fn_cache(Globals, BurdenedAugCompUnit,
+            IntermodDeps, IndirectOptDeps, MaybeInclTransOptRule, !Cache, !IO)
     else
         true
     ).
@@ -1319,15 +1488,19 @@ generate_dependencies_write_d_file(Globals, Dep,
 :- pred get_dependencies_from_graph(deps_graph::in, module_name::in,
     set(module_name)::out) is det.
 
-get_dependencies_from_graph(DepsGraph0, ModuleName, Dependencies) :-
-    digraph.add_vertex(ModuleName, ModuleKey, DepsGraph0, DepsGraph),
-    digraph.lookup_key_set_from(DepsGraph, ModuleKey, DepsKeysSet),
-    AddKeyDep =
-        ( pred(Key::in, Deps0::in, Deps::out) is det :-
-            digraph.lookup_vertex(DepsGraph, Key, Dep),
-            set.insert(Dep, Deps0, Deps)
-        ),
-    sparse_bitset.foldl(AddKeyDep, DepsKeysSet, set.init, Dependencies).
+get_dependencies_from_graph(DepsGraph, ModuleName, Dependencies) :-
+    ( if digraph.search_key(DepsGraph, ModuleName, ModuleKey) then
+        digraph.lookup_key_set_from(DepsGraph, ModuleKey, DepsKeysSet),
+        AddKeyDep =
+            ( pred(Key::in, Deps0::in, Deps::out) is det :-
+                digraph.lookup_vertex(DepsGraph, Key, Dep),
+                Deps = [Dep | Deps0]
+            ),
+        sparse_bitset.foldr(AddKeyDep, DepsKeysSet, [], DependenciesList),
+        set.list_to_set(DependenciesList, Dependencies)
+    else
+        set.init(Dependencies)
+    ).
 
 %---------------------------------------------------------------------------%
 
@@ -1343,8 +1516,9 @@ generate_dependencies_write_dv_file(Globals, SourceFileName, ModuleName,
     io.open_output(DvFileName, DvResult, !IO),
     (
         DvResult = ok(DvStream),
+        map.init(Cache0),
         generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
-            MmakeFile, !IO),
+            MmakeFile, Cache0, _Cache, !IO),
         write_mmakefile(DvStream, MmakeFile, !IO),
         io.close_output(DvStream, !IO),
         maybe_write_string(ProgressStream, Verbose, "% done.\n", !IO)
@@ -1362,17 +1536,19 @@ generate_dependencies_write_dv_file(Globals, SourceFileName, ModuleName,
 %---------------------------------------------------------------------------%
 
 :- pred generate_dv_file(globals::in, file_name::in, module_name::in,
-    deps_map::in, mmakefile::out, io::di, io::uo) is det.
+    deps_map::in, mmakefile::out,
+    module_file_name_cache::in, module_file_name_cache::out,
+    io::di, io::uo) is det.
 
 generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
-        MmakeFile, !IO) :-
+        MmakeFile, !Cache, !IO) :-
     ModuleNameString = sym_name_to_string(ModuleName),
     library.version(Version, FullArch),
     MmakeStartComment = mmake_start_comment("dependency variables",
         ModuleNameString, SourceFileName, Version, FullArch),
 
     map.keys(DepsMap, Modules0),
-    select_ok_modules(Modules0, DepsMap, Modules1),
+    select_ok_modules(DepsMap, Modules0, Modules1),
     list.sort(compare_module_names, Modules1, Modules),
 
     module_name_to_make_var_name(ModuleName, ModuleMakeVarName),
@@ -1390,22 +1566,22 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
         list.map(add_suffix(".dep_err"), SourceFiles)),
 
     make_module_file_names_with_suffix(Globals, ext_other(other_ext("")),
-        Modules, ModulesSourceFileNames, !IO),
+        Modules, ModulesSourceFileNames, !Cache, !IO),
     MmakeVarModuleMods = mmake_var_defn_list(ModuleMakeVarName ++ ".mods",
         ModulesSourceFileNames),
 
     % The modules for which we need to generate .int0 files.
     ModulesWithSubModules = list.filter(
         ( pred(Module::in) is semidet :-
-            map.lookup(DepsMap, Module, deps(_, BurdenedAugCompUnit)),
-            AugCompUnit = BurdenedAugCompUnit ^ bacu_acu,
-            ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
+            map.lookup(DepsMap, Module, deps(_, BurdenedModule)),
+            ParseTreeModuleSrc = BurdenedModule ^ bm_module,
             IncludeMap = ParseTreeModuleSrc ^ ptms_include_map,
             not map.is_empty(IncludeMap)
         ), Modules),
 
     make_module_file_names_with_suffix(Globals, ext_other(other_ext("")),
-        ModulesWithSubModules, ModulesWithSubModulesSourceFileNames, !IO),
+        ModulesWithSubModules, ModulesWithSubModulesSourceFileNames,
+        !Cache, !IO),
     MmakeVarModuleParentMods = mmake_var_defn_list(
         ModuleMakeVarName ++ ".parent_mods",
         ModulesWithSubModulesSourceFileNames),
@@ -1421,7 +1597,7 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
     ForeignModules = assoc_list.keys(ForeignModulesAndExts),
 
     make_module_file_names_with_suffix(Globals, ext_other(other_ext("")),
-        ForeignModules, ForeignModulesFileNames, !IO),
+        ForeignModules, ForeignModulesFileNames, !Cache, !IO),
     MmakeVarForeignModules =
         mmake_var_defn_list(ModuleMakeVarName ++ ".foreign",
             ForeignModulesFileNames),
@@ -1485,7 +1661,7 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
     MmakeVarPicOs = mmake_var_defn(ModuleMakeVarName ++ ".pic_os",
         string.format("$(%s.all_pic_os)", [s(ModuleMakeVarName)])),
     MmakeVarUseds = mmake_var_defn(ModuleMakeVarName ++ ".useds",
-        string.format("$(%s.mods:%%=$(used_subdir)%%.used)",
+        string.format("$(%s.mods:%%=$(useds_subdir)%%.used)",
             [s(ModuleMakeVarName)])),
     MmakeVarJavas = mmake_var_defn(ModuleMakeVarName ++ ".javas",
         string.format("$(%s.mods:%%=$(javas_subdir)%%.java)",
@@ -1499,12 +1675,20 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
     % `module\$*.class', hence the "\\$$*.class" below.
     % If no such files exist, Make will use the pattern verbatim,
     % so we enclose the pattern in a `wildcard' function to prevent this.
-    MmakeVarClasses = mmake_var_defn_list(ModuleMakeVarName ++ ".classes",
+    % Evaluating the .classes variable can be slow so we make it conditional
+    % on the grade.
+    MmakeVarClassesJava = mmake_var_defn_list(ModuleMakeVarName ++ ".classes",
         [string.format("$(%s.mods:%%=$(classes_subdir)%%.class)",
             [s(ModuleMakeVarName)]),
         string.format(
             "$(wildcard $(%s.mods:%%=$(classes_subdir)%%\\$$*.class))",
             [s(ModuleMakeVarName)])]),
+    MmakeVarClassesNonJava = mmake_var_defn(ModuleMakeVarName ++ ".classes",
+        ""),
+    MmakeFragmentVarClasses = mmf_conditional_entry(
+        mmake_cond_grade_has_component("java"),
+        MmakeVarClassesJava, MmakeVarClassesNonJava),
+
     MmakeVarCss = mmake_var_defn(ModuleMakeVarName ++ ".css",
         string.format("$(%s.mods:%%=$(css_subdir)%%.cs)",
             [s(ModuleMakeVarName)])),
@@ -1642,7 +1826,7 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
         string.format("$(%s.mods:%%=%%.prof)",
             [s(ModuleMakeVarName)])),
 
-    MmakeEntries =
+    MmakeFragmentsA = list.map(mmake_entry_to_fragment,
         [MmakeStartComment, MmakeVarModuleMs,
         MmakeVarModuleDepErrs, MmakeVarModuleErrs,
         MmakeVarModuleMods, MmakeVarModuleParentMods,
@@ -1650,8 +1834,9 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
         MmakeVarInitCs, MmakeVarAllCs, MmakeVarCs, MmakeVarDlls,
         MmakeVarAllOs, MmakeVarAllPicOs, MmakeVarOs, MmakeVarPicOs,
         MmakeVarUseds,
-        MmakeVarJavas, MmakeVarAllJavas, MmakeVarClasses,
-        MmakeVarCss, MmakeVarAllCss,
+        MmakeVarJavas, MmakeVarAllJavas]),
+    MmakeFragmentsB = list.map(mmake_entry_to_fragment,
+        [MmakeVarCss, MmakeVarAllCss,
         MmakeVarDirs, MmakeVarDirOs,
         MmakeVarDates, MmakeVarDate0s, MmakeVarDate3s,
         MmakeVarOptDates, MmakeVarTransOptDates,
@@ -1660,26 +1845,28 @@ generate_dv_file(Globals, SourceFileName, ModuleName, DepsMap,
         MmakeVarMhs, MmakeVarAllMihs, MmakeVarAllMhs,
         MmakeVarInts, MmakeVarInt0s, MmakeVarAllInt0s, MmakeVarInt3s,
         MmakeVarOpts, MmakeVarTransOpts,
-        MmakeVarAnalysiss, MmakeVarRequests, MmakeVarImdgs, MmakeVarProfs],
-    MmakeFile = cord.from_list(
-        list.map(mmake_entry_to_fragment, MmakeEntries)).
+        MmakeVarAnalysiss, MmakeVarRequests, MmakeVarImdgs, MmakeVarProfs]),
+    MmakeFile =
+        cord.from_list(MmakeFragmentsA) ++
+        cord.singleton(MmakeFragmentVarClasses) ++
+        cord.from_list(MmakeFragmentsB).
 
 %---------------------%
 
-:- pred select_ok_modules(list(module_name)::in, deps_map::in,
+:- pred select_ok_modules(deps_map::in, list(module_name)::in,
     list(module_name)::out) is det.
 
-select_ok_modules([], _, []).
-select_ok_modules([Module | Modules0], DepsMap, Modules) :-
-    select_ok_modules(Modules0, DepsMap, ModulesTail),
-    map.lookup(DepsMap, Module, deps(_, BurdenedAugCompUnit)),
-    Baggage = BurdenedAugCompUnit ^ bacu_baggage,
-    Errors = Baggage ^ mb_errors,
-    set.intersect(Errors, fatal_read_module_errors, FatalErrors),
+select_ok_modules(_, [], []).
+select_ok_modules(DepsMap, [ModuleName | ModuleNames0], ModuleNames) :-
+    select_ok_modules(DepsMap, ModuleNames0, ModuleNamesTail),
+    map.lookup(DepsMap, ModuleName, deps(_, BurdenedModule)),
+    Baggage = BurdenedModule ^ bm_baggage,
+    ModuleErrors = Baggage ^ mb_errors,
+    FatalErrors = ModuleErrors ^ rm_fatal_errors,
     ( if set.is_empty(FatalErrors) then
-        Modules = [Module | ModulesTail]
+        ModuleNames = [ModuleName | ModuleNamesTail]
     else
-        Modules = ModulesTail
+        ModuleNames = ModuleNamesTail
     ).
 
 %---------------------%
@@ -1707,9 +1894,8 @@ get_fact_table_file_names(DepsMap, Modules, FactTableFileNames) :-
 
 get_fact_table_file_names(_DepsMap, [], !FactTableFileNames).
 get_fact_table_file_names(DepsMap, [Module | Modules], !FactTableFileNames) :-
-    map.lookup(DepsMap, Module, deps(_, BurdenedAugCompUnit)),
-    AugCompUnit = BurdenedAugCompUnit ^ bacu_acu,
-    ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
+    map.lookup(DepsMap, Module, deps(_, BurdenedModule)),
+    ParseTreeModuleSrc = BurdenedModule ^ bm_module,
     get_fact_tables(ParseTreeModuleSrc, FactTableFileNames),
     % Handle object files for foreign code.
     % NOTE: currently none of the backends support foreign code
@@ -2084,10 +2270,9 @@ generate_dep_file_install_targets(Globals, ModuleName, DepsMap,
     ),
     ( if
         Intermod = yes,
-        some [ModuleAndImports] (
-            map.member(DepsMap, _, deps(_, BurdenedAugCompUnit)),
-            AugCompUnit = BurdenedAugCompUnit ^ bacu_acu,
-            ParseTreeModuleSrc = AugCompUnit ^ acu_module_src,
+        some [BurdenedModule] (
+            map.member(DepsMap, _, deps(_, BurdenedModule)),
+            ParseTreeModuleSrc = BurdenedModule ^ bm_module,
             IncludeMap = ParseTreeModuleSrc ^ ptms_include_map,
             not map.is_empty(IncludeMap)
         )
@@ -2398,8 +2583,8 @@ remove_files_cmd(Files) =
 
 get_source_file(DepsMap, ModuleName, FileName) :-
     map.lookup(DepsMap, ModuleName, Deps),
-    Deps = deps(_, BurdenedAugCompUnit),
-    Baggage = BurdenedAugCompUnit ^ bacu_baggage,
+    Deps = deps(_, BurdenedModule),
+    Baggage = BurdenedModule ^ bm_baggage,
     SourceFileName = Baggage ^ mb_source_file_name,
     ( if string.remove_suffix(SourceFileName, ".m", SourceFileBase) then
         FileName = SourceFileBase
@@ -2409,36 +2594,30 @@ get_source_file(DepsMap, ModuleName, FileName) :-
 
 %---------------------------------------------------------------------------%
 
-maybe_output_module_order(Globals, ModuleName, DepsOrdering, !IO) :-
-    globals.lookup_bool_option(Globals, generate_module_order, Order),
+output_module_order(Globals, ModuleName, Ext, DepsOrdering, !IO) :-
+    module_name_to_file_name(Globals, $pred, do_create_dirs,
+        ext_other(Ext), ModuleName, OrdFileName, !IO),
+    get_progress_output_stream(Globals, ModuleName, ProgressStream, !IO),
+    globals.lookup_bool_option(Globals, verbose, Verbose),
+    string.format("%% Creating module order file `%s'...",
+        [s(OrdFileName)], CreatingMsg),
+    maybe_write_string(ProgressStream, Verbose, CreatingMsg, !IO),
+    io.open_output(OrdFileName, OrdResult, !IO),
     (
-        Order = yes,
-        module_name_to_file_name(Globals, $pred, do_create_dirs,
-            ext_other(other_ext(".order")), ModuleName, OrdFileName, !IO),
-        get_progress_output_stream(Globals, ModuleName, ProgressStream, !IO),
-        globals.lookup_bool_option(Globals, verbose, Verbose),
-        string.format("%% Creating module order file `%s'...",
-            [s(OrdFileName)], CreatingMsg),
-        maybe_write_string(ProgressStream, Verbose, CreatingMsg, !IO),
-        io.open_output(OrdFileName, OrdResult, !IO),
-        (
-            OrdResult = ok(OrdStream),
-            io.write_list(OrdStream, DepsOrdering, "\n\n",
-                write_module_scc(OrdStream), !IO),
-            io.close_output(OrdStream, !IO),
-            maybe_write_string(ProgressStream, Verbose, " done.\n", !IO)
-        ;
-            OrdResult = error(IOError),
-            maybe_write_string(ProgressStream, Verbose, " failed.\n", !IO),
-            maybe_flush_output(ProgressStream, Verbose, !IO),
-            get_error_output_stream(Globals, ModuleName, ErrorStream, !IO),
-            io.error_message(IOError, IOErrorMessage),
-            string.format("error opening file `%s' for output: %s",
-                [s(OrdFileName), s(IOErrorMessage)], OrdMessage),
-            report_error(ErrorStream, OrdMessage, !IO)
-        )
+        OrdResult = ok(OrdStream),
+        io.write_list(OrdStream, DepsOrdering, "\n\n",
+            write_module_scc(OrdStream), !IO),
+        io.close_output(OrdStream, !IO),
+        maybe_write_string(ProgressStream, Verbose, " done.\n", !IO)
     ;
-        Order = no
+        OrdResult = error(IOError),
+        maybe_write_string(ProgressStream, Verbose, " failed.\n", !IO),
+        maybe_flush_output(ProgressStream, Verbose, !IO),
+        get_error_output_stream(Globals, ModuleName, ErrorStream, !IO),
+        io.error_message(IOError, IOErrorMessage),
+        string.format("error opening file `%s' for output: %s",
+            [s(OrdFileName), s(IOErrorMessage)], OrdMessage),
+        report_error(ErrorStream, OrdMessage, !IO)
     ).
 
 :- pred write_module_scc(io.output_stream::in, set(module_name)::in,
@@ -2453,7 +2632,7 @@ write_module_scc(Stream, SCC0, !IO) :-
 %---------------------------------------------------------------------------%
 
     % get_both_opt_deps(Globals, BuildOptFiles, Deps, IntermodDirs,
-    %   OptDeps, TransOptDeps, !IO):
+    %   OptDeps, TransOptDeps, !Cache, !IO):
     %
     % For each dependency, search intermod_directories for a .m file.
     % If it exists, add it to both output lists. Otherwise, if a .opt
@@ -2466,13 +2645,14 @@ write_module_scc(Stream, SCC0, !IO) :-
     %
 :- pred get_both_opt_deps(globals::in, bool::in, list(string)::in,
     list(module_name)::in, list(module_name)::out, list(module_name)::out,
+    module_file_name_cache::in, module_file_name_cache::out,
     io::di, io::uo) is det.
 
-get_both_opt_deps(_, _, _, [], [], [], !IO).
+get_both_opt_deps(_, _, _, [], [], [], !Cache, !IO).
 get_both_opt_deps(Globals, BuildOptFiles, IntermodDirs, [Dep | Deps],
-        !:OptDeps, !:TransOptDeps, !IO) :-
+        !:OptDeps, !:TransOptDeps, !Cache, !IO) :-
     get_both_opt_deps(Globals, BuildOptFiles, IntermodDirs, Deps,
-        !:OptDeps, !:TransOptDeps, !IO),
+        !:OptDeps, !:TransOptDeps, !Cache, !IO),
     (
         BuildOptFiles = yes,
         search_for_module_source(IntermodDirs, Dep, MaybeFileName, !IO),
@@ -2491,8 +2671,8 @@ get_both_opt_deps(Globals, BuildOptFiles, IntermodDirs, [Dep | Deps],
     ),
     (
         Found = no,
-        module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-            ext_other(other_ext(".opt")), Dep, OptName, !IO),
+        make_module_file_name(Globals, $pred,
+            ext_other(other_ext(".opt")), Dep, OptName, !Cache, !IO),
         search_for_file_returning_dir(IntermodDirs, OptName, MaybeOptDir, !IO),
         (
             MaybeOptDir = ok(_),
@@ -2500,8 +2680,9 @@ get_both_opt_deps(Globals, BuildOptFiles, IntermodDirs, [Dep | Deps],
         ;
             MaybeOptDir = error(_)
         ),
-        module_name_to_file_name(Globals, $pred, do_not_create_dirs,
-            ext_other(other_ext(".trans_opt")), Dep, TransOptName, !IO),
+        make_module_file_name(Globals, $pred,
+            ext_other(other_ext(".trans_opt")), Dep, TransOptName,
+            !Cache, !IO),
         search_for_file_returning_dir(IntermodDirs, TransOptName,
             MaybeTransOptDir, !IO),
         (

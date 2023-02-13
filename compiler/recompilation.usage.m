@@ -21,7 +21,7 @@
 :- import_module hlds.hlds_module.
 
 :- import_module parse_tree.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.module_baggage.
 :- import_module recompilation.used_file.
 
 :- pred construct_used_file_contents(module_info::in, recompilation_info::in,
@@ -38,8 +38,6 @@
 :- import_module hlds.hlds_inst_mode.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.pred_table.
-:- import_module libs.
-:- import_module libs.timestamp.
 :- import_module mdbcomp.
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
@@ -49,7 +47,6 @@
 :- import_module parse_tree.prog_util.
 
 :- import_module assoc_list.
-:- import_module bool.
 :- import_module int.
 :- import_module list.
 :- import_module map.
@@ -59,7 +56,6 @@
 :- import_module queue.
 :- import_module require.
 :- import_module set.
-:- import_module string.
 
 %---------------------------------------------------------------------------%
 
@@ -128,14 +124,15 @@ insert_into_imported_items_map(VisibleModule, !ImportedItemsMap) :-
 :- type recompilation_usage_info
     --->    recompilation_usage_info(
                 module_info         :: module_info,
-                item_queue          :: queue(item_id),
+                item_queue          :: queue(recomp_item_id),
                 imported_items      :: imported_items,
-                module_instances    :: map(module_name, set(item_name)),
+                module_instances    :: map(module_name, set(recomp_item_name)),
                                     % For each module, the used typeclasses for
                                     % which the module contains an instance.
-                dependencies        :: map(item_id, set(item_id)),
+                dependencies        :: map(recomp_item_id,
+                                        set(recomp_item_id)),
                 resolved_used_items :: resolved_used_items,
-                used_typeclasses    :: set(item_name)
+                used_typeclasses    :: set(recomp_item_name)
             ).
 
 %---------------------------------------------------------------------------%
@@ -151,11 +148,11 @@ find_all_used_imported_items(UsedItems, !Info) :-
 
     UsedItems = used_items(TypeNames, TypeDefns, Insts, Modes, Classes,
         Functors, Predicates, Functions),
-    find_items_used_by_simple_item_set(type_name_item, TypeNames, !Info),
-    find_items_used_by_simple_item_set(type_defn_item, TypeDefns, !Info),
-    find_items_used_by_simple_item_set(inst_item, Insts, !Info),
-    find_items_used_by_simple_item_set(mode_item, Modes, !Info),
-    find_items_used_by_simple_item_set(typeclass_item, Classes, !Info),
+    find_items_used_by_simple_item_set(recomp_type_name, TypeNames, !Info),
+    find_items_used_by_simple_item_set(recomp_type_defn, TypeDefns, !Info),
+    find_items_used_by_simple_item_set(recomp_inst, Insts, !Info),
+    find_items_used_by_simple_item_set(recomp_mode, Modes, !Info),
+    find_items_used_by_simple_item_set(recomp_typeclass, Classes, !Info),
     find_items_used_by_preds(pf_predicate, Predicates, !Info),
     find_items_used_by_preds(pf_function, Functions, !Info),
     find_items_used_by_functors(Functors, !Info),
@@ -178,12 +175,12 @@ process_imported_item_to_fixpoint(!Info) :-
         )
     ).
 
-:- pred process_imported_items_in_queue(queue(item_id)::in,
+:- pred process_imported_items_in_queue(queue(recomp_item_id)::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 process_imported_items_in_queue(!.Queue, !Info) :-
     ( if queue.get(Item, !Queue) then
-        Item = item_id(ItemType, ItemId),
+        Item = recomp_item_id(ItemType, ItemId),
         find_items_used_by_item(ItemType, ItemId, !Info),
         disable_warning [suspicious_recursion] (
             process_imported_items_in_queue(!.Queue, !Info)
@@ -194,11 +191,14 @@ process_imported_items_in_queue(!.Queue, !Info) :-
 
 %---------------------------------------------------------------------------%
 
-:- pred record_used_pred_or_func(pred_or_func::in, item_name::in,
+:- pred record_used_pred_or_func(pred_or_func::in, recomp_item_name::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 record_used_pred_or_func(PredOrFunc, Id, !Info) :-
-    Id = item_name(SymName, Arity),
+    % XXX ARITY This Arity appears to represent a user_arity,
+    % but any connection to the original pred_info is so tenuous
+    % that I (zs) cannot be sure.
+    Id = recomp_item_name(SymName, Arity),
     UsedItems0 = !.Info ^ resolved_used_items,
     (
         PredOrFunc = pf_predicate,
@@ -218,7 +218,7 @@ record_used_pred_or_func(PredOrFunc, Id, !Info) :-
     !Info ^ resolved_used_items := UsedItems.
 
 :- pred do_record_used_pred_or_func(pred_or_func::in,
-    module_qualifier::in, sym_name::in, arity::in, bool::out,
+    module_qualifier::in, sym_name::in, arity::in, maybe_recorded::out,
     resolved_pred_or_func_map::in, resolved_pred_or_func_map::out,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
@@ -226,12 +226,18 @@ do_record_used_pred_or_func(PredOrFunc, ModuleQualifier,
         SymName, Arity, Recorded, !MatchingNames, !Info) :-
     ModuleInfo = !.Info ^ module_info,
     module_info_get_predicate_table(ModuleInfo, PredTable),
-    adjust_func_arity(PredOrFunc, OrigArity, Arity),
+    % XXX ARITY BUG See the comment in record_used_pred_or_func about Arity,
+    % which makes this adjustment look *very* strange. Since the pred form
+    % arity is supposed to be the *last* argument of adjust_func_arity,
+    % I (zs) strongly suspect that this call should be
+    % adjust_func_arity(PredOrFunc, Arity, PredFormArityInt),
+    adjust_func_arity(PredOrFunc, PredFormArityInt, Arity),
+    PredFormArity = pred_form_arity(PredFormArityInt),
     predicate_table_lookup_pf_sym_arity(PredTable, may_be_partially_qualified,
-        PredOrFunc, SymName, OrigArity, MatchingPredIds),
+        PredOrFunc, SymName, PredFormArity, MatchingPredIds),
     (
         MatchingPredIds = [_ | _],
-        Recorded = yes,
+        Recorded = recorded,
         PredModules = set.list_to_set(list.map(
             ( func(PredId) = PredId - PredModule :-
                 module_info_pred_info(ModuleInfo, PredId, PredInfo),
@@ -244,7 +250,7 @@ do_record_used_pred_or_func(PredOrFunc, ModuleQualifier,
             PredModules, !Info)
     ;
         MatchingPredIds = [],
-        Recorded = no
+        Recorded = not_recorded
     ).
 
 %---------------------------------------------------------------------------%
@@ -261,22 +267,20 @@ record_used_functor(SymName - Arity, !Info) :-
     !Info ^ resolved_used_items := UsedItems.
 
 :- pred do_record_used_functor(module_qualifier::in,
-    sym_name::in, arity::in, bool::out, resolved_functor_map::in,
-    resolved_functor_map::out,
+    sym_name::in, arity::in, maybe_recorded::out,
+    resolved_functor_map::in, resolved_functor_map::out,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 do_record_used_functor(ModuleQualifier, SymName, Arity, Recorded,
         !ResolvedCtorMap, !Info) :-
     ModuleInfo = !.Info ^ module_info,
-
     find_matching_functors(ModuleInfo, SymName, Arity, MatchingCtors),
     Name = unqualify_name(SymName),
     set.fold(find_items_used_by_functor(Name, Arity), MatchingCtors, !Info),
-
     ( if set.is_empty(MatchingCtors) then
-        Recorded = no
+        Recorded = not_recorded
     else
-        Recorded = yes,
+        Recorded = recorded,
         map.det_insert(ModuleQualifier, MatchingCtors, !ResolvedCtorMap)
     ).
 
@@ -330,7 +334,8 @@ find_matching_functors(ModuleInfo, SymName, Arity, ResolvedConstructors) :-
                     hlds_ctor_field_defn(_, _, TypeCtor, FieldConsId, _),
                 ( if FieldConsId = cons(ConsName, ConsArity, _) then
                     ConsCtor = cons_ctor(ConsName, ConsArity, TypeCtor),
-                    FieldAccessRF = resolved_functor_field_access_func(ConsCtor)
+                    FieldAccessRF =
+                        resolved_functor_field_access_func(ConsCtor)
                 else
                     unexpected($pred, "weird cons_id in hlds_field_defn")
                 )
@@ -372,15 +377,19 @@ can_resolve_pred_or_func(ModuleInfo, _SymName, Arity, PredId, ResolvedCtor) :-
 
 %---------------------------------------------------------------------------%
 
-:- type record_resolved_item(T) ==
-    pred(module_qualifier, sym_name, arity, bool,
+:- type maybe_recorded
+    --->    not_recorded
+    ;       recorded.
+
+:- type record_item_pred(T) ==
+    pred(module_qualifier, sym_name, arity, maybe_recorded,
         resolved_item_map(T), resolved_item_map(T),
         recompilation_usage_info, recompilation_usage_info).
-:- inst record_resolved_item ==
+:- inst record_item_pred ==
     (pred(in, in, in, out, in, out, in, out) is det).
 
 :- pred record_resolved_item(sym_name::in, arity::in,
-    record_resolved_item(T)::in(record_resolved_item),
+    record_item_pred(T)::in(record_item_pred),
     resolved_item_set(T)::in, resolved_item_set(T)::out,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
@@ -395,14 +404,14 @@ record_resolved_item(SymName, Arity, RecordItem, !IdSet, !Info) :-
     record_resolved_item_2(ModuleQualifier, SymName, Arity, RecordItem,
         Recorded, MatchingNames1, MatchingNames, !Info),
     (
-        Recorded = yes,
+        Recorded = recorded,
         map.set(UnqualifiedName, MatchingNames, !IdSet)
     ;
-        Recorded = no
+        Recorded = not_recorded
     ).
 
 :- pred record_resolved_item_2(module_qualifier::in, sym_name::in, arity::in,
-    record_resolved_item(T)::in(record_resolved_item), bool::out,
+    record_item_pred(T)::in(record_item_pred), maybe_recorded::out,
     resolved_item_list(T)::in, resolved_item_list(T)::out,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
@@ -413,10 +422,10 @@ record_resolved_item_2(ModuleQualifier, SymName, Arity, RecordItem, Recorded,
     record_resolved_item_3(ModuleQualifier, SymName, Arity, RecordItem,
         Recorded, Map0, Map, !Info),
     (
-        Recorded = yes,
+        Recorded = recorded,
         !:List = [Arity - Map]
     ;
-        Recorded = no
+        Recorded = not_recorded
     ).
 record_resolved_item_2(ModuleQualifier, SymName, Arity, RecordItem, Recorded,
         !List, !Info) :-
@@ -426,40 +435,40 @@ record_resolved_item_2(ModuleQualifier, SymName, Arity, RecordItem, Recorded,
         record_resolved_item_3(ModuleQualifier, SymName, Arity, RecordItem,
             Recorded, NewArityMap0, NewArityMap, !Info),
         (
-            Recorded = yes,
+            Recorded = recorded,
             !:List = [Arity - NewArityMap | !.List]
         ;
-            Recorded = no
+            Recorded = not_recorded
         )
     else if Arity = ThisArity then
         record_resolved_item_3(ModuleQualifier, SymName, Arity, RecordItem,
             Recorded, ArityMap0, ArityMap, !Info),
         (
-            Recorded = yes,
+            Recorded = recorded,
             !:List = [Arity - ArityMap | ListRest0]
         ;
-            Recorded = no
+            Recorded = not_recorded
         )
     else
         record_resolved_item_2(ModuleQualifier, SymName, Arity, RecordItem,
             Recorded, ListRest0, ListRest, !Info),
         (
-            Recorded = yes,
+            Recorded = recorded,
             !:List = [ThisArity - ArityMap0 | ListRest]
         ;
-            Recorded = no
+            Recorded = not_recorded
         )
     ).
 
 :- pred record_resolved_item_3(module_qualifier::in, sym_name::in, arity::in,
-    record_resolved_item(T)::in(record_resolved_item), bool::out,
+    record_item_pred(T)::in(record_item_pred), maybe_recorded::out,
     resolved_item_map(T)::in, resolved_item_map(T)::out,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 record_resolved_item_3(ModuleQualifier, SymName, Arity, RecordItem, Recorded,
         !ResolvedMap, !Info) :-
     ( if map.contains(!.ResolvedMap, ModuleQualifier) then
-        Recorded = no
+        Recorded = not_recorded
     else
         RecordItem(ModuleQualifier, SymName, Arity, Recorded,
             !ResolvedMap, !Info)
@@ -467,15 +476,15 @@ record_resolved_item_3(ModuleQualifier, SymName, Arity, RecordItem, Recorded,
 
 %---------------------------------------------------------------------------%
 
-:- pred find_items_used_by_item(item_type::in, item_name::in,
+:- pred find_items_used_by_item(recomp_item_type::in, recomp_item_name::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 find_items_used_by_item(ItemType, ItemName, !Info) :-
     (
-        ItemType = type_name_item,
+        ItemType = recomp_type_name,
         ModuleInfo = !.Info ^ module_info,
         module_info_get_type_table(ModuleInfo, TypeTable),
-        TypeCtor = item_name_to_type_ctor(ItemName),
+        TypeCtor = recomp_item_name_to_type_ctor(ItemName),
         lookup_type_ctor_defn(TypeTable, TypeCtor, TypeDefn),
         hlds_data.get_type_defn_body(TypeDefn, TypeBody),
         ( if TypeBody = hlds_eqv_type(Type) then
@@ -486,32 +495,32 @@ find_items_used_by_item(ItemType, ItemName, !Info) :-
             true
         )
     ;
-        ItemType = type_defn_item,
+        ItemType = recomp_type_defn,
         ModuleInfo = !.Info ^ module_info,
         module_info_get_type_table(ModuleInfo, TypeTable),
-        TypeCtor = item_name_to_type_ctor(ItemName),
+        TypeCtor = recomp_item_name_to_type_ctor(ItemName),
         lookup_type_ctor_defn(TypeTable, TypeCtor, TypeDefn),
         hlds_data.get_type_defn_body(TypeDefn, TypeBody),
         find_items_used_by_type_body(TypeBody, !Info)
     ;
-        ItemType = inst_item,
+        ItemType = recomp_inst,
         ModuleInfo = !.Info ^ module_info,
         module_info_get_inst_table(ModuleInfo, Insts),
         inst_table_get_user_insts(Insts, UserInstTable),
-        InstCtor = item_name_to_inst_ctor(ItemName),
+        InstCtor = recomp_item_name_to_inst_ctor(ItemName),
         map.lookup(UserInstTable, InstCtor, InstDefn),
         find_items_used_by_inst_defn(InstDefn, !Info)
     ;
-        ItemType = mode_item,
+        ItemType = recomp_mode,
         ModuleInfo = !.Info ^ module_info,
         module_info_get_mode_table(ModuleInfo, Modes),
         mode_table_get_mode_defns(Modes, ModeDefns),
-        ModeCtor = item_name_to_mode_ctor(ItemName),
+        ModeCtor = recomp_item_name_to_mode_ctor(ItemName),
         map.lookup(ModeDefns, ModeCtor, ModeDefn),
         find_items_used_by_mode_defn(ModeDefn, !Info)
     ;
-        ItemType = typeclass_item,
-        ItemName = item_name(ClassName, ClassArity),
+        ItemType = recomp_typeclass,
+        ItemName = recomp_item_name(ClassName, ClassArity),
         ClassId = class_id(ClassName, ClassArity),
         ModuleInfo = !.Info ^ module_info,
         module_info_get_class_table(ModuleInfo, Classes),
@@ -533,17 +542,17 @@ find_items_used_by_item(ItemType, ItemName, !Info) :-
             true
         )
     ;
-        ItemType = predicate_item,
+        ItemType = recomp_predicate,
         record_used_pred_or_func(pf_predicate, ItemName, !Info)
     ;
-        ItemType = function_item,
+        ItemType = recomp_function,
         record_used_pred_or_func(pf_function, ItemName, !Info)
     ;
-        ItemType = functor_item,
+        ItemType = recomp_functor,
         unexpected($pred, "functor")
     ;
-        ( ItemType = mutable_item
-        ; ItemType = foreign_proc_item
+        ( ItemType = recomp_mutable
+        ; ItemType = recomp_foreign_proc
         )
         % XXX What should be done here???
         % Mutables are expanded into other item types which track the
@@ -556,22 +565,24 @@ find_items_used_by_item(ItemType, ItemName, !Info) :-
 
 find_items_used_by_instances(ClassId, InstanceDefns, !Info) :-
     ClassId = class_id(Name, Arity),
-    ClassIdItem = item_name(Name, Arity),
+    ClassIdItem = recomp_item_name(Name, Arity),
     ( if item_is_local(!.Info, ClassIdItem) then
-        record_expanded_items_used_by_item(typeclass_item, ClassIdItem, !Info),
+        record_expanded_items_used_by_item(recomp_typeclass, ClassIdItem,
+            !Info),
         list.foldl(find_items_used_by_instance(ClassIdItem), InstanceDefns,
             !Info)
     else
         true
     ).
 
-:- pred find_items_used_by_instance(item_name::in, hlds_instance_defn::in,
+:- pred find_items_used_by_instance(recomp_item_name::in,
+    hlds_instance_defn::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 find_items_used_by_instance(ClassId, Defn, !Info) :-
     % XXX Should we process OriginalArgTypes as we do ArgTypes?
-    Defn = hlds_instance_defn(InstanceModuleName, ArgTypes, _OriginalArgTypes,
-        _, _, Constraints, _, _, _, _),
+    Defn = hlds_instance_defn(InstanceModuleName, _, _,
+        _OriginalArgTypes, ArgTypes, Constraints, _, _, _, _, _),
     % XXX Handle interface (currently not needed because the interfaces
     % for imported instances are only needed with --intermodule-optimization,
     % which isn't handled here yet).
@@ -719,19 +730,20 @@ find_items_used_by_preds_2(PredOrFunc, NameArity, MatchingPredMap, !Info) :-
 find_items_used_by_preds_3(PredOrFunc, Name, Arity, ModuleQualifier, _,
         !Info) :-
     SymName = module_qualify_name(ModuleQualifier, Name),
-    record_used_pred_or_func(PredOrFunc, item_name(SymName, Arity), !Info).
+    ItemName = recomp_item_name(SymName, Arity),
+    record_used_pred_or_func(PredOrFunc, ItemName, !Info).
 
 :- pred find_items_used_by_pred(pred_or_func::in,
     name_arity::in, pair(pred_id, module_name)::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 find_items_used_by_pred(PredOrFunc, NameArity, PredId - PredModule, !Info) :-
-    ItemType = pred_or_func_to_item_type(PredOrFunc),
+    ItemType = pred_or_func_to_recomp_item_type(PredOrFunc),
     ModuleInfo = !.Info ^ module_info,
     module_info_pred_info(ModuleInfo, PredId, PredInfo),
     NameArity = name_arity(Name, Arity),
     ( if
-        ItemName = item_name(qualified(PredModule, Name), Arity),
+        ItemName = recomp_item_name(qualified(PredModule, Name), Arity),
         (
             item_is_recorded_used(!.Info, ItemType, ItemName)
         ;
@@ -758,10 +770,10 @@ find_items_used_by_pred(PredOrFunc, NameArity, PredId - PredModule, !Info) :-
             MethodUnivConstraints = [],
             unexpected($pred, "class method with no class constraints")
         ),
-        maybe_record_item_to_process(typeclass_item,
-            item_name(ClassName, ClassArity), !Info)
+        ClassItemName = recomp_item_name(ClassName, ClassArity),
+        maybe_record_item_to_process(recomp_typeclass, ClassItemName, !Info)
     else
-        ItemName = item_name(qualified(PredModule, Name), Arity),
+        ItemName = recomp_item_name(qualified(PredModule, Name), Arity),
         record_expanded_items_used_by_item(ItemType, ItemName, !Info),
         record_imported_item(ItemType, ItemName, !Info),
         pred_info_get_arg_types(PredInfo, ArgTypes),
@@ -806,7 +818,7 @@ find_items_used_by_type_spec(TypeSpecInfo, !Info) :-
     ;
         PFUMM = pfumm_unknown(_Arity)
     ),
-    assoc_list.values(Subst, SubstTypes),
+    assoc_list.values(one_or_more_to_list(Subst), SubstTypes),
     find_items_used_by_types(SubstTypes, !Info).
 
 :- pred find_items_used_by_functors(simple_item_set::in,
@@ -849,17 +861,18 @@ find_items_used_by_functor(Name, _Arity, ResolverFunctor, !Info) :-
             ResolverFunctor = resolved_functor_field_access_func(ConsCtor),
             ConsCtor = cons_ctor(_ConsName, _ConsArity, TypeCtor)
         ),
-        ItemName = type_ctor_to_item_name(TypeCtor),
-        maybe_record_item_to_process(type_defn_item, ItemName, !Info)
+        ItemName = type_ctor_to_recomp_item_name(TypeCtor),
+        maybe_record_item_to_process(recomp_type_defn, ItemName, !Info)
     ).
 
-:- pred find_items_used_by_simple_item_set(item_type::in, simple_item_set::in,
+:- pred find_items_used_by_simple_item_set(recomp_item_type::in,
+    simple_item_set::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 find_items_used_by_simple_item_set(ItemType, Set, !Info) :-
     map.foldl(find_items_used_by_simple_item_set_2(ItemType), Set, !Info).
 
-:- pred find_items_used_by_simple_item_set_2(item_type::in,
+:- pred find_items_used_by_simple_item_set_2(recomp_item_type::in,
     name_arity::in, map(module_qualifier, module_name)::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
@@ -869,14 +882,14 @@ find_items_used_by_simple_item_set_2(ItemType, NameArity, MatchingIdMap,
     map.foldl(find_items_used_by_simple_item_set_3(ItemType, Name, Arity),
         MatchingIdMap, !Info).
 
-:- pred find_items_used_by_simple_item_set_3(item_type::in,
+:- pred find_items_used_by_simple_item_set_3(recomp_item_type::in,
     string::in, arity::in, module_qualifier::in, module_name::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 find_items_used_by_simple_item_set_3(ItemType, Name, Arity, _, Module,
         !Info) :-
     maybe_record_item_to_process(ItemType,
-        item_name(qualified(Module, Name), Arity), !Info).
+        recomp_item_name(qualified(Module, Name), Arity), !Info).
 
 :- pred find_items_used_by_types(list(mer_type)::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
@@ -904,8 +917,8 @@ find_items_used_by_type_ctor(TypeCtor, !Info) :-
         TypeCtor = type_ctor(qualified(_, _), _),
         not type_ctor_is_higher_order(TypeCtor, _, _, _)
     then
-        TypeCtorItem = type_ctor_to_item_name(TypeCtor),
-        maybe_record_item_to_process(type_name_item, TypeCtorItem, !Info)
+        TypeCtorItem = type_ctor_to_recomp_item_name(TypeCtor),
+        maybe_record_item_to_process(recomp_type_name, TypeCtorItem, !Info)
     else
         true
     ).
@@ -923,9 +936,8 @@ find_items_used_by_mode(from_to_mode(Inst1, Inst2), !Info) :-
     find_items_used_by_inst(Inst1, !Info),
     find_items_used_by_inst(Inst2, !Info).
 find_items_used_by_mode(user_defined_mode(ModeName, ArgInsts), !Info) :-
-    list.length(ArgInsts, ModeArity),
-    maybe_record_item_to_process(mode_item, item_name(ModeName, ModeArity),
-        !Info),
+    ItemName = recomp_item_name(ModeName, list.length(ArgInsts)),
+    maybe_record_item_to_process(recomp_mode, ItemName, !Info),
     find_items_used_by_insts(ArgInsts, !Info).
 
 :- pred find_items_used_by_insts(list(mer_inst)::in,
@@ -965,8 +977,8 @@ find_items_used_by_inst(Inst, !Info) :-
         find_items_used_by_inst_name(InstName, !Info)
     ;
         Inst = abstract_inst(Name, ArgInsts),
-        list.length(ArgInsts, Arity),
-        maybe_record_item_to_process(inst_item, item_name(Name, Arity), !Info),
+        ItemName = recomp_item_name(Name, list.length(ArgInsts)),
+        maybe_record_item_to_process(recomp_inst, ItemName, !Info),
         find_items_used_by_insts(ArgInsts, !Info)
     ).
 
@@ -988,8 +1000,8 @@ find_items_used_by_bound_inst(BoundInst, !Info) :-
 find_items_used_by_inst_name(InstName, !Info) :-
     (
         InstName = user_inst(Name, ArgInsts),
-        list.length(ArgInsts, Arity),
-        maybe_record_item_to_process(inst_item, item_name(Name, Arity), !Info),
+        ItemName = recomp_item_name(Name, list.length(ArgInsts)),
+        maybe_record_item_to_process(recomp_inst, ItemName, !Info),
         find_items_used_by_insts(ArgInsts, !Info)
     ;
         ( InstName = merge_inst(InstA, InstB)
@@ -1032,16 +1044,16 @@ find_items_used_by_class_constraints(Constraints, !Info) :-
 
 find_items_used_by_class_constraint(Constraint, !Info) :-
     Constraint = constraint(ClassName, ArgTypes),
-    ClassArity = list.length(ArgTypes),
-    maybe_record_item_to_process(typeclass_item,
-        item_name(ClassName, ClassArity), !Info),
+    ItemName = recomp_item_name(ClassName, list.length(ArgTypes)),
+    maybe_record_item_to_process(recomp_typeclass, ItemName, !Info),
     find_items_used_by_types(ArgTypes, !Info).
 
-:- pred maybe_record_item_to_process(item_type::in, item_name::in,
+:- pred maybe_record_item_to_process(recomp_item_type::in,
+    recomp_item_name::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 maybe_record_item_to_process(ItemType, ItemName, !Info) :-
-    ( if ItemType = typeclass_item then
+    ( if ItemType = recomp_typeclass then
         Classes0 = !.Info ^ used_typeclasses,
         set.insert(ItemName, Classes0, Classes),
         !Info ^ used_typeclasses := Classes
@@ -1058,7 +1070,7 @@ maybe_record_item_to_process(ItemType, ItemName, !Info) :-
         true
     else
         Queue0 = !.Info ^ item_queue,
-        queue.put(item_id(ItemType, ItemName), Queue0, Queue),
+        queue.put(recomp_item_id(ItemType, ItemName), Queue0, Queue),
         !Info ^ item_queue := Queue,
 
         record_imported_item(ItemType, ItemName, !Info),
@@ -1066,26 +1078,27 @@ maybe_record_item_to_process(ItemType, ItemName, !Info) :-
     ).
 
 :- pred item_is_recorded_used(recompilation_usage_info::in,
-    item_type::in, item_name::in) is semidet.
+    recomp_item_type::in, recomp_item_name::in) is semidet.
 
 item_is_recorded_used(Info, ItemType, ItemName) :-
     ImportedItems = Info ^ imported_items,
-    ItemName = item_name(qualified(ModuleName, Name), Arity),
+    ItemName = recomp_item_name(qualified(ModuleName, Name), Arity),
     map.search(ImportedItems, ModuleName, ModuleImportedItems),
     get_module_imported_items(ModuleImportedItems, ItemType, ModuleItemIdSet),
     set.member(name_arity(Name, Arity), ModuleItemIdSet).
 
-:- pred item_is_local(recompilation_usage_info::in, item_name::in) is semidet.
+:- pred item_is_local(recompilation_usage_info::in, recomp_item_name::in)
+    is semidet.
 
 item_is_local(Info, ItemName) :-
-    ItemName = item_name(qualified(ModuleName, _), _),
+    ItemName = recomp_item_name(qualified(ModuleName, _), _),
     module_info_get_name(Info ^ module_info, ModuleName).
 
-:- pred record_imported_item(item_type::in, item_name::in,
+:- pred record_imported_item(recomp_item_type::in, recomp_item_name::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 record_imported_item(ItemType, ItemName, !Info) :-
-    ItemName = item_name(SymName, Arity),
+    ItemName = recomp_item_name(SymName, Arity),
     (
         SymName = qualified(Module0, Name0),
         Module = Module0,
@@ -1112,13 +1125,15 @@ record_imported_item(ItemType, ItemName, !Info) :-
     % equiv_type.m records which equivalence types were used by each
     % imported item.
     %
-:- pred record_expanded_items_used_by_item(item_type::in, item_name::in,
+:- pred record_expanded_items_used_by_item(recomp_item_type::in,
+    recomp_item_name::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 record_expanded_items_used_by_item(ItemType, NameArity, !Info) :-
     Dependencies = !.Info ^ dependencies,
     ( if
-        map.search(Dependencies, item_id(ItemType, NameArity), EquivTypes)
+        map.search(Dependencies, recomp_item_id(ItemType, NameArity),
+            EquivTypes)
     then
         list.foldl(record_expanded_items_used_by_item_2,
             set.to_sorted_list(EquivTypes), !Info)
@@ -1126,11 +1141,11 @@ record_expanded_items_used_by_item(ItemType, NameArity, !Info) :-
         true
     ).
 
-:- pred record_expanded_items_used_by_item_2(item_id::in,
+:- pred record_expanded_items_used_by_item_2(recomp_item_id::in,
     recompilation_usage_info::in, recompilation_usage_info::out) is det.
 
 record_expanded_items_used_by_item_2(Item, !Info) :-
-    Item = item_id(DepItemType, DepItemId),
+    Item = recomp_item_id(DepItemType, DepItemId),
     maybe_record_item_to_process(DepItemType, DepItemId, !Info).
 
 %---------------------------------------------------------------------------%
@@ -1142,44 +1157,44 @@ init_module_imported_items =
         set.init, set.init, set.init).
 
 :- pred get_module_imported_items(module_imported_items::in,
-    item_type::in, imported_item_set::out) is det.
+    recomp_item_type::in, imported_item_set::out) is det.
 
-get_module_imported_items(MII, type_name_item, MII ^ mii_type_names).
-get_module_imported_items(MII, type_defn_item, MII ^ mii_type_defns).
-get_module_imported_items(MII, inst_item, MII ^ mii_insts).
-get_module_imported_items(MII, mode_item, MII ^ mii_modes).
-get_module_imported_items(MII, typeclass_item, MII ^ mii_typeclasses).
-get_module_imported_items(MII, functor_item, MII ^ mii_functors).
-get_module_imported_items(MII, predicate_item, MII ^ mii_predicates).
-get_module_imported_items(MII, function_item, MII ^ mii_functions).
-get_module_imported_items(_MII, mutable_item, _) :-
-    unexpected($pred, "mutable_item").
-get_module_imported_items(_MII, foreign_proc_item, _) :-
-    unexpected($pred, "foreign_proc_item").
+get_module_imported_items(MII, recomp_type_name, MII ^ mii_type_names).
+get_module_imported_items(MII, recomp_type_defn, MII ^ mii_type_defns).
+get_module_imported_items(MII, recomp_inst, MII ^ mii_insts).
+get_module_imported_items(MII, recomp_mode, MII ^ mii_modes).
+get_module_imported_items(MII, recomp_typeclass, MII ^ mii_typeclasses).
+get_module_imported_items(MII, recomp_functor, MII ^ mii_functors).
+get_module_imported_items(MII, recomp_predicate, MII ^ mii_predicates).
+get_module_imported_items(MII, recomp_function, MII ^ mii_functions).
+get_module_imported_items(_MII, recomp_mutable, _) :-
+    unexpected($pred, "recomp_mutable").
+get_module_imported_items(_MII, recomp_foreign_proc, _) :-
+    unexpected($pred, "recomp_foreign_proc").
 
-:- pred set_module_imported_items(item_type::in, imported_item_set::in,
+:- pred set_module_imported_items(recomp_item_type::in, imported_item_set::in,
     module_imported_items::in, module_imported_items::out) is det.
 
-set_module_imported_items(type_name_item, Set, !MII) :-
+set_module_imported_items(recomp_type_name, Set, !MII) :-
     !MII ^ mii_type_names := Set.
-set_module_imported_items(type_defn_item, Set, !MII) :-
+set_module_imported_items(recomp_type_defn, Set, !MII) :-
     !MII ^ mii_type_defns := Set.
-set_module_imported_items(inst_item, Set, !MII) :-
+set_module_imported_items(recomp_inst, Set, !MII) :-
     !MII ^ mii_insts := Set.
-set_module_imported_items(mode_item, Set, !MII) :-
+set_module_imported_items(recomp_mode, Set, !MII) :-
     !MII ^ mii_modes := Set.
-set_module_imported_items(typeclass_item, Set, !MII) :-
+set_module_imported_items(recomp_typeclass, Set, !MII) :-
     !MII ^ mii_typeclasses := Set.
-set_module_imported_items(functor_item, Set, !MII) :-
+set_module_imported_items(recomp_functor, Set, !MII) :-
     !MII ^ mii_functors := Set.
-set_module_imported_items(predicate_item, Set, !MII) :-
+set_module_imported_items(recomp_predicate, Set, !MII) :-
     !MII ^ mii_predicates := Set.
-set_module_imported_items(function_item, Set, !MII) :-
+set_module_imported_items(recomp_function, Set, !MII) :-
     !MII ^ mii_functions := Set.
-set_module_imported_items(mutable_item, _Set, !MII) :-
-    unexpected($pred, "mutable_item").
-set_module_imported_items(foreign_proc_item, _Set, !MII) :-
-    unexpected($pred, "foreign_proc_item").
+set_module_imported_items(recomp_mutable, _Set, !MII) :-
+    unexpected($pred, "recomp_mutable").
+set_module_imported_items(recomp_foreign_proc, _Set, !MII) :-
+    unexpected($pred, "recomp_foreign_proc").
 
 %---------------------------------------------------------------------------%
 :- end_module recompilation.usage.

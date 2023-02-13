@@ -21,9 +21,11 @@
 :- interface.
 
 :- import_module hlds.hlds_module.
+:- import_module hlds.make_hlds.make_hlds_types.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_foreign.
+:- import_module parse_tree.prog_item.
 
 :- import_module list.
 
@@ -51,6 +53,7 @@
 :- import_module backend_libs.foreign.
 :- import_module hlds.error_msg_inst.
 :- import_module hlds.hlds_inst_mode.
+:- import_module hlds.status.
 :- import_module libs.
 :- import_module libs.globals.
 :- import_module libs.options.
@@ -432,7 +435,7 @@ check_mutable_inst_uniqueness(ModuleInfo, Context, InstVarSet, ParentInsts,
 
 :- pred invalid_inst_in_mutable(module_info::in, prog_context::in,
     inst_varset::in, list(inst_ctor)::in, mer_inst::in,
-    list(format_component)::in,
+    list(format_piece)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 invalid_inst_in_mutable(ModuleInfo, Context, InstVarSet, ParentInsts, Inst,
@@ -448,7 +451,7 @@ invalid_inst_in_mutable(ModuleInfo, Context, InstVarSet, ParentInsts, Inst,
     !:Specs = [Spec | !.Specs].
 
 :- pred named_parents_to_pieces(list(inst_ctor)::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 named_parents_to_pieces([], []).
 named_parents_to_pieces([InstCtor | InstCtors], Pieces) :-
@@ -457,7 +460,7 @@ named_parents_to_pieces([InstCtor | InstCtors], Pieces) :-
     Pieces = HeadPieces ++ TailPieces.
 
 :- pred named_parent_to_pieces(inst_ctor::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 named_parent_to_pieces(InstCtor, Pieces) :-
     InstCtor = inst_ctor(InstName, InstArity),

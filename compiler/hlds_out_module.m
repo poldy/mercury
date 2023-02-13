@@ -32,39 +32,41 @@
 
 % XXX :- import_module hlds.pred_table.
 % We actually use a type equivalence from pred_table.m (specifically,
-% the fact that pred_table is a map), but we get an unused import warning
+% the fact that pred_id_table is a map), but we get an unused import warning
 % for the above line anyway.
 %
 % The problem is as follows.
 %
-% - The write_preds predicate calls module_info_get_preds, whose output
-%   has type pred_table. Therefore logically, the type of the variable
-%   that holds this output is also pred_table, which means that logically,
-%   this module *does* use *something* exported by pred_table.m.
+% - The write_preds predicate calls module_info_get_pred_id_table,
+%   whose output has type pred_id_table. Therefore logically, the type
+%   of the variable that holds this output is also pred_id_table,
+%   which means that logically, this module *does* use *something*
+%   exported by pred_table.m.
 %
 % - On the other hand, the equiv_type.m pass, which operates on the augmented
 %   compilation unit, expands out equivalence types. The type of the output
-%   argument of module_info_get_preds, pred_table, is thus replaced with
-%   map(pred_id, pred_info). None of those types is defined in pred_table.m,
-%   and this module uses nothing else exported from pred_table.m either.
-%   This is why code generation can succeed without importing pred_table.m,
-%   and this is also why we get the warning about pred_table.m being unused
-%   if we *do* import it.
+%   argument of module_info_get_pred_id_table, pred_id_table, is thus
+%   replaced with map(pred_id, pred_info). None of those types is defined
+%   in pred_table.m, and this module uses nothing else exported from
+%   pred_table.m either. This is why code generation can succeed
+%   without importing pred_table.m, and this is also why we get the warning
+%   about pred_table.m being unused if we *do* import it.
 %
 % I (zs) see three ways of fixing this problem.
 %
 % - We could have equiv_type.m record, in every item in which it expands out
 %   a type equivalence (or, for the same reason, an inst or mode equivalence)
 %   defined in a given module, record the name of that module in a new field
-%   in that item. In this case, this would mean including the pred_table module
-%   in this new field in the pred decl item for module_info_get_preds.
-%   We would preserve the value of this field in the HLDS, e.g. in pred_infos.
-%   Then, when the code of this module references module_info_get_preds,
-%   the code generating unused module warnings would consider that reference
-%   to use not just the module that defines module_info_get_preds, but also
-%   all the modules recorded in the new "modules that defined expanded
-%   equivalences" field of its pred_info. And likewide for other entities
-%   that contain types, insts and/or modes that can be expanded.
+%   in that item. In this case, this would mean including the pred_table
+%   module in this new field in the pred decl item for
+%   module_info_get_pred_id_table. We would preserve the value of this field
+%   in the HLDS, e.g. in pred_infos. Then, when the code of this module
+%   references module_info_get_pred_id_table, the code generating unused
+%   module warnings would consider that reference to use not just the module
+%   that defines module_info_get_pred_id_table, but also all the modules
+%   recorded in the new "modules that defined expanded equivalences" field
+%   of its pred_info. And likewide for other entities that contain types,
+%   insts and/or modes that can be expanded.
 %
 %   This approach would record this information on a per item basis
 %   because we want to avoid false positives. If module A imports module B,
@@ -76,7 +78,7 @@
 %   types a new field that records the set of modules that defined the
 %   equivalence types, insts or modes in its construction. I mean that if
 %   the programmer writes map(pred_id, pred_info), then this set would be
-%   empty, but if the prgrammer writes pred_table, then, when replacing it
+%   empty, but if the prgrammer writes pred_id_table, then, when replacing it
 %   with map(pred_id, pred_info), equiv_type.m would include the pred_table
 %   module in this set. Every compiler pass *but* unused imports would
 %   of course ignore this extra argument.
@@ -112,6 +114,7 @@
 :- import_module hlds.hlds_out.hlds_out_typeclass_table.
 :- import_module hlds.hlds_out.hlds_out_util.
 :- import_module hlds.hlds_pred.
+:- import_module hlds.pred_name.
 :- import_module libs.
 :- import_module libs.dependency_graph.
 :- import_module libs.globals.
@@ -120,13 +123,13 @@
 :- import_module mdbcomp.prim_data.
 :- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
 :- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_pragma.
 :- import_module parse_tree.prog_item.
 :- import_module parse_tree.prog_out.
+:- import_module parse_tree.write_error_spec.
 
 :- import_module bool.
 :- import_module digraph.
@@ -136,7 +139,6 @@
 :- import_module pair.
 :- import_module set.
 :- import_module string.
-:- import_module term.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -330,8 +332,8 @@ write_const_struct(Stream, N - ConstStruct, !IO) :-
     mercury_output_type(varset.init, print_name_only, Type, Stream, !IO),
     io.nl(Stream, !IO),
     io.write_string(Stream, "inst: ", !IO),
-    mercury_output_structured_inst(Stream, Inst, 0, output_debug,
-        do_not_incl_addr, varset.init, !IO),
+    mercury_output_structured_inst(Stream, output_debug, varset.init,
+        do_not_incl_addr, 0, Inst, !IO),
     (
         DefinedWhere = defined_in_this_module,
         io.write_string(Stream, "defined_in_this_module\n", !IO)
@@ -384,7 +386,7 @@ write_table_structs(Stream, ModuleInfo, TableStructMap, !IO) :-
 
 write_table_struct_info(Stream, ModuleInfo, PredProcId - TableStructInfo,
         !IO) :-
-    PredProcIdStr = pred_proc_id_to_string(ModuleInfo, PredProcId),
+    PredProcIdStr = pred_proc_id_to_dev_string(ModuleInfo, PredProcId),
     io.format(Stream, "\n%% table struct info for %s\n",
         [s(PredProcIdStr)], !IO),
     TableStructInfo = table_struct_info(ProcTableStructInfo, Attributes),
@@ -581,8 +583,8 @@ write_arg_tabling_methods(Stream, Prefix, [MaybeMethod | MaybeMethods], !IO) :-
 write_preds(Info, Stream, DumpSpecPreds, DumpSpecPredTypeNames, Lang,
         ModuleInfo, !IO) :-
     io.write_string(Stream, "%-------- Predicates --------\n\n", !IO),
-    module_info_get_preds(ModuleInfo, PredTable),
-    map.to_assoc_list(PredTable, PredIdsInfos),
+    module_info_get_pred_id_table(ModuleInfo, PredIdTable),
+    map.to_assoc_list(PredIdTable, PredIdsInfos),
     (
         DumpSpecPreds = no,
         module_info_get_globals(ModuleInfo, Globals),
@@ -631,7 +633,7 @@ compare_in_name_order(PredIdA - PredInfoA, PredIdB - PredInfoB, Result) :-
 add_spec_preds_to_map(DumpSpecPredTypeNames, PredIdInfo, !SpecPredMap) :-
     PredIdInfo = _PredId - PredInfo,
     pred_info_get_origin(PredInfo, Origin),
-    ( if Origin = origin_special_pred(SpecialPredId, TypeCtor) then
+    ( if Origin = origin_compiler(made_for_uci(SpecialPredId, TypeCtor)) then
         (
             DumpSpecPredTypeNames = [],
             map.det_insert({TypeCtor, SpecialPredId}, PredIdInfo, !SpecPredMap)

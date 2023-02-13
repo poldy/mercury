@@ -45,6 +45,7 @@
 :- import_module list.
 :- import_module map.
 :- import_module term.
+:- import_module term_context.
 
 :- type subst_literals_info
     --->    subst_literals_info(
@@ -56,9 +57,10 @@
 %-----------------------------------------------------------------------------%
 
 subst_impl_defined_literals(!ModuleInfo) :-
-    module_info_get_preds(!.ModuleInfo, Preds0),
-    map.map_values(subst_literals_in_pred(!.ModuleInfo), Preds0, Preds),
-    module_info_set_preds(Preds, !ModuleInfo).
+    module_info_get_pred_id_table(!.ModuleInfo, PredIdTable0),
+    map.map_values(subst_literals_in_pred(!.ModuleInfo),
+        PredIdTable0, PredIdTable),
+    module_info_set_pred_id_table(PredIdTable, !ModuleInfo).
 
 :- pred subst_literals_in_pred(module_info::in, pred_id::in, pred_info::in,
     pred_info::out)  is det.
@@ -207,7 +209,7 @@ subst_literals_in_case(Info, Case0, Case) :-
     term.context::in, subst_literals_info::in, hlds_goal::out) is det.
 
 make_impl_defined_literal(Var, IDCKind, Context, Info, Goal) :-
-    Context = term.context(File, Line),
+    Context = term_context.context(File, Line),
     Info = subst_literals_info(ModuleInfo, PredInfo, PredId),
     (
         IDCKind = idc_file,
@@ -222,7 +224,7 @@ make_impl_defined_literal(Var, IDCKind, Context, Info, Goal) :-
         make_string_const_construction(Context, Var, Str, Goal)
     ;
         IDCKind = idc_pred,
-        Str = pred_id_to_string(ModuleInfo, PredId),
+        Str = pred_id_to_user_string(ModuleInfo, PredId),
         make_string_const_construction(Context, Var, Str, Goal)
     ;
         IDCKind = idc_grade,

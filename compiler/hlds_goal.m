@@ -18,14 +18,15 @@
 :- interface.
 
 :- import_module hlds.goal_mode.
+:- import_module hlds.hlds_class.
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_llds.
 :- import_module hlds.hlds_pred.
 :- import_module hlds.instmap.
 :- import_module mdbcomp.
 :- import_module mdbcomp.goal_path.
-:- import_module mdbcomp.sym_name.
 :- import_module mdbcomp.prim_data.
+:- import_module mdbcomp.sym_name.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
@@ -39,7 +40,7 @@
 :- import_module map.
 :- import_module maybe.
 :- import_module set.
-:- import_module term.
+:- import_module term_context.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -465,11 +466,6 @@
             % context, and the determinism of the scope() goal itself
             % will indicate that it cannot succeed more than once.
             %
-            % This acts like the builtin.promise_only_solution predicate,
-            % but without requiring the construction of a closure, a
-            % higher order call, and the squeezing of all outputs into
-            % a single variable.
-            %
             % The promise is valid only if the list of outputs of the goal
             % inside the scope is a subset of the variables listed here.
             % If it is not valid, the compiler must emit an error message.
@@ -558,7 +554,7 @@
             % generate code that will execute the goal inside the scope
             % only if the runtime condition is satisfied.
             %
-            % The maybe_io and mutable_vars fields are advisory only in the
+            % The maybe_io and mutable_vars fields are only advisory in the
             % HLDS, since they are fully processed when the corresponding goal
             % in the parse tree is converted to HLDS.
 
@@ -578,7 +574,7 @@
             % control structure.
             %
             % lc_lcs_var identifies the variable that points to the slot in the
-            % loop control structure that should be used to spawn of the work
+            % loop control structure that should be used to spawn off the work
             % within this scope.
 
 :- type promise_solutions_kind
@@ -675,7 +671,7 @@
                 ho_call_kind    :: pred_or_func,
 
                 % number of arguments (including the higher-order term)
-                ho_call_arity   :: arity
+                ho_call_arity   :: pred_form_arity
             )
 
     ;       class_method(
@@ -683,7 +679,7 @@
                 method_tci      :: prog_var,
 
                 % The number of the called method.
-                method_num      :: int,
+                method_num      :: method_proc_num,
 
                 % The name and arity of the class.
                 method_class_id :: class_id,
@@ -741,10 +737,15 @@
 %
 
     % Initially all unifications are represented as
-    % unify(prog_var, unify_rhs, _, _, _), but mode analysis replaces
-    % these with various special cases (construct/deconstruct/assign/
-    % simple_test/complicated_unify).
+    % unify(LHSVar, RHS, _, Unification, _) where the Unification
+    % is initialized to complicated_unify but is not meaningful.
+    % Mode analysis makes the Unification field meaningful, which means
+    % most unifications end up being constructs, deconstructs, assigns and
+    % simple_tests, with only a few remaining as complicated_unify.
+    % Until that pass, the compiler should pay attention *only* the RHS field.
     %
+    % The lambda pass in the middle end replaces all rhs_lambda_goal
+    % unifications with construct unifications using a closure_cons cons_id.
 :- type unify_rhs
     --->    rhs_var(prog_var)
     ;       rhs_functor(
@@ -820,10 +821,11 @@
     --->    construct(
                 % A construction unification is a unification with a functor
                 % or lambda expression which binds the LHS variable,
-                % e.g. Y = f(X) where the top node of Y is output,
-                % Constructions are written using `:=', e.g. Y := f(X).
+                % e.g. X = f(Y1, Y2) where the top node of X is output,
+                %
+                % In HLDS dumps, constructions are written as `X <= f(Y1, Y2)'.
 
-                % The variable being constructed, e.g. Y in above example.
+                % The variable being constructed, e.g. X in above example.
                 construct_cell_var      :: prog_var,
 
                 % The cons_id of the functor f/1 in the above example.
@@ -833,7 +835,7 @@
                 % of the unify goal.
                 construct_cons_id       :: cons_id,
 
-                % The list of argument variables; [X] in the above example.
+                % The list of argument variables; [Y1, Y2] in the example.
                 % For a unification with a lambda expression, this is the list
                 % of the non-local variables of the lambda expression.
                 construct_args          :: list(prog_var),
@@ -859,18 +861,21 @@
     ;       deconstruct(
                 % A deconstruction unification is a unification with a functor
                 % for which the LHS variable was already bound,
-                % e.g. Y = f(X) where the top node of Y is input.
-                % Deconstructions are written using `==', e.g. Y == f(X).
+                % e.g. X = f(Y1, Y2) where the top node of Y is input.
                 % Note that deconstruction of lambda expressions is
                 % a mode error.
+                %
+                % In HLDS dump, deconstructions that cannot fail are written
+                % as `X => f(Y1, Y2)', while deconstructions that can fail
+                % are written as `X ?= f(Y1, Y2)'.
 
-                % The variable being deconstructed, e.g. Y in the example.
+                % The variable being deconstructed, e.g. X in the example.
                 deconstruct_cell_var    :: prog_var,
 
                 % The cons_id of the functor, e.g. f/1 in the example.
                 deconstruct_cons_id     :: cons_id,
 
-                % The list of argument variables, e.g. [X] in the example.
+                % The list of argument variables, e.g. [Y1, Y2] in the example.
                 deconstruct_args        :: list(prog_var),
 
                 % The lists of modes of the argument sub-unifications.
@@ -879,32 +884,43 @@
                 % Whether or not the unification could possibly fail.
                 deconstruct_can_fail    :: can_fail,
 
-                % Can compile time GC this cell, i.e. explicitly deallocate it
-                % after the deconstruction.
+                % Can we apply compile time GC to this cell? In other words,
+                % can we explicitly deallocate it after the deconstruction?
                 deconstruct_can_cgc     :: can_cgc
             )
 
     ;       assign(
-                % Y = X where the top node of Y is output, written Y := X.
+                % X = Y where the top node of X is output.
+                %
+                % In HLDS dumps, assigments are written as `X := Y'.
 
                 assign_to_var           :: prog_var,
                 assign_from_var         :: prog_var
             )
 
     ;       simple_test(
-                % Y = X where the type of X and Y is an atomic type and
-                % they are both input, written Y == X.
+                % X = Y where the type of X and Y is an atomic type and
+                %
+                % In HLDS dumps, simple tests are written as `X == Y'.
 
                 test_var1               :: prog_var,
                 test_var2               :: prog_var
             )
 
     ;       complicated_unify(
-                % Y = X where the type of Y and X is not an atomic type,
-                % and where the top-level node of both Y and X is input.
+                % X = Y where the type of X and Y is not an atomic type,
+                % and where the top-level node of both X and Y is input.
                 % May involve bi-directional data flow. Implemented using
                 % an out-of-line call to a compiler generated unification
                 % predicate for that type & mode.
+                %
+                % There is no special syntax to denote complicated unifications
+                % in HLDS dumps.
+                %
+                % The simplification pass at the end of semantic analysis
+                % replaces complicated unifications with other kinds of goals,
+                % usually calls. They should not be encountered by any later
+                % compiler passes.
 
                 % The mode of the unification.
                 compl_unify_mode        :: unify_mode,
@@ -1195,10 +1211,10 @@
 
     % This type stores the possible values of a higher order variable
     % at a particular point, as determined by the closure analysis
-    % (see closure_analysis.m.)  If a variable does not have an entry
+    % (see closure_analysis.m.) If a variable does not have an entry
     % in the map, then it may take any (valid) value.
     %
-:- type ho_values == map(prog_var, set(pred_proc_id)).
+:- type higher_order_value_map == map(prog_var, set(pred_proc_id)).
 
 :- type rbmm_goal_info
     --->    rbmm_goal_info(
@@ -1633,12 +1649,13 @@
 
 :- func goal_info_get_context(hlds_goal_info) = prog_context.
 :- func goal_info_get_reverse_goal_path(hlds_goal_info) = reverse_goal_path.
-:- func goal_info_get_ho_values(hlds_goal_info) = ho_values.
+:- func goal_info_get_higher_order_value_map(hlds_goal_info)
+    = higher_order_value_map.
 :- func goal_info_get_goal_mode(hlds_goal_info) = goal_mode.
 :- func goal_info_get_maybe_ctgc(hlds_goal_info) = maybe(ctgc_goal_info).
 :- func goal_info_get_maybe_rbmm(hlds_goal_info) = maybe(rbmm_goal_info).
-:- func goal_info_get_maybe_mode_constr(hlds_goal_info) =
-    maybe(mode_constr_goal_info).
+:- func goal_info_get_maybe_mode_constr(hlds_goal_info)
+    = maybe(mode_constr_goal_info).
 :- func goal_info_get_maybe_dp_info(hlds_goal_info) = maybe(dp_goal_info).
 
 :- pred goal_info_set_determinism(determinism::in,
@@ -1660,7 +1677,7 @@
     hlds_goal_info::in, hlds_goal_info::out) is det.
 :- pred goal_info_set_reverse_goal_path(reverse_goal_path::in,
     hlds_goal_info::in, hlds_goal_info::out) is det.
-:- pred goal_info_set_ho_values(ho_values::in,
+:- pred goal_info_set_higher_order_value_map(higher_order_value_map::in,
     hlds_goal_info::in, hlds_goal_info::out) is det.
 :- pred goal_info_set_goal_mode(goal_mode::in,
     hlds_goal_info::in, hlds_goal_info::out) is det.
@@ -1785,7 +1802,7 @@
 :- pred goal_info_set_mdprof_inst(goal_is_mdprof_inst::in,
     hlds_goal_info::in, hlds_goal_info::out) is det.
 
-:- pred goal_set_context(term.context::in, hlds_goal::in, hlds_goal::out)
+:- pred goal_set_context(term_context::in, hlds_goal::in, hlds_goal::out)
     is det.
 
 :- pred goal_add_feature(goal_feature::in,
@@ -1984,8 +2001,8 @@ make_foreign_args(Vars, NamesModesBoxes, Types, Args) :-
 
 generic_call_to_id(GenericCall, GenericCallId) :-
     (
-        GenericCall = higher_order(_, Purity, PorF, Arity),
-        GenericCallId = gcid_higher_order(Purity, PorF, Arity)
+        GenericCall = higher_order(_, Purity, PorF, PredFormArity),
+        GenericCallId = gcid_higher_order(Purity, PorF, PredFormArity)
     ;
         GenericCall = class_method(_, _, ClassId, MethodId),
         GenericCallId = gcid_class_method(ClassId, MethodId)
@@ -2041,7 +2058,7 @@ rbmm_info_init =
                 % is undecidable, this may be a conservative approximation.
 /*  1 */        gi_determinism      :: determinism,
 
-/*  - */        gi_purity           :: purity,
+/*  2 */        gi_purity           :: purity,
 
                 % The change in insts over this goal (computed during mode
                 % analysis). Since the unreachability problem is undecidable,
@@ -2061,28 +2078,28 @@ rbmm_info_init =
                 %
                 % Normally the instmap_delta will list only the nonlocal
                 % variables of the goal.
-/*  2 */        gi_instmap_delta    :: instmap_delta,
+/*  3 */        gi_instmap_delta    :: instmap_delta,
 
                 % The non-local vars in the goal, i.e. the variables that
                 % occur both inside and outside of the goal (computed by
                 % quantification.m). In some circumstances, this may be a
                 % conservative approximation: it may be a superset of the
                 % real non-locals.
-/*  3 */        gi_nonlocals        :: set_of_progvar,
+/*  4 */        gi_nonlocals        :: set_of_progvar,
 
                 % The set of compiler-defined "features" of this goal,
                 % which optimisers may wish to know about.
-/*  4 */        gi_features         :: set(goal_feature),
+/*  5 */        gi_features         :: set(goal_feature),
 
                 % An value that uniquely identifies this goal in its procedure.
-/*  5 */        gi_goal_id          :: goal_id,
+/*  6 */        gi_goal_id          :: goal_id,
 
-/*  6 */        gi_code_gen_info    :: hlds_goal_code_gen_info,
+/*  7 */        gi_code_gen_info    :: hlds_goal_code_gen_info,
 
                 % Extra information about the goal that doesn't fit in an
                 % eight-word cell. Mostly used for information used by
                 % various optional analysis passes, e.g closure analysis.
-/*  7 */        gi_extra            :: hlds_goal_extra_info
+/*  8 */        gi_extra            :: hlds_goal_extra_info
             ).
 
 :- type hlds_goal_extra_info
@@ -2091,7 +2108,7 @@ rbmm_info_init =
 
                 egi_rev_goal_path       :: reverse_goal_path,
 
-                egi_ho_vals             :: ho_values,
+                egi_ho_value_map        :: higher_order_value_map,
 
                 egi_goal_mode           :: goal_mode,
 
@@ -2125,12 +2142,11 @@ goal_info_init(GoalInfo) :-
     Detism = detism_erroneous,
     instmap_delta_init_unreachable(InstMapDelta),
     NonLocals = set_of_var.init,
-    term.context_init(Context),
     set.init(Features),
     GoalId = goal_id(-1),
     GoalInfo = goal_info(Detism, purity_pure, InstMapDelta, NonLocals,
         Features, GoalId, no_code_gen_info,
-        hlds_goal_extra_info_init(Context)).
+        hlds_goal_extra_info_init(dummy_context)).
 
 :- pragma inline(pred(goal_info_init/2)).
 
@@ -2146,11 +2162,10 @@ goal_info_init(Context, GoalInfo) :-
 
 goal_info_init(NonLocals, InstMapDelta, Detism, Purity, GoalInfo) :-
     set.init(Features),
-    term.context_init(Context),
     GoalId = goal_id(-1),
     GoalInfo = goal_info(Detism, Purity, InstMapDelta, NonLocals,
         Features, GoalId, no_code_gen_info,
-        hlds_goal_extra_info_init(Context)).
+        hlds_goal_extra_info_init(dummy_context)).
 
 goal_info_init(NonLocals, InstMapDelta, Detism, Purity, Context, GoalInfo) :-
     set.init(Features),
@@ -2169,7 +2184,7 @@ goal_info_init_context_purity(Context, Purity, GoalInfo) :-
         Features, GoalId, no_code_gen_info,
         hlds_goal_extra_info_init(Context)).
 
-:- func hlds_goal_extra_info_init(term.context) = hlds_goal_extra_info.
+:- func hlds_goal_extra_info_init(term_context) = hlds_goal_extra_info.
 
 hlds_goal_extra_info_init(Context) = ExtraInfo :-
     HO_Values = map.init,
@@ -2220,8 +2235,8 @@ goal_info_get_context(GoalInfo) = X :-
     X = GoalInfo ^ gi_extra ^ egi_context.
 goal_info_get_reverse_goal_path(GoalInfo) = X :-
     X = GoalInfo ^ gi_extra ^ egi_rev_goal_path.
-goal_info_get_ho_values(GoalInfo) = X :-
-    X = GoalInfo ^ gi_extra ^ egi_ho_vals.
+goal_info_get_higher_order_value_map(GoalInfo) = X :-
+    X = GoalInfo ^ gi_extra ^ egi_ho_value_map.
 goal_info_get_goal_mode(GoalInfo) = X :-
     X = GoalInfo ^ gi_extra ^ egi_goal_mode.
 goal_info_get_maybe_ctgc(GoalInfo) = X :-
@@ -2260,12 +2275,12 @@ goal_info_set_context(X, !GoalInfo) :-
     !GoalInfo ^ gi_extra ^ egi_context := X.
 goal_info_set_reverse_goal_path(X, !GoalInfo) :-
     !GoalInfo ^ gi_extra ^ egi_rev_goal_path := X.
-goal_info_set_ho_values(X, !GoalInfo) :-
-    ( if private_builtin.pointer_equal(X, !.GoalInfo ^ gi_extra ^ egi_ho_vals)
-    then
+goal_info_set_higher_order_value_map(X, !GoalInfo) :-
+    Map0 = !.GoalInfo ^ gi_extra ^ egi_ho_value_map,
+    ( if private_builtin.pointer_equal(X, Map0) then
         true
     else
-        !GoalInfo ^ gi_extra ^ egi_ho_vals := X
+        !GoalInfo ^ gi_extra ^ egi_ho_value_map := X
     ).
 goal_info_set_goal_mode(X, !GoalInfo) :-
     !GoalInfo ^ gi_extra ^ egi_goal_mode := X.
@@ -2793,14 +2808,15 @@ rename_vars_in_goal_expr(Must, Subn, Expr0, Expr) :-
         rename_var_list(Must, Subn, Args0, Args),
         Expr = generic_call(GenericCall, Args, Modes, MaybeArgRegs, Det)
     ;
-        Expr0 = plain_call(PredId, ProcId, Args0, Builtin, Context, Sym),
+        Expr0 = plain_call(PredId, ProcId, Args0, Builtin, CallUC0, Sym),
+        rename_var_in_call_unify_context(Must, Subn, CallUC0, CallUC),
         rename_var_list(Must, Subn, Args0, Args),
-        Expr = plain_call(PredId, ProcId, Args, Builtin, Context, Sym)
+        Expr = plain_call(PredId, ProcId, Args, Builtin, CallUC, Sym)
     ;
         Expr0 = unify(LHS0, RHS0, Mode, Unify0, Context),
         rename_var(Must, Subn, LHS0, LHS),
-        rename_unify_rhs(Must, Subn, RHS0, RHS),
-        rename_unify(Must, Subn, Unify0, Unify),
+        rename_var_in_unify_rhs(Must, Subn, RHS0, RHS),
+        rename_var_in_unify(Must, Subn, Unify0, Unify),
         Expr = unify(LHS, RHS, Mode, Unify, Context)
     ;
         Expr0 = call_foreign_proc(Attrs, PredId, ProcId, Args0, Extra0,
@@ -2858,10 +2874,10 @@ rename_vars_in_goal_expr(Must, Subn, Expr0, Expr) :-
         Expr = shorthand(Shorthand)
     ).
 
-:- pred rename_unify_rhs(must_rename::in, prog_var_renaming::in,
+:- pred rename_var_in_unify_rhs(must_rename::in, prog_var_renaming::in,
     unify_rhs::in, unify_rhs::out) is det.
 
-rename_unify_rhs(Must, Subn, RHS0, RHS) :-
+rename_var_in_unify_rhs(Must, Subn, RHS0, RHS) :-
     (
         RHS0 = rhs_var(Var0),
         rename_var(Must, Subn, Var0, Var),
@@ -2880,6 +2896,25 @@ rename_unify_rhs(Must, Subn, RHS0, RHS) :-
         rename_vars_in_goal(Must, Subn, Goal0, Goal),
         RHS = rhs_lambda_goal(Purity, Groundness, PredOrFunc, EvalMethod,
             NonLocals, VarsModes, Det, Goal)
+    ).
+
+:- pred rename_var_in_call_unify_context(must_rename::in,
+    prog_var_renaming::in,
+    maybe(call_unify_context)::in, maybe(call_unify_context)::out) is det.
+
+rename_var_in_call_unify_context(Must, Subn,
+        MaybeCallUnifyContext0, MaybeCallUnifyContext) :-
+    (
+        MaybeCallUnifyContext0 = no,
+        MaybeCallUnifyContext = no
+    ;
+        MaybeCallUnifyContext0 = yes(CallUnifyContext0),
+        CallUnifyContext0 = call_unify_context(LHSVar0, RHS0, UnifyContext),
+        rename_var(Must, Subn, LHSVar0, LHSVar),
+        rename_var_in_unify_rhs(Must, Subn, RHS0, RHS),
+        % The unify_context contains no variables.
+        CallUnifyContext = call_unify_context(LHSVar, RHS, UnifyContext),
+        MaybeCallUnifyContext = yes(CallUnifyContext)
     ).
 
 %-----------------------------------------------------------------------------%
@@ -3146,8 +3181,8 @@ incremental_rename_vars_in_goal_expr(Subn, SubnUpdates, Expr0, Expr) :-
     ;
         Expr0 = unify(LHS0, RHS0, Mode, Unify0, Context),
         rename_var(need_not_rename, Subn, LHS0, LHS),
-        incremental_rename_unify_rhs(Subn, SubnUpdates, RHS0, RHS),
-        rename_unify(need_not_rename, Subn, Unify0, Unify),
+        incremental_rename_var_in_unify_rhs(Subn, SubnUpdates, RHS0, RHS),
+        rename_var_in_unify(need_not_rename, Subn, Unify0, Unify),
         Expr = unify(LHS, RHS, Mode, Unify, Context)
     ;
         Expr0 = call_foreign_proc(Attrs, PredId, ProcId, Args0, Extra0,
@@ -3211,10 +3246,10 @@ incremental_rename_vars_in_goal_expr(Subn, SubnUpdates, Expr0, Expr) :-
         Expr = shorthand(Shorthand)
     ).
 
-:- pred incremental_rename_unify_rhs(prog_var_renaming::in,
+:- pred incremental_rename_var_in_unify_rhs(prog_var_renaming::in,
     incremental_rename_map::in, unify_rhs::in, unify_rhs::out) is det.
 
-incremental_rename_unify_rhs(Subn, SubnUpdates, RHS0, RHS) :-
+incremental_rename_var_in_unify_rhs(Subn, SubnUpdates, RHS0, RHS) :-
     (
         RHS0 = rhs_var(Var0),
         rename_var(need_not_rename, Subn, Var0, Var),
@@ -3256,10 +3291,10 @@ rename_arg(Must, Subn, Arg0, Arg) :-
     rename_var(Must, Subn, Var0, Var),
     Arg = foreign_arg(Var, B, C, D).
 
-:- pred rename_unify(must_rename::in, prog_var_renaming::in,
+:- pred rename_var_in_unify(must_rename::in, prog_var_renaming::in,
     unification::in, unification::out) is det.
 
-rename_unify(Must, Subn, Unify0, Unify) :-
+rename_var_in_unify(Must, Subn, Unify0, Unify) :-
     (
         Unify0 = construct(Var0, ConsId, Vars0, Modes, How0, Uniq, SubInfo0),
         rename_var(Must, Subn, Var0, Var),

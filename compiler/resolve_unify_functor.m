@@ -23,10 +23,10 @@
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_module.
 :- import_module hlds.hlds_pred.
-:- import_module hlds.vartypes.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module list.
 
@@ -42,9 +42,9 @@
     %
 :- pred resolve_unify_functor(module_info::in, prog_var::in, cons_id::in,
     list(prog_var)::in, unify_mode::in, unification::in, unify_context::in,
-    hlds_goal_info::in, pred_info::in, pred_info::out,
-    prog_varset::in, prog_varset::out, vartypes::in, vartypes::out,
-    hlds_goal::out, is_plain_unify::out) is det.
+    hlds_goal_info::in, hlds_goal::out, is_plain_unify::out,
+    list(error_spec)::out,
+    var_table::in, var_table::out, pred_info::in, pred_info::out) is det.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -77,9 +77,9 @@
 %---------------------------------------------------------------------------%
 
 resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
-        Unification0, UnifyContext, GoalInfo0, !PredInfo, !VarSet, !VarTypes,
-        Goal, IsPlainUnify) :-
-    lookup_var_type(!.VarTypes, X0, TypeOfX),
+        Unification0, UnifyContext, GoalInfo0, Goal, IsPlainUnify, Specs,
+        !VarTable, !PredInfo) :-
+    lookup_var_type(!.VarTable, X0, TypeOfX),
     list.length(ArgVars0, Arity),
     ( if
         % Is the function symbol apply/N or ''/N, representing a higher-order
@@ -101,12 +101,14 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         ArgVars = FuncArgVars ++ [X0],
         Modes = [],
         Det = detism_erroneous,
-        adjust_func_arity(pf_function, Arity, FullArity),
-        HOCall = generic_call(
-            higher_order(FuncVar, Purity, pf_function, FullArity),
-            ArgVars, Modes, arg_reg_types_unset, Det),
+        user_arity_pred_form_arity(pf_function,
+            user_arity(Arity), PredFormArity),
+        Generic = higher_order(FuncVar, Purity, pf_function, PredFormArity),
+        HOCall = generic_call(Generic, ArgVars, Modes,
+            arg_reg_types_unset, Det),
         Goal = hlds_goal(HOCall, GoalInfo0),
-        IsPlainUnify = is_not_plain_unify
+        IsPlainUnify = is_not_plain_unify,
+        Specs = []
     else if
         % Is the function symbol a user-defined function, rather than
         % a functor which represents a data constructor?
@@ -116,10 +118,12 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         ConsId0 = cons(PredName, _, _),
 
         pred_info_get_markers(!.PredInfo, Markers),
+        IsFullyQualified = calls_are_fully_qualified(Markers),
         module_info_get_predicate_table(ModuleInfo, PredTable),
+        UserArity = user_arity(Arity),
         % This search will usually fail, so do it first.
-        predicate_table_lookup_func_sym_arity(PredTable,
-            calls_are_fully_qualified(Markers), PredName, Arity, PredIds),
+        predicate_table_lookup_func_sym_arity(PredTable, IsFullyQualified,
+            PredName, UserArity, PredIds),
         PredIds = [_ | _],
 
         % We don't do this for compiler-generated predicates; they are assumed
@@ -142,7 +146,7 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         pred_info_get_typevarset(!.PredInfo, TVarSet),
         pred_info_get_exist_quant_tvars(!.PredInfo, ExistQTVars),
         pred_info_get_external_type_params(!.PredInfo, ExternalTypeParams),
-        lookup_var_types(!.VarTypes, ArgVars0, ArgTypes0),
+        lookup_var_types(!.VarTable, ArgVars0, ArgTypes0),
         ArgTypes = ArgTypes0 ++ [TypeOfX],
         pred_info_get_constraint_map(!.PredInfo, ConstraintMap),
         GoalId = goal_info_get_goal_id(GoalInfo0),
@@ -151,7 +155,7 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         Context = goal_info_get_context(GoalInfo0),
         find_matching_pred_id(ModuleInfo, PredIds, TVarSet, ExistQTVars,
             ArgTypes, ExternalTypeParams, yes(ConstraintSearch), Context,
-            PredId, QualifiedFuncName)
+            PredId, QualifiedFuncName, SpecsPrime)
     then
         % Convert function calls in unifications into plain calls:
         % replace `X = f(A, B, C)' with `f(A, B, C, X)'.
@@ -163,7 +167,8 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         FuncCall = plain_call(PredId, ProcId, ArgVars, not_builtin,
             yes(FuncCallUnifyContext), QualifiedFuncName),
         Goal = hlds_goal(FuncCall, GoalInfo0),
-        IsPlainUnify = is_not_plain_unify
+        IsPlainUnify = is_not_plain_unify,
+        Specs = SpecsPrime
     else if
         % Is the function symbol a higher-order predicate or function constant?
         ConsId0 = cons(Name, _, _),
@@ -176,7 +181,7 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         not pred_info_is_field_access_function(ModuleInfo, !.PredInfo),
 
         % Find the pred_id of the constant.
-        lookup_var_types(!.VarTypes, ArgVars0, ArgTypes0),
+        lookup_var_types(!.VarTable, ArgVars0, ArgTypes0),
         AllArgTypes = ArgTypes0 ++ HOArgTypes,
         pred_info_get_typevarset(!.PredInfo, TVarSet),
         pred_info_get_exist_quant_tvars(!.PredInfo, ExistQVars),
@@ -185,7 +190,7 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         Context = goal_info_get_context(GoalInfo0),
         get_pred_id_by_types(calls_are_fully_qualified(Markers), Name,
             PredOrFunc, TVarSet, ExistQVars, AllArgTypes, ExternalTypeParams,
-            ModuleInfo, Context, PredId)
+            ModuleInfo, Context, PredId, SpecsPrime)
     then
         module_info_pred_info(ModuleInfo, PredId, PredInfo),
         ProcIds = pred_info_all_procids(PredInfo),
@@ -212,14 +217,15 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         ;
             MaybeProcId = no,
             Goal = true_goal,
+            SNA = sym_name_arity(Name, Arity),
             Pieces = [words("Error: reference to"),
                 words("undeclared function or predicate"),
-                qual_sym_name_arity(sym_name_arity(Name, Arity)),
-                suffix("."), nl],
+                qual_sym_name_arity(SNA), suffix("."), nl],
             Spec = simplest_spec($pred, severity_error, phase_type_check,
                 Context, Pieces),
             IsPlainUnify = is_unknown_ref(Spec)
-        )
+        ),
+        Specs = SpecsPrime
     else if
         % Is it a call to an automatically generated field access function.
         % This test must come after the tests for function calls and
@@ -239,14 +245,14 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         % otherwise there would have been an error reported for unresolved
         % overloading.
         pred_info_get_typevarset(!.PredInfo, TVarSet),
-        lookup_var_types(!.VarTypes, ArgVars0, ArgTypes0),
+        lookup_var_types(!.VarTable, ArgVars0, ArgTypes0),
         not find_matching_constructor(ModuleInfo, TVarSet, ConsId0,
             TypeOfX, ArgTypes0)
     then
-        finish_field_access_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet,
-            AccessType, FieldName, UnifyContext, X0, ArgVars0, GoalInfo0,
-            Goal),
-        IsPlainUnify = is_not_plain_unify
+        finish_field_access_function(ModuleInfo, AccessType, FieldName,
+            UnifyContext, X0, ArgVars0, GoalInfo0, Goal, !VarTable, !PredInfo),
+        IsPlainUnify = is_not_plain_unify,
+        Specs = []
     else
         % Module qualify ordinary construction/deconstruction unifications.
         type_to_ctor_det(TypeOfX, TypeCtorOfX),
@@ -283,7 +289,8 @@ resolve_unify_functor(ModuleInfo, X0, ConsId0, ArgVars0, Mode0,
         RHS = rhs_functor(ConsId, is_not_exist_constr, ArgVars0),
         GoalExpr = unify(X0, RHS, Mode0, Unification0, UnifyContext),
         Goal = hlds_goal(GoalExpr, GoalInfo0),
-        IsPlainUnify = is_plain_unify
+        IsPlainUnify = is_plain_unify,
+        Specs = []
     ).
 
 %---------------------------------------------------------------------------%
@@ -328,36 +335,35 @@ find_matching_constructor(ModuleInfo, TVarSet, ConsId, Type, ArgTypes) :-
     % The error messages from mode analysis and determinism analysis
     % shouldn't be too much worse than if the goals were special cases.
     %
-:- pred finish_field_access_function(module_info::in,
-    pred_info::in, pred_info::out, vartypes::in, vartypes::out,
-    prog_varset::in, prog_varset::out, field_access_type::in, sym_name::in,
-    unify_context::in, prog_var::in, list(prog_var)::in,
-    hlds_goal_info::in, hlds_goal::out) is det.
+:- pred finish_field_access_function(module_info::in, field_access_type::in,
+    sym_name::in, unify_context::in, prog_var::in, list(prog_var)::in,
+    hlds_goal_info::in, hlds_goal::out,
+    var_table::in, var_table::out, pred_info::in, pred_info::out) is det.
 
-finish_field_access_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet,
-        AccessType, FieldName, UnifyContext, Var, Args, GoalInfo,
-        hlds_goal(GoalExpr, GoalInfo)) :-
+finish_field_access_function(ModuleInfo, AccessType, FieldName, UnifyContext,
+        Var, Args, GoalInfo, Goal, !VarTable, !PredInfo) :-
     (
         AccessType = get,
         field_extraction_function_args(Args, TermVar),
-        translate_get_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet,
-            FieldName, UnifyContext, Var, TermVar, GoalInfo, GoalExpr)
+        translate_get_function(ModuleInfo, FieldName, UnifyContext,
+            Var, TermVar, GoalInfo, GoalExpr, !VarTable, !PredInfo)
     ;
         AccessType = set,
         field_update_function_args(Args, TermInputVar, FieldVar),
-        translate_set_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet,
-            FieldName, UnifyContext, FieldVar, TermInputVar, Var,
-            GoalInfo, GoalExpr)
-    ).
+        translate_set_function(ModuleInfo, FieldName, UnifyContext,
+            FieldVar, TermInputVar, Var, GoalInfo, GoalExpr,
+            !VarTable, !PredInfo)
+    ),
+    Goal = hlds_goal(GoalExpr, GoalInfo).
 
-:- pred translate_get_function(module_info::in, pred_info::in, pred_info::out,
-    vartypes::in, vartypes::out, prog_varset::in, prog_varset::out,
-    sym_name::in, unify_context::in, prog_var::in, prog_var::in,
-    hlds_goal_info::in, hlds_goal_expr::out) is det.
+:- pred translate_get_function(module_info::in, sym_name::in,
+    unify_context::in, prog_var::in, prog_var::in,
+    hlds_goal_info::in, hlds_goal_expr::out,
+    var_table::in, var_table::out, pred_info::in, pred_info::out) is det.
 
-translate_get_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet, FieldName,
-        UnifyContext, FieldVar, TermInputVar, OldGoalInfo, GoalExpr) :-
-    lookup_var_type(!.VarTypes, TermInputVar, TermType),
+translate_get_function(ModuleInfo, FieldName, UnifyContext,
+        FieldVar, TermInputVar, OldGoalInfo, GoalExpr, !VarTable, !PredInfo) :-
+    lookup_var_type(!.VarTable, TermInputVar, TermType),
     get_constructor_containing_field(ModuleInfo, TermType, FieldName,
         ConsId, FieldNumber),
 
@@ -375,7 +381,7 @@ translate_get_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet, FieldName,
     % can't be well-typed).
     (
         ExistQVars = [_ | _],
-        lookup_var_type(!.VarTypes, FieldVar, FieldType),
+        lookup_var_type(!.VarTable, FieldVar, FieldType),
         list.det_index1(ArgTypes0, FieldNumber, FieldArgType),
         type_subsumes_det(FieldArgType, FieldType, FieldSubst),
         apply_rec_subst_to_type_list(FieldSubst, ArgTypes0, ArgTypes)
@@ -387,8 +393,8 @@ translate_get_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet, FieldName,
     split_list_at_index(FieldNumber, ArgTypes, TypesBeforeField,
         _, TypesAfterField),
 
-    make_new_vars(TypesBeforeField, VarsBeforeField, !VarTypes, !VarSet),
-    make_new_vars(TypesAfterField, VarsAfterField, !VarTypes, !VarSet),
+    make_new_vars(ModuleInfo, TypesBeforeField, VarsBeforeField, !VarTable),
+    make_new_vars(ModuleInfo, TypesAfterField, VarsAfterField, !VarTable),
 
     ArgVars = VarsBeforeField ++ [FieldVar | VarsAfterField],
 
@@ -399,15 +405,15 @@ translate_get_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet, FieldName,
         UnifyContext, FunctorGoal),
     FunctorGoal = hlds_goal(GoalExpr, _).
 
-:- pred translate_set_function(module_info::in, pred_info::in, pred_info::out,
-    vartypes::in, vartypes::out, prog_varset::in, prog_varset::out,
+:- pred translate_set_function(module_info::in,
     sym_name::in, unify_context::in, prog_var::in, prog_var::in, prog_var::in,
-    hlds_goal_info::in, hlds_goal_expr::out) is det.
+    hlds_goal_info::in, hlds_goal_expr::out,
+    var_table::in, var_table::out, pred_info::in, pred_info::out) is det.
 
-translate_set_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet, FieldName,
-        UnifyContext, FieldVar, TermInputVar, TermOutputVar, OldGoalInfo,
-        Goal) :-
-    lookup_var_type(!.VarTypes, TermInputVar, TermType),
+translate_set_function(ModuleInfo, FieldName, UnifyContext,
+        FieldVar, TermInputVar, TermOutputVar, OldGoalInfo, Goal,
+        !VarTable, !PredInfo) :-
+    lookup_var_type(!.VarTable, TermInputVar, TermType),
     get_constructor_containing_field(ModuleInfo, TermType, FieldName,
         ConsId0, FieldNumber),
 
@@ -418,9 +424,9 @@ translate_set_function(ModuleInfo, !PredInfo, !VarTypes, !VarSet, FieldName,
     split_list_at_index(FieldNumber, ArgTypes,
         TypesBeforeField, TermFieldType, TypesAfterField),
 
-    make_new_vars(TypesBeforeField, VarsBeforeField, !VarTypes, !VarSet),
-    make_new_var(TermFieldType, SingletonFieldVar, !VarTypes, !VarSet),
-    make_new_vars(TypesAfterField, VarsAfterField, !VarTypes, !VarSet),
+    make_new_vars(ModuleInfo, TypesBeforeField, VarsBeforeField, !VarTable),
+    make_new_var(ModuleInfo, TermFieldType, SingletonFieldVar, !VarTable),
+    make_new_vars(ModuleInfo, TypesAfterField, VarsAfterField, !VarTable),
 
     % Build a goal to deconstruct the input.
     DeconstructArgs = VarsBeforeField ++ [SingletonFieldVar | VarsAfterField],
@@ -657,20 +663,19 @@ create_pure_atomic_unification_with_nonlocals(Var, RHS, OldGoalInfo,
     goal_info_set_goal_id(GoalId, GoalInfo1, GoalInfo),
     Goal = hlds_goal(GoalExpr0, GoalInfo).
 
-:- pred make_new_vars(list(mer_type)::in, list(prog_var)::out,
-    vartypes::in, vartypes::out, prog_varset::in, prog_varset::out) is det.
+:- pred make_new_vars(module_info::in, list(mer_type)::in, list(prog_var)::out,
+    var_table::in, var_table::out) is det.
 
-make_new_vars(Types, Vars, !VarTypes, !VarSet) :-
-    list.length(Types, NumVars),
-    varset.new_vars(NumVars, Vars, !VarSet),
-    vartypes_add_corresponding_lists(Vars, Types, !VarTypes).
+make_new_vars(ModuleInfo, Types, Vars, !VarTable) :-
+    list.map_foldl(make_new_var(ModuleInfo), Types, Vars, !VarTable).
 
-:- pred make_new_var(mer_type::in, prog_var::out, vartypes::in, vartypes::out,
-    prog_varset::in, prog_varset::out) is det.
+:- pred make_new_var(module_info::in, mer_type::in, prog_var::out,
+    var_table::in, var_table::out) is det.
 
-make_new_var(Type, Var, !VarTypes, !VarSet) :-
-    varset.new_var(Var, !VarSet),
-    add_var_type(Var, Type, !VarTypes).
+make_new_var(ModuleInfo, Type, Var, !VarTable) :-
+    IsDummy = is_type_a_dummy(ModuleInfo, Type),
+    Entry = vte("", Type, IsDummy),
+    add_var_entry(Entry, Var, !VarTable).
 
 %---------------------------------------------------------------------------%
 :- end_module check_hlds.resolve_unify_functor.

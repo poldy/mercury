@@ -86,6 +86,7 @@
 :- import_module hlds.hlds_rtti.
 :- import_module hlds.instmap.
 :- import_module hlds.passes_aux.
+:- import_module hlds.pred_name.
 :- import_module libs.
 :- import_module libs.file_util.
 :- import_module libs.globals.
@@ -264,8 +265,7 @@ interleave_loop([H | T], RevAs0, RevAs, RevBs0, RevBs) :-
 
 generate_code_for_pred(ModuleInfo, ConstStructMap, VeryVerbose, Statistics,
         PredId, !CProcsCord, !GlobalData) :-
-    module_info_get_preds(ModuleInfo, PredInfos),
-    map.lookup(PredInfos, PredId, PredInfo),
+    module_info_pred_info(ModuleInfo, PredId, PredInfo),
     ProcIds = pred_info_valid_non_imported_procids(PredInfo),
     (
         ProcIds = []
@@ -276,7 +276,7 @@ generate_code_for_pred(ModuleInfo, ConstStructMap, VeryVerbose, Statistics,
             trace [io(!IO)] (
                 get_progress_output_stream(ModuleInfo, ProgressStream, !IO),
                 io.format(ProgressStream, "%% Generating code for %s\n",
-                    [s(pred_id_to_string(ModuleInfo, PredId))], !IO)
+                    [s(pred_id_to_user_string(ModuleInfo, PredId))], !IO)
             ),
             (
                 TailProcIds = [],
@@ -317,7 +317,8 @@ generate_code_for_procs(ModuleInfo, ConstStructMap, PredId, PredInfo,
             get_progress_output_stream(ModuleInfo, ProgressStream, !IO),
             ProcIdInt = proc_id_to_int(ProcId),
             io.format(ProgressStream, "%% Generating code for %s proc %d\n",
-                [s(pred_id_to_string(ModuleInfo, PredId)), i(ProcIdInt)], !IO)
+                [s(pred_id_to_user_string(ModuleInfo, PredId)), i(ProcIdInt)],
+                !IO)
         )
     ;
         PrintProcProgress = no
@@ -411,7 +412,7 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
         map.init(FollowVarsMap),
         FollowVars = abs_follow_vars(FollowVarsMap, 1, 1)
     ),
-    basic_stack_layout_for_proc(PredInfo, Globals, BasicStackLayout,
+    basic_stack_layout_for_proc(Globals, PredInfo, BasicStackLayout,
         ForceProcId),
     SaveSuccip = BasicStackLayout,
 
@@ -424,7 +425,8 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
     global_data_get_threadscope_rev_string_table(!.GlobalData,
         TSRevStringTable0, TSStringTableSize0),
 
-    code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo,
+    proc_info_get_var_table(ProcInfo, VarTable),
+    code_info_init(ModuleInfo, PredId, ProcId, PredInfo, ProcInfo, VarTable,
         SaveSuccip, StaticCellInfo0, ConstStructMap, MaybeContainingGoalMap,
         TSRevStringTable0, TSStringTableSize0, TraceSlotInfo, CodeInfo0),
     code_loc_dep_init(FollowVars, OutsideResumePoint,
@@ -478,6 +480,8 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
         Instructions = Instructions0
     ),
 
+    EffTraceLevel =
+        eff_trace_level_for_proc(ModuleInfo, PredInfo, ProcInfo, TraceLevel),
     proc_info_get_maybe_proc_table_io_info(ProcInfo, MaybeTableIOInfo),
     ( if
         ( BasicStackLayout = yes
@@ -492,12 +496,10 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
         proc_info_get_eval_method(ProcInfo, EvalMethod),
         proc_info_get_initial_instmap(ModuleInfo, ProcInfo, InstMap0),
         proc_info_get_headvars(ProcInfo, HeadVars),
-        proc_info_get_varset(ProcInfo, VarSet),
         proc_info_get_argmodes(ProcInfo, ArgModes),
-        proc_info_get_vartypes(ProcInfo, VarTypes),
         globals.get_trace_suppress(Globals, TraceSuppress),
-        NeedBodyReps = eff_trace_needs_proc_body_reps(ModuleInfo,
-            PredInfo, ProcInfo, TraceLevel, TraceSuppress),
+        NeedBodyReps =
+            eff_trace_needs_proc_body_reps(EffTraceLevel, TraceSuppress),
         (
             NeedBodyReps = yes,
             NeedGoalRep = trace_needs_body_rep
@@ -505,8 +507,8 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
             NeedBodyReps = no,
             NeedGoalRep = trace_does_not_need_body_rep
         ),
-        NeedsAllNames = eff_trace_needs_all_var_names(ModuleInfo, PredInfo,
-            ProcInfo, TraceLevel, TraceSuppress),
+        NeedsAllNames =
+            eff_trace_needs_all_var_names(EffTraceLevel, TraceSuppress),
         proc_info_get_maybe_deep_profile_info(ProcInfo, MaybeHLDSDeepInfo),
         (
             MaybeHLDSDeepInfo = yes(HLDSDeepInfo),
@@ -516,8 +518,6 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
             MaybeHLDSDeepInfo = no,
             MaybeDeepProfInfo = no
         ),
-        EffTraceLevel = eff_trace_level(ModuleInfo, PredInfo, ProcInfo,
-            TraceLevel),
         module_info_get_table_struct_map(ModuleInfo, TableStructMap),
         PredProcId = proc(PredId, ProcId),
         (
@@ -543,7 +543,7 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
             RttiProcLabel, EntryLabel, TotalSlots, MaybeSuccipSlot,
             MaybeTraceCallLabel, MaxTraceRegR, MaxTraceRegF,
             HeadVars, ArgModes, Goal, InstMap0, TraceSlotInfo,
-            VarSet, VarTypes, InternalMap, MaybeTableInfo, OISUKindFors,
+            VarTable, InternalMap, MaybeTableInfo, OISUKindFors,
             MaybeDeepProfInfo),
         global_data_add_new_proc_layout(proc(PredId, ProcId), ProcLayout,
             !GlobalData)
@@ -594,8 +594,8 @@ generate_proc_code(ModuleInfo0, ConstStructMap, PredId, PredInfo,
     ),
     get_used_env_vars(CodeInfo, UsedEnvVars),
     CProc = c_procedure(Name, Arity, proc(PredId, ProcId), ProcLabel,
-        CodeModel, ProcInstructions, ProcLabelCounter, MayAlterRtti,
-        UsedEnvVars).
+        CodeModel, EffTraceLevel, ProcInstructions, ProcLabelCounter,
+        MayAlterRtti, UsedEnvVars).
 
 :- pred maybe_set_trace_level(pred_info::in,
     module_info::in, module_info::out) is det.
@@ -615,7 +615,8 @@ maybe_set_trace_level(PredInfo, !ModuleInfo) :-
         globals.set_trace_level_none(Globals0, Globals1),
         module_info_set_globals(Globals1, !ModuleInfo)
     else if
-        pred_info_get_origin(PredInfo, origin_special_pred(_, _))
+        pred_info_get_origin(PredInfo, Origin),
+        Origin = origin_compiler(made_for_uci(_, _))
     then
         globals.get_trace_level(Globals0, TraceLevel),
         UC_TraceLevel = trace_level_for_unify_compare(TraceLevel),
@@ -984,8 +985,8 @@ generate_call_event(TraceInfo, ProcContext, MaybeTraceCallLabel, TraceCallCode,
 generate_entry(CI, CodeModel, Goal, OutsideResumePoint, ProcFrameSlots,
         EntryCode) :-
     get_stack_slots(CI, StackSlots),
-    get_varset(CI, VarSet),
-    SlotsComment = explain_stack_slots(StackSlots, VarSet),
+    get_var_table(CI, VarTable),
+    SlotsComment = explain_stack_slots(VarTable, StackSlots),
     StartComment = from_list([
         llds_instr(comment("Start of procedure prologue"), ""),
         llds_instr(comment(SlotsComment), "")
@@ -1400,7 +1401,7 @@ bytecode_stub(ModuleInfo, PredId, ProcId, BytecodeInstructions) :-
 
 push_msg(ModuleInfo, PredId, ProcId) = PushMsg :-
     module_info_pred_info(ModuleInfo, PredId, PredInfo),
-    PushMsg = describe_proc(PredInfo, ProcId).
+    PushMsg = describe_proc(include_module_name, PredInfo, ProcId).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%

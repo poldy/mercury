@@ -18,6 +18,7 @@
 :- import_module ml_backend.mlds.
 :- import_module parse_tree.
 :- import_module parse_tree.prog_data.
+:- import_module parse_tree.var_table.
 
 :- import_module assoc_list.
 :- import_module bool.
@@ -191,7 +192,7 @@
     % even from assignments where the target is unused.
     %
 :- pred ml_compute_assign_direction(module_info::in, unify_mode::in,
-    mer_type::in, mer_type::in, assign_dir::out) is det.
+    mer_type::in, var_table_entry::in, assign_dir::out) is det.
 
 %---------------------------------------------------------------------------%
 
@@ -224,9 +225,9 @@
 :- import_module int.
 :- import_module pair.
 :- import_module require.
-:- import_module term.
-:- import_module uint8.
+:- import_module term_context.
 :- import_module uint.
+:- import_module uint8.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -317,7 +318,7 @@ allocate_consecutive_full_word_ctor_arg_repns_boxed(CurOffset,
         [Var | Vars], [VarArgRepn | VarArgRepns]) :-
     Type = ml_make_boxed_type,
     ArgPosWidth = apw_full(arg_only_offset(CurOffset), cell_offset(CurOffset)),
-    ArgRepn = ctor_arg_repn(no, Type, ArgPosWidth, term.context_init),
+    ArgRepn = ctor_arg_repn(no, Type, ArgPosWidth, dummy_context),
     VarArgRepn = Var - ArgRepn,
     allocate_consecutive_full_word_ctor_arg_repns_boxed(CurOffset + 1,
         Vars, VarArgRepns).
@@ -329,9 +330,9 @@ allocate_consecutive_full_word_ctor_arg_repns_boxed(CurOffset,
 allocate_consecutive_full_word_ctor_arg_repns_lookup(_, _, [], []).
 allocate_consecutive_full_word_ctor_arg_repns_lookup(Info, CurOffset,
         [Var | Vars], [VarArgRepn | VarArgRepns]) :-
-    ml_variable_type(Info, Var, Type),
+    ml_variable_type_direct(Info, Var, Type),
     ArgPosWidth = apw_full(arg_only_offset(CurOffset), cell_offset(CurOffset)),
-    ArgRepn = ctor_arg_repn(no, Type, ArgPosWidth, term.context_init),
+    ArgRepn = ctor_arg_repn(no, Type, ArgPosWidth, dummy_context),
     VarArgRepn = Var - ArgRepn,
     allocate_consecutive_full_word_ctor_arg_repns_lookup(Info, CurOffset + 1,
         Vars, VarArgRepns).
@@ -495,7 +496,7 @@ ml_tag_ptag_and_initial_offset(ConsTag, Ptag, InitOffset) :-
 
 decide_field_gen(Info, VarLval, VarType, ConsId, ConsTag, Ptag, FieldGen) :-
     AddrRval = ml_lval(VarLval),
-    ml_gen_type(Info, VarType, AddrType),
+    ml_gen_mlds_type(Info, VarType, AddrType),
 
     ml_gen_info_get_high_level_data(Info, HighLevelData),
     (
@@ -902,16 +903,18 @@ ml_cast_to_unsigned_without_sign_extend(Fill, Rval0, Rval) :-
 
 %---------------------------------------------------------------------------%
 
-ml_compute_assign_direction(ModuleInfo, ArgMode, ArgType, FieldType, Dir) :-
-    ( if
-        % XXX ARG_PACK We should not need to check here whether
-        % FieldType is a dummy type; the arg_pos_width should tell us that.
-        % Computing FieldType is expensive for our callers.
-        is_either_type_a_dummy(ModuleInfo, ArgType, FieldType) =
-            at_least_one_is_dummy_type
-    then
+ml_compute_assign_direction(ModuleInfo, ArgMode,
+        FieldType, ArgVarEntry, Dir) :-
+    ArgVarType = ArgVarEntry ^ vte_type,
+    % XXX ARG_PACK We should not need to check here whether
+    % FieldType is a dummy type; the arg_pos_width should tell us that.
+    % Computing FieldType is expensive for our callers.
+    EitherIsDummy = is_either_type_a_dummy(ModuleInfo, FieldType, ArgVarType),
+    (
+        EitherIsDummy = at_least_one_is_dummy_type,
         Dir = assign_dummy
-    else
+    ;
+        EitherIsDummy = neither_is_dummy_type,
         % The test of the code in this predicate is the same as
         % the code of compute_assign_direction, with one exception
         % that prevents any simple kind of code reuse: the fact that
@@ -921,9 +924,9 @@ ml_compute_assign_direction(ModuleInfo, ArgMode, ArgType, FieldType, Dir) :-
         ArgMode = unify_modes_li_lf_ri_rf(LeftInitInst, LeftFinalInst,
             RightInitInst, RightFinalInst),
         init_final_insts_to_top_functor_mode(ModuleInfo,
-            LeftInitInst, LeftFinalInst, ArgType, LeftTopMode),
+            LeftInitInst, LeftFinalInst, ArgVarType, LeftTopMode),
         init_final_insts_to_top_functor_mode(ModuleInfo,
-            RightInitInst, RightFinalInst, ArgType, RightTopMode),
+            RightInitInst, RightFinalInst, ArgVarType, RightTopMode),
         (
             LeftTopMode = top_in,
             (

@@ -21,7 +21,7 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
 :- import_module list.
 
@@ -42,9 +42,9 @@
 :- import_module hlds.hlds_data.
 :- import_module hlds.hlds_goal.
 :- import_module hlds.hlds_pred.
+:- import_module hlds.pred_name.
 :- import_module hlds.pred_table.
 :- import_module hlds.special_pred.
-:- import_module hlds.vartypes.
 :- import_module mdbcomp.
 :- import_module mdbcomp.goal_path.
 :- import_module mdbcomp.prim_data.
@@ -57,6 +57,7 @@
 :- import_module parse_tree.prog_out.
 :- import_module parse_tree.prog_type.
 :- import_module parse_tree.prog_type_subst.
+:- import_module parse_tree.vartypes.
 
 :- import_module assoc_list.
 :- import_module bimap.
@@ -70,7 +71,7 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 :- import_module varset.
 
 %---------------------------------------------------------------------------%
@@ -233,7 +234,7 @@ old_typecheck_constraints(!HLDS, Specs) :-
     error_specs::in, error_specs::out) is det.
 
 typecheck_one_predicate_if_needed(PredId, !Environment, !HLDS, !Specs) :-
-    predicate_table_get_preds(!.Environment ^ tce_pred_env, Preds0),
+    predicate_table_get_pred_id_table(!.Environment ^ tce_pred_env, Preds0),
     map.lookup(Preds0, PredId, PredInfo),
     ( if
         % Compiler-generated predicates are created already type-correct,
@@ -257,7 +258,7 @@ typecheck_one_predicate_if_needed(PredId, !Environment, !HLDS, !Specs) :-
             pred_info_mark_as_external(PredInfo, PredInfo1),
             map.det_update(PredId, PredInfo1, Preds0, Preds),
             PredEnv0 = !.Environment ^ tce_pred_env,
-            predicate_table_set_preds(Preds, PredEnv0, PredEnv),
+            predicate_table_set_pred_id_table(Preds, PredEnv0, PredEnv),
             module_info_set_predicate_table(PredEnv, !HLDS),
             !Environment ^ tce_pred_env := PredEnv
         ;
@@ -282,7 +283,7 @@ special_pred_needs_typecheck(PredInfo, ModuleInfo) :-
     % Check if the predicate is a compiler-generated special predicate,
     % and if so, for which type.
     pred_info_get_origin(PredInfo, Origin),
-    Origin = origin_special_pred(SpecialPredId, TypeCtor),
+    Origin = origin_compiler(made_for_uci(SpecialPredId, TypeCtor)),
 
     % Check that the special pred isn't one of the builtin types which don't
     % have a hlds_type_defn.
@@ -304,30 +305,33 @@ special_pred_needs_typecheck(PredInfo, ModuleInfo) :-
 
 typecheck_one_predicate(PredId, !Environment, !HLDS, !Specs) :-
     some [!Preds, !PredInfo, !ClausesInfo, !Clauses, !Goals, !PredEnv,
-        !TCInfo, !Vartypes]
+        !TCInfo, !VarTypes]
     (
         % Find the clause list in the predicate definition.
         !:PredEnv = !.Environment ^ tce_pred_env,
-        predicate_table_get_preds(!.PredEnv, !:Preds),
+        predicate_table_get_pred_id_table(!.PredEnv, !:Preds),
         map.lookup(!.Preds, PredId, !:PredInfo),
         pred_info_get_typevarset(!.PredInfo, TVarSet),
         pred_info_get_context(!.PredInfo, Context),
         pred_info_get_clauses_info(!.PredInfo, !:ClausesInfo),
-        clauses_info_get_varset(!.ClausesInfo, ProgVarSet),
+        % XXX If this code is ever actually used, it should be updated
+        % to use VarTable instead of VarTypes.
+        clauses_info_get_var_table(!.ClausesInfo, VarTable0),
+        split_var_table(VarTable0, ProgVarSet, _VarTypes),
 
         trace [compile_time(flag("type_error_diagnosis")), io(!IO)]
         (
-            LineNumber = string.int_to_string(term.context_line(Context)),
-            FileName = term.context_file(Context),
-            PredNumber = int_to_string(pred_id_to_int(PredId)),
-            io.write_string("=== Predicate " ++ PredNumber ++ " [" ++
-                FileName ++ ": " ++ LineNumber ++ "] ===\n", !IO)
+            PredNumber = pred_id_to_int(PredId),
+            FileName = term_context.context_file(Context),
+            LineNumber = term_context.context_line(Context),
+            io.format("=== Predicate %d [%s: %d] ===\n",
+                [i(PredNumber), s(FileName), i(LineNumber)], !IO)
         ),
 
         % Create a set of constraints on the types of the head variables.
         clauses_info_get_headvar_list(!.ClausesInfo, HeadVars),
         pred_info_get_arg_types(!.PredInfo, HeadTypes),
-        prog_type.type_vars_list(HeadTypes, HeadTVars),
+        type_vars_in_types(HeadTypes, HeadTVars),
         ( if list.same_length(HeadTypes, HeadVars) then
             list.foldl_corresponding(variable_assignment_constraint(Context),
                 HeadVars, HeadTypes, tconstr_info(bimap.init, counter.init(0),
@@ -367,19 +371,20 @@ typecheck_one_predicate(PredId, !Environment, !HLDS, !Specs) :-
                 ForwardGoalPathMap),
             !Goals, PredErrors),
         create_vartypes_map(Context, ProgVarSet, !.TCInfo ^ tconstr_tvarset,
-            !.TCInfo ^ tconstr_var_map, DomainMap, ReplacementMap, !:Vartypes,
+            !.TCInfo ^ tconstr_var_map, DomainMap, ReplacementMap, !:VarTypes,
             VarTypeErrors),
         list.map_corresponding(set_clause_body, !.Goals, !Clauses),
         list.condense([VarTypeErrors | PredErrors], NewErrors),
         list.foldl(add_message_to_spec, NewErrors, !TCInfo),
         set_clause_list(!.Clauses, ClausesRep),
         clauses_info_set_clauses_rep(ClausesRep, ItemNumbers, !ClausesInfo),
-        list.foldl(add_unused_prog_var(!.TCInfo), HeadVars, !Vartypes),
-        clauses_info_set_vartypes(!.Vartypes, !ClausesInfo),
+        list.foldl(add_unused_prog_var(!.TCInfo), HeadVars, !VarTypes),
+        make_var_table(!.HLDS, ProgVarSet, !.VarTypes, VarTable),
+        clauses_info_set_var_table(VarTable, !ClausesInfo),
         pred_info_set_clauses_info(!.ClausesInfo, !PredInfo),
         pred_info_set_typevarset(!.TCInfo ^ tconstr_tvarset, !PredInfo),
         map.det_update(PredId, !.PredInfo, !Preds),
-        predicate_table_set_preds(!.Preds, !PredEnv),
+        predicate_table_set_pred_id_table(!.Preds, !PredEnv),
         module_info_set_predicate_table(!.PredEnv, !HLDS),
         !Environment ^ tce_pred_env := !.PredEnv,
         !:Specs = !.TCInfo ^ tconstr_error_specs ++ !.Specs
@@ -428,17 +433,16 @@ apply_pred_data_to_goal(ForwardGoalPathMap, GoalId - PredId, !Goal) :-
 
 set_goal_pred_id(PredId, Goal0, MaybeGoal) :-
     Goal0 = hlds_goal(GoalExpr0, GoalInfo),
-    ( if GoalExpr0 = plain_call(_, _, _, _, _, _) then
+    ( if GoalExpr0 = plain_call(_, _, _, _, _, CallSymName) then
         trace [compile_time(flag("type_error_diagnosis")), io(!IO)]
         (
             Context = goal_info_get_context(GoalInfo),
-            LineNumber = term.context_line(Context),
-            FileName = term.context_file(Context),
-            PredName = sym_name_to_string(GoalExpr0 ^ call_sym_name),
-            io.format("  Predicate %s PredName (%s:%d) has id %d\n",
-                [s(PredName), s(FileName), i(LineNumber),
-                    i(pred_id_to_int(PredId))],
-                !IO)
+            PredName = sym_name_to_string(CallSymName),
+            FileName = term_context.context_file(Context),
+            LineNumber = term_context.context_line(Context),
+            PredIdInt = pred_id_to_int(PredId),
+            io.format("  Predicate %s (%s:%d) has id %d\n",
+                [s(PredName), s(FileName), i(LineNumber), i(PredIdInt)], !IO)
         ),
         GoalExpr = GoalExpr0 ^ call_pred_id := PredId,
         Goal = hlds_goal(GoalExpr, GoalInfo),
@@ -467,12 +471,12 @@ has_one_disjunct(tconstr_conj(C), C).
     vartypes::out, list(error_msg)::out) is det.
 
 create_vartypes_map(Context, ProgVarSet, TVarSet, VarMap, DomainMap,
-        ReplacementMap, Vartypes, Errors) :-
+        ReplacementMap, VarTypes, Errors) :-
     bimap.ordinates(VarMap, ProgVars),
     list.map2(find_variable_type(Context, ProgVarSet, TVarSet, VarMap,
         DomainMap, ReplacementMap), ProgVars, Types, MaybeErrors),
     list.filter_map(maybe_is_yes, MaybeErrors, Errors),
-    vartypes_from_corresponding_lists(ProgVars, Types, Vartypes).
+    vartypes_from_corresponding_lists(ProgVars, Types, VarTypes).
 
     % If a variable has a domain consisting of one type, gives it that type.
     % Otherwise, assign it to a type consisting of the type variable assigned
@@ -509,7 +513,7 @@ find_variable_type(Context, ProgVarSet, TVarSet, VarMap, DomainMap,
                 MaybeMsg = no  % This error is handled elsewhere.
             else
                 Type = DefaultType,
-                VarName = mercury_var_to_name_only(ProgVarSet, Var),
+                VarName = mercury_var_to_name_only_vs(ProgVarSet, Var),
                 list.map(type_to_debug_string(TVarSet),
                     set.to_sorted_list(Types), TypeStrings),
                 TypesString = string.join_list(" or ", TypeStrings),
@@ -632,7 +636,7 @@ unify_goal_to_constraint(Environment, GoalExpr, GoalInfo, !TCInfo) :-
                 Name, PredIds),
             (
                 PredIds = [_ | _],
-                predicate_table_get_preds(PredEnv, Preds),
+                predicate_table_get_pred_id_table(PredEnv, Preds),
                 list.filter_map_foldl(
                     ho_pred_unif_constraint(Preds, GoalInfo, LTVar,
                         ArgTypeVars),
@@ -716,8 +720,8 @@ functor_unif_constraint(LTVar, ArgTVars, Info, ConsDefn, Constraints,
     % Fails if the number of arguments supplied to the predicate is greater
     % than its arity.
     %
-:- pred ho_pred_unif_constraint(pred_table::in, hlds_goal_info::in, tvar::in,
-    list(tvar)::in, pred_id::in, conj_type_constraint::out,
+:- pred ho_pred_unif_constraint(pred_id_table::in, hlds_goal_info::in,
+    tvar::in, list(tvar)::in, pred_id::in, conj_type_constraint::out,
     type_constraint_info::in, type_constraint_info::out) is semidet.
 
 ho_pred_unif_constraint(PredTable, Info, LHSTVar, ArgTVars, PredId, Constraint,
@@ -778,7 +782,7 @@ plain_call_goal_to_constraint(Environment, GoalExpr, GoalInfo, !TCInfo) :-
     % used in the call.
     predicate_table_lookup_pred_sym(PredEnv, may_be_partially_qualified,
         Name, PredIds0),
-    predicate_table_get_preds(PredEnv, Preds),
+    predicate_table_get_pred_id_table(PredEnv, Preds),
     list.filter(pred_has_arity(Preds, list.length(Args)), PredIds0, PredIds),
     list.map_foldl(get_var_type, Args, ArgTVars, !TCInfo),
     list.map2_foldl(pred_call_constraint(Preds, GoalInfo, ArgTVars),
@@ -803,15 +807,16 @@ generic_call_goal_to_constraint(Environment, GoalExpr, GoalInfo, !TCInfo) :-
     ;
         % Class methods are handled by looking up the method number in the
         % class' method list.
-        Details = class_method(_, MethodNum, ClassId, _),
+        Details = class_method(_, method_proc_num(MethodNum), ClassId, _),
         ClassId = class_id(Name, Arity),
         ( if map.search(Environment ^ tce_class_env, ClassId, ClassDefn) then
             ( if
-                list.index0(ClassDefn ^ classdefn_hlds_interface, MethodNum,
+                list.index0(ClassDefn ^ classdefn_method_infos, MethodNum,
                     Method)
             then
-                Method = proc(PredId, _),
-                predicate_table_get_preds(Environment ^ tce_pred_env, Preds),
+                Method = method_info(_, _, proc(PredId, _), _),
+                predicate_table_get_pred_id_table(Environment ^ tce_pred_env,
+                    Preds),
                 ( if pred_has_arity(Preds, list.length(Vars), PredId) then
                     pred_call_constraint(Preds, GoalInfo, ArgTVars, PredId,
                         Constraint, PredTVars, !TCInfo),
@@ -872,7 +877,7 @@ generic_call_goal_to_constraint(Environment, GoalExpr, GoalInfo, !TCInfo) :-
     % definition. This may only be called if the number of arguments given
     % is equal to the arity of the predicate.
     %
-:- pred pred_call_constraint(pred_table::in, hlds_goal_info::in,
+:- pred pred_call_constraint(pred_id_table::in, hlds_goal_info::in,
     list(tvar)::in, pred_id::in, conj_type_constraint::out, list(tvar)::out,
     type_constraint_info::in, type_constraint_info::out) is det.
 
@@ -889,7 +894,7 @@ pred_call_constraint(PredTable, Info, ArgTVars, PredId, Constraint, TVars,
             PredArgTypes0, PredArgTypes),
         Constraints = list.map_corresponding(create_stconstr, ArgTVars,
             PredArgTypes),
-        prog_type.type_vars_list(PredArgTypes, TVars)
+        type_vars_in_types(PredArgTypes, TVars)
     else
         Pieces = [words("The predicate with id"),
             int_fixed(pred_id_to_int(PredId)),
@@ -914,7 +919,7 @@ foreign_proc_goal_to_constraint(Environment, GoalExpr, GoalInfo, !TCInfo) :-
     Context = goal_info_get_context(GoalInfo),
     ArgVars = list.map(foreign_arg_var, ForeignArgs),
     ArgTypes0 = list.map(foreign_arg_type, ForeignArgs),
-    predicate_table_get_preds(Environment ^ tce_pred_env, Preds),
+    predicate_table_get_pred_id_table(Environment ^ tce_pred_env, Preds),
     ( if map.search(Preds, PredId, PredInfo) then
         pred_info_get_typevarset(PredInfo, PredTVarSet),
         prog_data.tvarset_merge_renaming(!.TCInfo ^ tconstr_tvarset,
@@ -1014,18 +1019,18 @@ shorthand_goal_to_constraint(Environment, GoalExpr, GoalInfo, !TCInfo) :-
     mer_type::in, type_constraint_info::in, type_constraint_info::out) is det.
 
 variable_assignment_constraint(Context, Var, Type, !TCInfo) :-
-    prog_type.type_vars(Type, TypeVariables),
+    type_vars_in_type(Type, TVars),
     get_var_type(Var, TVar, !TCInfo),
     Constraint = ctconstr([stconstr(TVar, Type)], tconstr_active, Context,
         no, no),
-    add_type_constraint([Constraint], [TVar | TypeVariables], !TCInfo).
+    add_type_constraint([Constraint], [TVar | TVars], !TCInfo).
 
 %---------------------------------------------------------------------------%
 %
 % Constraint generation utility predicates.
 %
 
-:- pred pred_has_arity(pred_table::in, int::in, pred_id::in) is semidet.
+:- pred pred_has_arity(pred_id_table::in, int::in, pred_id::in) is semidet.
 
 pred_has_arity(Preds, Arity, PredId) :-
     map.lookup(Preds, PredId, Pred),
@@ -1921,7 +1926,7 @@ tvars_in_constraint(tconstr_disj(Disjuncts0, _), TVars) :-
     list(tvar)::out) is det.
 
 tvars_in_simple_constraint(stconstr(TVar, Type), [TVar | TVars]) :-
-    prog_type.type_vars(Type, TVars).
+    type_vars_in_type(Type, TVars).
 
 :- pred constraint_has_no_solutions(type_domain_map::in) is semidet.
 
@@ -1979,12 +1984,12 @@ to_singleton_type_domain(Type) = tdomain_singleton(Type).
 :- pred add_unused_prog_var(type_constraint_info::in, prog_var::in,
     vartypes::in, vartypes::out) is det.
 
-add_unused_prog_var(TCInfo, Var, !Vartypes) :-
-    ( if is_in_vartypes(!.Vartypes, Var) then
+add_unused_prog_var(TCInfo, Var, !VarTypes) :-
+    ( if is_in_vartypes(!.VarTypes, Var) then
         true
     else
         bimap.lookup(TCInfo ^ tconstr_var_map, Var, TVar),
-        add_var_type(Var, tvar_to_type(TVar), !Vartypes)
+        add_var_type(Var, tvar_to_type(TVar), !VarTypes)
     ).
 
 :- pred get_constraints_from_conj(conj_type_constraint::in,
@@ -2062,13 +2067,13 @@ diagnose_ambig_pred_error(PredEnv, Conjunctions, Msg) :-
 
 ambig_pred_error_message(PredEnv, (_ - PredId), Component) :-
     % XXX Should use describe_one_pred_name.
-    predicate_table_get_preds(PredEnv, Preds),
+    predicate_table_get_pred_id_table(PredEnv, Preds),
     map.lookup(Preds, PredId, PredInfo),
     Name = pred_info_name(PredInfo),
     Arity = pred_info_orig_arity(PredInfo),
     pred_info_get_context(PredInfo, Context),
-    LineNumber = term.context_line(Context),
-    FileName = term.context_file(Context),
+    LineNumber = term_context.context_line(Context),
+    FileName = term_context.context_file(Context),
     Pieces = [fixed(Name), suffix("/"), suffix(int_to_string(Arity)),
         prefix("("), words(FileName), suffix(": "), int_fixed(LineNumber),
         suffix(")"), nl],
@@ -2100,10 +2105,10 @@ diagnose_unsatisfiability_error(TCInfo, Context, ProgVarSet, TypeVar, Msg) :-
         MinUnsatPieces, ErrorLocations0),
     list.condense(ErrorLocations0, ErrorLocations),
     ( if bimap.reverse_search(VarMap, ProgVar, TypeVar) then
-        VarName = mercury_var_to_name_only(ProgVarSet, ProgVar),
+        VarName = mercury_var_to_name_only_vs(ProgVarSet, ProgVar),
         VarKind = "program"
     else
-        VarName = mercury_var_to_name_only(TVarSet, TypeVar),
+        VarName = mercury_var_to_name_only_vs(TVarSet, TypeVar),
         VarKind = "type"
     ),
     Pieces = [words("Conflicting type assignments for the"),
@@ -2114,7 +2119,7 @@ diagnose_unsatisfiability_error(TCInfo, Context, ProgVarSet, TypeVar, Msg) :-
     Msg = simplest_msg(Context, Pieces).
 
 :- pred error_from_one_min_set(type_constraint_map::in,
-    set(type_constraint_id)::in, list(format_component)::out) is det.
+    set(type_constraint_id)::in, list(format_piece)::out) is det.
 
 error_from_one_min_set(ConstraintMap, MinUnsatSet, Components) :-
     set.to_sorted_list(MinUnsatSet, MinUnsatList),
@@ -2186,8 +2191,8 @@ add_message_to_spec(ErrMsg, !TCInfo) :-
 :- pred bracket_context_to_string(prog_context::in, string::out) is det.
 
 bracket_context_to_string(Context, String) :-
-    FileName = term.context_file(Context),
-    LineNumber = string.int_to_string(term.context_line(Context)),
+    FileName = term_context.context_file(Context),
+    LineNumber = string.int_to_string(term_context.context_line(Context)),
     String = "[" ++ FileName ++ ": " ++ LineNumber ++ "]".
 
 :- pred conj_constraint_get_context(conj_type_constraint::in,
@@ -2299,7 +2304,7 @@ print_constraint_solution(TCInfo, ProgVarSet, DomainMap, !IO) :-
 
 print_prog_var_domain(TVarSet, ProgVarSet, ProgVar, Domain, !IO) :-
     type_domain_to_string(TVarSet, Domain, DomainName),
-    VarName = mercury_var_to_name_only(ProgVarSet, ProgVar),
+    VarName = mercury_var_to_name_only_vs(ProgVarSet, ProgVar),
     io.print("  " ++ VarName ++ " -> {" ++ DomainName ++ "}\n", !IO).
 
 :- pred print_type_domain(tvarset::in, pair(tvar, type_domain)::in,
@@ -2307,7 +2312,7 @@ print_prog_var_domain(TVarSet, ProgVarSet, ProgVar, Domain, !IO) :-
 
 print_type_domain(TVarSet, TVar - Domain, !IO) :-
     type_domain_to_string(TVarSet, Domain, DomainName),
-    TVarName = mercury_var_to_string(TVarSet, print_name_and_num, TVar),
+    TVarName = mercury_var_to_string_vs(TVarSet, print_name_and_num, TVar),
     io.print("  " ++ TVarName ++ " -> {" ++ DomainName ++ "}\n", !IO).
 
 :- pred type_domain_to_string(tvarset::in, type_domain::in, string::out)
@@ -2343,8 +2348,8 @@ print_pred_constraint(TCInfo, ProgVarSet, !IO) :-
 
 print_var_constraints(ConstraintMap, VarConstraints, TVarSet, ProgVarSet,
         Var - TVar, !IO) :-
-    VarName = mercury_var_to_string(ProgVarSet, print_name_and_num, Var),
-    TVarName = mercury_var_to_string(TVarSet, print_name_and_num, TVar),
+    VarName = mercury_var_to_string_vs(ProgVarSet, print_name_and_num, Var),
+    TVarName = mercury_var_to_string_vs(TVarSet, print_name_and_num, TVar),
     io.print(VarName ++ " -> " ++ TVarName ++ "\n", !IO),
     ( if map.search(VarConstraints, TVar, ConstraintIds0) then
         ConstraintIds = ConstraintIds0
@@ -2380,16 +2385,16 @@ constraint_to_string(Indent, TVarSet, ConstraintMap, ConstraintId, String) :-
     conj_type_constraint::in, string::out) is det.
 
 conj_constraint_to_string(Indent, TVarSet, Constraint, String) :-
-    Constraint = ctconstr(SimpleConstraints, _,  Context, _, PredId),
+    Constraint = ctconstr(SimpleConstraints, _,  Context, _, MaybePredId),
     IndentString = duplicate_char(' ', Indent),
-    LineNumber = string.int_to_string(term.context_line(Context)),
-    FileName = term.context_file(Context),
+    FileName = term_context.context_file(Context),
+    LineNumber = string.int_to_string(term_context.context_line(Context)),
     (
-        PredId = yes(Id),
+        MaybePredId = yes(MaybeId),
         PredString = " (calling predicate " ++
-            int_to_string(pred_id_to_int(Id)) ++ ")"
+            int_to_string(pred_id_to_int(MaybeId)) ++ ")"
     ;
-        PredId = no,
+        MaybePredId = no,
         PredString = ""
     ),
     ContextString = IndentString ++ "[" ++ FileName ++ ": " ++ LineNumber
@@ -2414,7 +2419,7 @@ conj_constraint_to_string(Indent, TVarSet, Constraint, String) :-
     simple_type_constraint::in, string::out) is det.
 
 simple_constraint_to_string(Indent, TVarSet, stconstr(TVar, Type), String) :-
-    VarName = mercury_var_to_string(TVarSet, print_name_and_num, TVar),
+    VarName = mercury_var_to_string_vs(TVarSet, print_name_and_num, TVar),
     type_to_debug_string(TVarSet, Type, TypeName),
     String = duplicate_char(' ', Indent) ++
         "( " ++ VarName ++ " :: " ++ TypeName ++ ")".

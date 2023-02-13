@@ -66,8 +66,7 @@
 
 move_follow_code_in_proc(_PredProcId, !ProcInfo, !ModuleInfo) :-
     proc_info_get_goal(!.ProcInfo, Goal0),
-    proc_info_get_varset(!.ProcInfo, Varset0),
-    proc_info_get_vartypes(!.ProcInfo, VarTypes0),
+    proc_info_get_var_table(!.ProcInfo, VarTable0),
     proc_info_get_rtti_varmaps(!.ProcInfo, RttiVarMaps0),
     move_follow_code_in_goal(Goal0, Goal1, RttiVarMaps0, no, Changed),
     (
@@ -75,18 +74,15 @@ move_follow_code_in_proc(_PredProcId, !ProcInfo, !ModuleInfo) :-
         % We need to fix up the goal_info by recalculating the nonlocal
         % vars and the non-atomic instmap deltas.
         proc_info_get_headvars(!.ProcInfo, HeadVars),
-        implicitly_quantify_clause_body_general(
-            ordinary_nonlocals_no_lambda,
+        implicitly_quantify_clause_body_general(ord_nl_no_lambda,
             HeadVars, _Warnings, Goal1, Goal2,
-            Varset0, Varset, VarTypes0, VarTypes,
-            RttiVarMaps0, RttiVarMaps),
+            VarTable0, VarTable, RttiVarMaps0, RttiVarMaps),
         proc_info_get_initial_instmap(!.ModuleInfo, !.ProcInfo, InstMap0),
         proc_info_get_inst_varset(!.ProcInfo, InstVarSet),
-        recompute_instmap_delta(do_not_recompute_atomic_instmap_deltas,
-            Goal2, Goal, VarTypes, InstVarSet, InstMap0, !ModuleInfo),
+        recompute_instmap_delta(no_recomp_atomics, VarTable, InstVarSet,
+            InstMap0, Goal2, Goal, !ModuleInfo),
         proc_info_set_goal(Goal, !ProcInfo),
-        proc_info_set_varset(Varset, !ProcInfo),
-        proc_info_set_vartypes(VarTypes, !ProcInfo),
+        proc_info_set_var_table(VarTable, !ProcInfo),
         proc_info_set_rtti_varmaps(RttiVarMaps, !ProcInfo)
     ;
         Changed = no

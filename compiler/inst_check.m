@@ -10,8 +10,19 @@
 % Original author: maclarty.
 % Rewritten by zs.
 %
-% This module exports a predicate that checks that each user defined inst is
-% consistent with at least one type in scope.
+% This module's main jobs are
+%
+% - to check that each user defined inst that is declared to be used with
+%   a specific type is consistent with that type, and
+%
+% - to check that each user defined inst that is not declared to be used with
+%   a specific type is consistent with at least one type in scope.
+%
+% It also does a minor bit of canonicalization. We can refer to the type
+% of characters using either the unqualified name "character" or as
+% "char.char". The original name is "character", but the preferred name
+% is the shorter "char". This module replaces references to "char.char"
+% in inst definitions with the canonical name "character".
 %
 % TODO
 % The code in this module checks only that the cons_ids in the sequence of
@@ -46,14 +57,23 @@
 :- import_module hlds.
 :- import_module hlds.hlds_module.
 :- import_module parse_tree.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 
+:- import_module bool.
 :- import_module list.
 
-    % This predicate issues a warning for each user defined bound inst
-    % that is not consistent with at least one type in scope.
+    % Check user defined insts that say they are intended for use
+    % with a specific type that they are consistent with that type,
+    % and generate error messages if they are not.
     %
-:- pred check_insts_have_matching_types(module_info::in, module_info::out,
+    % If the first argument is "yes", generate a warning for each
+    % user defined bound inst that
+    %
+    % - does not specify what type it is for, and
+    % - is not consistent with *any* of the types in scope.
+    %
+:- pred check_insts_have_matching_types(bool::in,
+    module_info::in, module_info::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 %---------------------------------------------------------------------------%
@@ -66,8 +86,8 @@
 :- import_module hlds.status.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.builtin_lib_types.
+:- import_module parse_tree.mercury_to_mercury.
 :- import_module parse_tree.parse_tree_out_info.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_item.      % undesirable dependency
@@ -75,7 +95,6 @@
 :- import_module parse_tree.prog_type.
 
 :- import_module assoc_list.
-:- import_module bool.
 :- import_module cord.
 :- import_module int.
 :- import_module map.
@@ -89,7 +108,8 @@
 
 %---------------------------------------------------------------------------%
 
-check_insts_have_matching_types(!ModuleInfo, !Specs) :-
+check_insts_have_matching_types(WarnInstsWithoutMatchingType,
+        !ModuleInfo, !Specs) :-
     module_info_get_inst_table(!.ModuleInfo, InstTable0),
     inst_table_get_user_insts(InstTable0, UserInstTable0),
     map.to_sorted_assoc_list(UserInstTable0, InstCtorDefnPairs0),
@@ -97,7 +117,8 @@ check_insts_have_matching_types(!ModuleInfo, !Specs) :-
     get_all_type_ctor_defns(TypeTable, TypeCtorsDefns),
     index_visible_types_by_unqualified_functors(TypeCtorsDefns,
         multi_map.init, FunctorsToTypeDefns),
-    check_inst_defns_have_matching_types(TypeTable, FunctorsToTypeDefns,
+    check_inst_defns_have_matching_types(WarnInstsWithoutMatchingType,
+        TypeTable, FunctorsToTypeDefns,
         InstCtorDefnPairs0, InstCtorDefnPairs, !Specs),
     map.from_sorted_assoc_list(InstCtorDefnPairs, UserInstTable),
     inst_table_set_user_insts(UserInstTable, InstTable0, InstTable),
@@ -208,30 +229,32 @@ constructor_to_functor_name_and_arity(Ctor, FunctorNameAndArity) :-
 
 %---------------------------------------------------------------------------%
 
-:- pred check_inst_defns_have_matching_types(type_table::in,
+:- pred check_inst_defns_have_matching_types(bool::in, type_table::in,
     functors_to_types_map::in,
     assoc_list(inst_ctor, hlds_inst_defn)::in,
     assoc_list(inst_ctor, hlds_inst_defn)::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-check_inst_defns_have_matching_types(_TypeTable, _FunctorsToTypeDefns,
-        [], [], !Specs).
-check_inst_defns_have_matching_types(TypeTable, FunctorsToTypeDefns,
+check_inst_defns_have_matching_types(_, _, _, [], [], !Specs).
+check_inst_defns_have_matching_types(WarnInstsWithoutMatchingType,
+        TypeTable, FunctorsToTypeDefns,
         [InstCtorDefnPair0 | InstCtorDefnPairs0],
         [InstCtorDefnPair | InstCtorDefnPairs], !Specs) :-
     InstCtorDefnPair0 = InstCtor - InstDefn0,
-    check_inst_defn_has_matching_type(TypeTable, FunctorsToTypeDefns,
-        InstCtor, InstDefn0, InstDefn, !Specs),
+    check_inst_defn_has_matching_type(WarnInstsWithoutMatchingType,
+        TypeTable, FunctorsToTypeDefns, InstCtor, InstDefn0, InstDefn, !Specs),
     InstCtorDefnPair = InstCtor - InstDefn,
-    check_inst_defns_have_matching_types(TypeTable, FunctorsToTypeDefns,
+    check_inst_defns_have_matching_types(WarnInstsWithoutMatchingType,
+        TypeTable, FunctorsToTypeDefns,
         InstCtorDefnPairs0, InstCtorDefnPairs, !Specs).
 
-:- pred check_inst_defn_has_matching_type(type_table::in,
+:- pred check_inst_defn_has_matching_type(bool::in, type_table::in,
     functors_to_types_map::in, inst_ctor::in,
     hlds_inst_defn::in, hlds_inst_defn::out,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-check_inst_defn_has_matching_type(TypeTable, FunctorsToTypesMap, InstCtor,
+check_inst_defn_has_matching_type(WarnInstsWithoutMatchingType,
+        TypeTable, FunctorsToTypesMap, InstCtor,
         InstDefn0, InstDefn, !Specs) :-
     InstDefn0 = hlds_inst_defn(InstVarSet, InstParams, InstBody,
         IFTC0, Context, Status),
@@ -240,92 +263,20 @@ check_inst_defn_has_matching_type(TypeTable, FunctorsToTypesMap, InstCtor,
         Inst = bound(_, _, BoundInsts),
         (
             IFTC0 = iftc_applicable_declared(ForTypeCtor0),
-            ForTypeCtor0 = type_ctor(ForTypeCtorName, ForTypeCtorArity),
+            ForTypeCtor0 = type_ctor(ForTypeCtorSymName, ForTypeCtorArity),
             % We bind ForTypeCtor to a standardized form of ForTypeCtor0.
             ( if
-                sym_name_for_builtin_type(ForTypeCtorName, "int"),
-                ForTypeCtorArity = 0
+                ForTypeCtorSymName = unqualified(ForTypeCtorName),
+                is_builtin_type_ctor_for_inst(ForTypeCtorName,
+                    ForTypeCtorArity, ForTypeKind0)
             then
-                ForTypeCtor = int_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_int))
+                MaybeForTypeKind = yes(ForTypeKind0)
             else if
-                sym_name_for_builtin_type(ForTypeCtorName, "uint"),
+                ForTypeCtorSymName = qualified(unqualified("char"), "char"),
                 ForTypeCtorArity = 0
             then
-                ForTypeCtor = uint_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_uint))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "int8"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = int8_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_int8))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "uint8"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = uint8_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_uint8))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "int16"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = int16_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_int16))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "uint16"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = uint16_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_uint16))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "int32"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = int32_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_int32))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "uint32"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = uint32_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_uint32))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "int64"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = int64_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_int64))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "uint64"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = uint64_type_ctor,
-                MaybeForTypeKind = yes(ftk_int(int_type_uint64))
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "float"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = float_type_ctor,
-                MaybeForTypeKind = yes(ftk_float)
-            else if
-                ( ForTypeCtorName = unqualified(CName)
-                ; ForTypeCtorName = qualified(unqualified(""), CName)
-                ; ForTypeCtorName = qualified(unqualified("char"), CName)
-                ),
-                ( CName = "char"
-                ; CName = "character"
-                ),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = char_type_ctor,
-                MaybeForTypeKind = yes(ftk_char)
-            else if
-                sym_name_for_builtin_type(ForTypeCtorName, "string"),
-                ForTypeCtorArity = 0
-            then
-                ForTypeCtor = string_type_ctor,
-                MaybeForTypeKind = yes(ftk_string)
+                ForTypeKind0 = ftk_builtin(char_type_ctor, builtin_type_char),
+                MaybeForTypeKind = yes(ForTypeKind0)
             else
                 ForTypeCtor = ForTypeCtor0,
                 ( if
@@ -341,15 +292,16 @@ check_inst_defn_has_matching_type(TypeTable, FunctorsToTypesMap, InstCtor,
             (
                 MaybeForTypeKind = no,
                 maybe_issue_no_such_type_error(InstCtor, InstDefn0,
-                    ForTypeCtor, !Specs),
+                    ForTypeCtor0, !Specs),
                 IFTC = iftc_not_applicable
             ;
                 MaybeForTypeKind = yes(ForTypeKind),
                 check_for_type_bound_insts(ForTypeKind, BoundInsts,
                     cord.init, MismatchesCord),
                 Mismatches = cord.list(MismatchesCord),
-                maybe_issue_type_match_error(InstCtor, InstDefn0,
-                    ForTypeKind, IFTC, Mismatches, MatchSpecs),
+                maybe_issue_type_match_error(WarnInstsWithoutMatchingType,
+                    InstCtor, InstDefn0, ForTypeKind, Mismatches,
+                    IFTC, MatchSpecs),
                 !:Specs = MatchSpecs ++ !.Specs
             ),
             InstDefn = hlds_inst_defn(InstVarSet, InstParams, InstBody,
@@ -366,7 +318,8 @@ check_inst_defn_has_matching_type(TypeTable, FunctorsToTypesMap, InstCtor,
                 TypeableFunctors = all_typeable_functors,
                 PossibleTypesSet = set.intersect_list(PossibleTypeSets),
                 PossibleTypes = set.to_sorted_list(PossibleTypesSet),
-                maybe_issue_no_matching_types_warning(InstCtor, InstDefn0,
+                maybe_issue_no_matching_types_warning(
+                    WarnInstsWithoutMatchingType, InstCtor, InstDefn0,
                     BoundInsts, PossibleTypes, PossibleTypeSets, !Specs),
                 list.map(type_defn_or_builtin_to_type_ctor, PossibleTypes,
                     PossibleTypeCtors),
@@ -404,13 +357,66 @@ check_inst_defn_has_matching_type(TypeTable, FunctorsToTypesMap, InstCtor,
         InstDefn = InstDefn0
     ).
 
-:- pred sym_name_for_builtin_type(sym_name::in, string::in) is semidet.
+:- pred is_builtin_type_ctor_for_inst(string::in, int::in,
+    for_type_kind::out) is semidet.
 
-sym_name_for_builtin_type(SymName, TypeName) :-
-    ( SymName = unqualified(TypeName)
-    ; SymName = qualified(unqualified(""), TypeName)
-    ; SymName = qualified(unqualified(TypeName), TypeName)
-    ).
+is_builtin_type_ctor_for_inst(ForTypeCtorName, ForTypeCtorArity,
+        ForTypeKind) :-
+    ForTypeCtorArity = 0,
+    (
+        ForTypeCtorName = "int",
+        ForTypeCtor = int_type_ctor,
+        BuiltinType = builtin_type_int(int_type_int)
+    ;
+        ForTypeCtorName = "uint",
+        ForTypeCtor = uint_type_ctor,
+        BuiltinType = builtin_type_int(int_type_uint)
+    ;
+        ForTypeCtorName = "int8",
+        ForTypeCtor = int8_type_ctor,
+        BuiltinType = builtin_type_int(int_type_int8)
+    ;
+        ForTypeCtorName = "uint8",
+        ForTypeCtor = uint8_type_ctor,
+        BuiltinType = builtin_type_int(int_type_uint8)
+    ;
+        ForTypeCtorName = "int16",
+        ForTypeCtor = int16_type_ctor,
+        BuiltinType = builtin_type_int(int_type_int16)
+    ;
+        ForTypeCtorName = "uint16",
+        ForTypeCtor = uint16_type_ctor,
+        BuiltinType = builtin_type_int(int_type_uint16)
+    ;
+        ForTypeCtorName = "int32",
+        ForTypeCtor = int32_type_ctor,
+        BuiltinType = builtin_type_int(int_type_int32)
+    ;
+        ForTypeCtorName = "uint32",
+        ForTypeCtor = uint32_type_ctor,
+        BuiltinType = builtin_type_int(int_type_uint32)
+    ;
+        ForTypeCtorName = "int64",
+        ForTypeCtor = int64_type_ctor,
+        BuiltinType = builtin_type_int(int_type_int64)
+    ;
+        ForTypeCtorName = "uint64",
+        ForTypeCtor = uint64_type_ctor,
+        BuiltinType = builtin_type_int(int_type_uint64)
+    ;
+        ForTypeCtorName = "float",
+        ForTypeCtor = float_type_ctor,
+        BuiltinType = builtin_type_float
+    ;
+        ForTypeCtorName = "character",
+        ForTypeCtor = char_type_ctor,
+        BuiltinType = builtin_type_char
+    ;
+        ForTypeCtorName = "string",
+        ForTypeCtor = string_type_ctor,
+        BuiltinType = builtin_type_string
+    ),
+    ForTypeKind = ftk_builtin(ForTypeCtor, BuiltinType).
 
 :- pred type_defn_or_builtin_to_type_ctor(type_defn_or_builtin::in,
     type_ctor::out) is det.
@@ -469,15 +475,12 @@ type_defn_or_builtin_to_type_ctor(TypeDefnOrBuiltin, TypeCtor) :-
 
 :- type for_type_kind
     --->    ftk_user(type_ctor, hlds_type_defn)
-    ;       ftk_int(int_type)
-    ;       ftk_float
-    ;       ftk_char
-    ;       ftk_string.
+    ;       ftk_builtin(type_ctor, builtin_type).
 
 :- type cons_mismatch
     --->    cons_mismatch(
-                bad_cons_id                     :: format_component,
-                possible_near_miss_cons_ids     :: list(format_component)
+                bad_cons_id                     :: format_piece,
+                possible_near_miss_cons_ids     :: list(format_piece)
             ).
 
 :- pred check_for_type_bound_insts(for_type_kind::in,
@@ -539,64 +542,52 @@ check_for_type_bound_insts(ForTypeKind, [BoundInst | BoundInsts],
                 !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
             )
         ;
-            ForTypeKind = ftk_char,
-            ( if
-                ConsSymName = unqualified(ConsName),
-                string.count_codepoints(ConsName) = 1
-            then
-                true
-            else
+            ForTypeKind = ftk_builtin(_, BuiltinType),
+            (
+                BuiltinType = builtin_type_char,
+                ( if
+                    ConsSymName = unqualified(ConsName),
+                    string.count_code_points(ConsName) = 1
+                then
+                    true
+                else
+                    !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
+                )
+            ;
+                ( BuiltinType = builtin_type_int(_)
+                ; BuiltinType = builtin_type_float
+                ; BuiltinType = builtin_type_string
+                ),
                 !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
             )
-        ;
-            ( ForTypeKind = ftk_int(_)
-            ; ForTypeKind = ftk_float
-            ; ForTypeKind = ftk_string
-            ),
-            !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
         )
     ;
         ConsId = some_int_const(IntConst),
         ExpType = type_of_int_const(IntConst),
-        ( if ForTypeKind = ftk_int(ExpType) then
+        ( if ForTypeKind = ftk_builtin(_, builtin_type_int(ExpType)) then
             true
         else
             !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
         )
     ;
         ConsId = float_const(_),
-        (
-            ForTypeKind = ftk_float
-        ;
-            ( ForTypeKind = ftk_user(_, _)
-            ; ForTypeKind = ftk_int(_)
-            ; ForTypeKind = ftk_char
-            ; ForTypeKind = ftk_string
-            ),
+        ( if ForTypeKind = ftk_builtin(_, builtin_type_float) then
+            true
+        else
             !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
         )
     ;
         ConsId = char_const(_),
-        (
-            ForTypeKind = ftk_char
-        ;
-            ( ForTypeKind = ftk_user(_, _)
-            ; ForTypeKind = ftk_int(_)
-            ; ForTypeKind = ftk_float
-            ; ForTypeKind = ftk_string
-            ),
+        ( if ForTypeKind = ftk_builtin(_, builtin_type_char) then
+            true
+        else
             !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
         )
     ;
         ConsId = string_const(_),
-        (
-            ForTypeKind = ftk_string
-        ;
-            ( ForTypeKind = ftk_user(_, _)
-            ; ForTypeKind = ftk_int(_)
-            ; ForTypeKind = ftk_float
-            ; ForTypeKind = ftk_char
-            ),
+        ( if ForTypeKind = ftk_builtin(_, builtin_type_string) then
+            true
+        else
             !:Mismatches = cord.snoc(!.Mismatches, simple_miss(ConsId))
         )
     ;
@@ -658,7 +649,7 @@ report_near_misses(TypeCtor, ConsId, SymName, CtorArities, !Mismatches) :-
     Mismatch = cons_mismatch(qual_cons_id_and_maybe_arity(ConsId), NearMisses),
     !:Mismatches = cord.snoc(!.Mismatches, Mismatch).
 
-:- func make_cons_id_component(type_ctor, sym_name, arity) = format_component.
+:- func make_cons_id_component(type_ctor, sym_name, arity) = format_piece.
 
 make_cons_id_component(TypeCtor, SymName, Arity) =
     qual_cons_id_and_maybe_arity(cons(SymName, Arity, TypeCtor)).
@@ -719,7 +710,7 @@ get_possible_types_for_bound_inst(FunctorsToTypesMap, BoundInst, MaybeTypes) :-
         ),
         % Zero arity functors with length 1 could match the builtin
         % character type.
-        ( if string.count_codepoints(Name) = 1 then
+        ( if string.count_code_points(Name) = 1 then
             UserCharTypes = [type_builtin(builtin_type_char) | UserTypes]
         else
             UserCharTypes = UserTypes
@@ -810,102 +801,89 @@ maybe_issue_no_such_type_error(InstCtor, InstDefn, TypeCtor, !Specs) :-
     ;
         InstDefinedInThisModule = yes,
         Context = InstDefn ^ inst_context,
-        InstCtor = inst_ctor(InstName, InstArity),
-        TypeCtor = type_ctor(TypeCtorName, TypeCtorArity),
-        Pieces = [words("Error: inst"),
-            unqual_sym_name_arity(sym_name_arity(InstName, InstArity)),
+        Pieces = [words("Error: inst"), unqual_inst_ctor(InstCtor),
             words("is specified to be for"),
-            qual_sym_name_arity(
-                sym_name_arity(TypeCtorName, TypeCtorArity)),
-            suffix(","),
+            qual_type_ctor(TypeCtor), suffix(","),
             words("but that type constructor is not visible here."), nl],
         Spec = simplest_spec($pred, severity_error, phase_inst_check,
             Context, Pieces),
         !:Specs = [Spec | !.Specs]
     ).
 
-:- pred maybe_issue_type_match_error(inst_ctor::in, hlds_inst_defn::in,
-    for_type_kind::in, inst_for_type_ctor::out, list(cons_mismatch)::in,
-    list(error_spec)::out) is det.
+:- pred maybe_issue_type_match_error(bool::in, inst_ctor::in,
+    hlds_inst_defn::in, for_type_kind::in, list(cons_mismatch)::in,
+    inst_for_type_ctor::out, list(error_spec)::out) is det.
 
-maybe_issue_type_match_error(InstCtor, InstDefn, ForTypeKind, IFTC, Mismatches,
-        !:Specs) :-
+maybe_issue_type_match_error(WarnInstsWithoutMatchingType, InstCtor, InstDefn,
+        ForTypeKind, Mismatches0, IFTC, !:Specs) :-
     !:Specs = [],
-    InstCtor = inst_ctor(InstSymName, InstArity),
-    ShortInstSymName = unqualified(unqualify_name(InstSymName)),
     Context = InstDefn ^ inst_context,
     InstStatus = InstDefn ^ inst_status,
     InstDefinedInThisModule = inst_status_defined_in_this_module(InstStatus),
     (
-        (
-            ForTypeKind = ftk_int(int_type_int),
-            ForTypeCtor = int_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_uint),
-            ForTypeCtor = uint_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_int8),
-            ForTypeCtor = int8_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_uint8),
-            ForTypeCtor = uint8_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_int16),
-            ForTypeCtor = int16_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_uint16),
-            ForTypeCtor = uint16_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_int32),
-            ForTypeCtor = int32_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_uint32),
-            ForTypeCtor = uint32_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_int64),
-            ForTypeCtor = int64_type_ctor
-        ;
-            ForTypeKind = ftk_int(int_type_uint64),
-            ForTypeCtor = uint64_type_ctor
-        ;
-            ForTypeKind = ftk_float,
-            ForTypeCtor = float_type_ctor
-        ;
-            ForTypeKind = ftk_char,
-            ForTypeCtor = char_type_ctor
-        ;
-            ForTypeKind = ftk_string,
-            ForTypeCtor = string_type_ctor
-        ),
-        ForTypeCtor = type_ctor(TypeCtorName, TypeCtorArity)
+        ForTypeKind = ftk_builtin(ForTypeCtor, _BuiltinType),
+        Mismatches = Mismatches0
     ;
         ForTypeKind = ftk_user(ForTypeCtor, ForTypeDefn),
-        ForTypeCtor = type_ctor(TypeCtorName, TypeCtorArity),
         InstIsExported =
             inst_status_is_exported_to_non_submodules(InstStatus),
         ( if
             InstIsExported = yes,
             not type_is_user_visible(ms_interface, ForTypeDefn)
         then
-            VisPieces = [words("Error: inst"),
-                unqual_sym_name_arity(
-                    sym_name_arity(ShortInstSymName, InstArity)),
+            VisPieces = [words("Error: inst"), unqual_inst_ctor(InstCtor),
                 words("is exported, but the type it is for,"),
-                qual_sym_name_arity(
-                    sym_name_arity(TypeCtorName, TypeCtorArity)),
-                suffix(","), words("is not visible outside this module."), nl],
+                qual_type_ctor(ForTypeCtor), suffix(","),
+                words("is not visible outside this module."), nl],
             VisSpec = simplest_spec($pred, severity_error, phase_inst_check,
                 Context, VisPieces),
             !:Specs = [VisSpec | !.Specs]
         else
             true
+        ),
+        get_type_defn_body(ForTypeDefn, ForTypeDefnBody),
+        (
+            ( ForTypeDefnBody = hlds_du_type(_)
+            ; ForTypeDefnBody = hlds_foreign_type(_)
+            ; ForTypeDefnBody = hlds_solver_type(_)
+            ; ForTypeDefnBody = hlds_abstract_type(_)
+            ),
+            Mismatches = Mismatches0
+        ;
+            ForTypeDefnBody = hlds_eqv_type(_),
+            (
+                Mismatches0 = []
+            ;
+                Mismatches0 = [_ | _],
+                EqvPieces = [words("Error: inst"),
+                    unqual_inst_ctor(InstCtor),
+                    words("is declared to be for type"),
+                    qual_type_ctor(ForTypeCtor), suffix(","),
+                    words("but that type is an equivalence type,"),
+                    words("and thus has no function symbols of its own."),
+                    words("Change the inst definition to refer"),
+                    words("to the type constructor that"),
+                    qual_type_ctor(ForTypeCtor),
+                    words("expands to."), nl],
+                EqvSpec = simplest_spec($pred, severity_error,
+                    phase_inst_check, Context, EqvPieces),
+                !:Specs = [EqvSpec | !.Specs]
+            ),
+            Mismatches = []
         )
     ),
-
-    (
-        Mismatches = []
-    ;
-        Mismatches = [_ | MismatchesTail],
+    ( if
+        % XXX We turn off --warn-insts-without-matching-type in library
+        % modules that define insts for types that have definitions
+        % in both Mercury and some foreign languages. In such cases,
+        % the mismatches we are looking at here *should* be derived from
+        % the Mercury definition of the type, but the foreign definitions
+        % will override that. We should fix that by having the Mercury
+        % definition available even if the actual definition we will use
+        % is the foreign language definition.
+        WarnInstsWithoutMatchingType = yes,
+        Mismatches = [_ | MismatchesTail]
+    then
         cons_id_strs_and_near_misses(Mismatches, MismatchConsIdComponents,
             NearMisses),
         FuncSymbolPhrase = choose_number(Mismatches,
@@ -915,13 +893,10 @@ maybe_issue_type_match_error(InstCtor, InstDefn, ForTypeKind, IFTC, Mismatches,
         MismatchConsIdPieces =
             component_list_to_pieces("and", MismatchConsIdComponents),
         MismatchPieces = [words("Error: inst"),
-            unqual_sym_name_arity(
-                sym_name_arity(ShortInstSymName, InstArity)),
-            words("is declared to be for type"),
-            qual_sym_name_arity(
-                sym_name_arity(TypeCtorName, TypeCtorArity)),
-            suffix(","), words("but its top level"),
-            words(FuncSymbolPhrase)] ++ MismatchConsIdPieces ++
+            unqual_inst_ctor(InstCtor), words("is declared to be"),
+            words("for type"), qual_type_ctor(ForTypeCtor), suffix(","),
+            words("but its top level"), words(FuncSymbolPhrase)] ++
+            MismatchConsIdPieces ++
             [words(IsAreNotPhrase), words("of that type."), nl],
         (
             NearMisses = [],
@@ -941,6 +916,8 @@ maybe_issue_type_match_error(InstCtor, InstDefn, ForTypeKind, IFTC, Mismatches,
         MismatchSpec = simplest_spec($pred, severity_error, phase_inst_check,
             Context, MismatchPieces ++ NearMissPieces),
         !:Specs = [MismatchSpec | !.Specs]
+    else
+        true
     ),
     (
         !.Specs = [],
@@ -958,12 +935,12 @@ maybe_issue_type_match_error(InstCtor, InstDefn, ForTypeKind, IFTC, Mismatches,
 
 :- type near_miss_cons_mismatch
     --->    near_miss_cons_mismatch(
-                if_only_one_mismatch    :: list(format_component),
-                if_several_mismatches   :: list(format_component)
+                if_only_one_mismatch    :: list(format_piece),
+                if_several_mismatches   :: list(format_piece)
             ).
 
 :- pred cons_id_strs_and_near_misses(list(cons_mismatch)::in,
-    list(format_component)::out, list(near_miss_cons_mismatch)::out) is det.
+    list(format_piece)::out, list(near_miss_cons_mismatch)::out) is det.
 
 cons_id_strs_and_near_misses([], [], []).
 cons_id_strs_and_near_misses([Mismatch | Mismatches],
@@ -985,34 +962,34 @@ cons_id_strs_and_near_misses([Mismatch | Mismatches],
         NearMissMismatches = [NearMissMismatch | NearMissMismatchesTail]
     ).
 
-:- func project_if_alone(near_miss_cons_mismatch) = list(format_component).
-:- func project_if_several(near_miss_cons_mismatch) = list(format_component).
+:- func project_if_alone(near_miss_cons_mismatch) = list(format_piece).
+:- func project_if_several(near_miss_cons_mismatch) = list(format_piece).
 
 project_if_alone(near_miss_cons_mismatch(IfAlone, _)) = IfAlone.
 project_if_several(near_miss_cons_mismatch(_, IfSeveral)) = IfSeveral.
 
 %---------------------------------------------------------------------------%
 
-:- pred maybe_issue_no_matching_types_warning(
+:- pred maybe_issue_no_matching_types_warning(bool::in,
     inst_ctor::in, hlds_inst_defn::in,
     list(bound_inst)::in, list(type_defn_or_builtin)::in,
     list(set(type_defn_or_builtin))::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
-maybe_issue_no_matching_types_warning(InstCtor, InstDefn, BoundInsts,
+maybe_issue_no_matching_types_warning(WarnInstsWithoutMatchingType,
+        InstCtor, InstDefn, BoundInsts,
         PossibleTypes, PossibleTypeSets, !Specs) :-
     InstStatus = InstDefn ^ inst_status,
     DefinedInThisModule = inst_status_defined_in_this_module(InstStatus),
-    (
-        DefinedInThisModule = no
-    ;
-        DefinedInThisModule = yes,
+    ( if
+        WarnInstsWithoutMatchingType = yes,
+        DefinedInThisModule = yes
+    then
         (
             PossibleTypes = [],
             Context = InstDefn ^ inst_context,
-            InstCtor = inst_ctor(InstName, InstArity),
             NoMatchPieces = [words("Warning: inst"),
-                unqual_sym_name_arity(sym_name_arity(InstName, InstArity)),
+                unqual_inst_ctor(InstCtor),
                 words("does not match any of the types in scope."), nl],
 
             AllPossibleTypesSet = set.union_list(PossibleTypeSets),
@@ -1056,17 +1033,15 @@ maybe_issue_no_matching_types_warning(InstCtor, InstDefn, BoundInsts,
                 true
             else
                 Context = InstDefn ^ inst_context,
-                InstCtor = inst_ctor(InstName, InstArity),
                 (
                     PossibleTypes = [OnePossibleType],
                     OnePossibleTypeStr =
                         type_defn_or_builtin_to_string(OnePossibleType),
                     Pieces = [words("Warning: inst"),
-                        unqual_sym_name_arity(
-                            sym_name_arity(InstName, InstArity)),
+                        unqual_inst_ctor(InstCtor),
                         words("is exported, but the one type it matches"),
                         prefix("("), words(OnePossibleTypeStr), suffix(")"),
-                        words("is not visible from outside this module.")]
+                        words("is not visible from outside this module."), nl]
                 ;
                     PossibleTypes = [_, _ | _],
                     PossibleTypeStrs = list.map(type_defn_or_builtin_to_string,
@@ -1074,17 +1049,18 @@ maybe_issue_no_matching_types_warning(InstCtor, InstDefn, BoundInsts,
                     PossibleTypesStr =
                         string.join_list(", ", PossibleTypeStrs),
                     Pieces = [words("Warning: inst"),
-                        unqual_sym_name_arity(
-                            sym_name_arity(InstName, InstArity)),
+                        unqual_inst_ctor(InstCtor),
                         words("is exported, but none of the types it matches"),
                         prefix("("), words(PossibleTypesStr), suffix(")"),
-                        words("are visible from outside this module.")]
+                        words("are visible from outside this module."), nl]
                 ),
                 Spec = simplest_spec($pred, severity_warning, phase_inst_check,
                     Context, Pieces),
                 !:Specs = [Spec | !.Specs]
             )
         )
+    else
+        true
     ).
 
 %---------------------------------------------------------------------------%
@@ -1093,7 +1069,7 @@ maybe_issue_no_matching_types_warning(InstCtor, InstDefn, BoundInsts,
     --->    mismatch_from_type(
                 mft_num_mismatches      :: int,
                 mft_type                :: type_defn_or_builtin,
-                mft_pieces              :: list(format_component)
+                mft_pieces              :: list(format_piece)
             ).
 
 :- pred diagnose_mismatches_from_type(list(bound_inst)::in,
@@ -1135,7 +1111,7 @@ diagnose_mismatches_from_type(BoundInsts, TypeDefnOrBuiltin,
 
 :- pred find_mismatches_from_user(list(constructor)::in, int::in,
     list(bound_inst)::in, int::in, int::out,
-    cord(format_component)::in, cord(format_component)::out) is det.
+    cord(format_piece)::in, cord(format_piece)::out) is det.
 
 find_mismatches_from_user(_Ctors, _CurNum,
         [], !NumMismatches, !PiecesCord).
@@ -1207,7 +1183,7 @@ find_matching_name_wrong_arities([Ctor | Ctors], FunctorName, FunctorArity,
 
 :- pred find_mismatches_from_builtin(builtin_type::in, int::in,
     list(bound_inst)::in, int::in, int::out,
-    cord(format_component)::in, cord(format_component)::out) is det.
+    cord(format_piece)::in, cord(format_piece)::out) is det.
 
 find_mismatches_from_builtin(_ExpectedBuiltinType, _CurNum,
         [], !NumMismatches, !PiecesCord).
@@ -1237,7 +1213,7 @@ find_mismatches_from_builtin(ExpectedBuiltinType, CurNum,
             true
         else if
             ConsId = cons(SymName, ConsArity, _),
-            string.count_codepoints(unqualify_name(SymName)) = 1,
+            string.count_code_points(unqualify_name(SymName)) = 1,
             ConsArity = 0
         then
             true
@@ -1259,7 +1235,7 @@ find_mismatches_from_builtin(ExpectedBuiltinType, CurNum,
 
 :- pred find_mismatches_from_tuple(int::in, int::in, list(bound_inst)::in,
     int::in, int::out,
-    cord(format_component)::in, cord(format_component)::out) is det.
+    cord(format_piece)::in, cord(format_piece)::out) is det.
 
 find_mismatches_from_tuple(_ExpectedArity, _CurNum,
         [], !NumMismatches, !PiecesCord).
@@ -1282,7 +1258,7 @@ find_mismatches_from_tuple(ExpectedArity, CurNum,
 
 :- pred record_arity_mismatch(int::in, string::in, int::in, set(int)::in,
     int::in, int::out,
-    cord(format_component)::in, cord(format_component)::out) is det.
+    cord(format_piece)::in, cord(format_piece)::out) is det.
 
 record_arity_mismatch(CurNum, FunctorName, ActualArity, ExpectedAritiesSet,
         !NumMismatches, !PiecesCord) :-
@@ -1300,7 +1276,7 @@ record_arity_mismatch(CurNum, FunctorName, ActualArity, ExpectedAritiesSet,
     !:PiecesCord = !.PiecesCord ++ cord.from_list(Pieces).
 
 :- pred record_mismatch(int::in, bound_inst::in, int::in, int::out,
-    cord(format_component)::in, cord(format_component)::out) is det.
+    cord(format_piece)::in, cord(format_piece)::out) is det.
 
 record_mismatch(CurNum, BoundInst, !NumMismatches, !PiecesCord) :-
     !:NumMismatches = !.NumMismatches + 1,
@@ -1316,7 +1292,7 @@ record_mismatch(CurNum, BoundInst, !NumMismatches, !PiecesCord) :-
 %---------------------------------------------------------------------------%
 
 :- pred create_mismatch_pieces(list(mismatch_from_type)::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 create_mismatch_pieces([], []).
 create_mismatch_pieces([FirstMismatch | LaterMismatches], Pieces) :-
@@ -1350,7 +1326,7 @@ take_while_same_num_mismatches(Num, [Mismatch | Mismatches], Taken) :-
     ).
 
 :- pred create_pieces_for_one_mismatch(mismatch_from_type::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 create_pieces_for_one_mismatch(Mismatch, Pieces) :-
     Mismatch = mismatch_from_type(_, TypeDefnOrBuiltin, BoundInstPieces),
@@ -1360,7 +1336,7 @@ create_pieces_for_one_mismatch(Mismatch, Pieces) :-
         ++ BoundInstPieces.
 
 :- pred create_pieces_for_all_mismatches(list(mismatch_from_type)::in, int::in,
-    list(format_component)::out) is det.
+    list(format_piece)::out) is det.
 
 create_pieces_for_all_mismatches([], _Cur, []).
 create_pieces_for_all_mismatches([Mismatch | Mismatches], Cur, Pieces) :-

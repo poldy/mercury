@@ -22,8 +22,8 @@
 %
 % The roles of the interface files (.int0, .int3, .int2 and .int) that
 % this module reads in are documented (to the extent that they are documented
-% anywhere) in the modules that creates them, which are comp_unit_interface.m
-% and write_module_interface_files.m.
+% anywhere) in the modules that create them, which are comp_unit_interface.m
+% and (to a limited extent) write_module_interface_files.m.
 %
 % XXX The file notes/interface_files.html contains (a start on) some
 % more comprehensive documentation.
@@ -39,11 +39,10 @@
 :- import_module libs.timestamp.
 :- import_module mdbcomp.
 :- import_module mdbcomp.sym_name.
-:- import_module parse_tree.module_imports.
+:- import_module parse_tree.module_baggage.
 :- import_module parse_tree.prog_item.
 :- import_module parse_tree.read_modules.
 
-:- import_module bool.
 :- import_module io.
 :- import_module list.
 :- import_module maybe.
@@ -51,8 +50,8 @@
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-    % grab_qual_imported_modules_augment(Globals, SourceFileName,
-    %   SourceFileModuleName, MaybeTimestamp, NestedSubModules,
+    % grab_qual_imported_modules_augment(ProgressStream, Globals,
+    %   SourceFileName, SourceFileModuleName, MaybeTimestamp, NestedSubModules,
     %   ParseTreeModuleSrc, AugCompUnit, !HaveReadModuleMaps, !IO):
     %
     % Given ParseTreeModuleSrc, one of the modules stored in SourceFileName,
@@ -81,13 +80,14 @@
     % generating target language code, but sometimes it may be e.g.
     % generating .opt and .trans_opt files.
     %
-:- pred grab_qual_imported_modules_augment(globals::in, file_name::in,
-    module_name::in, maybe(timestamp)::in, maybe_top_module::in,
-    parse_tree_module_src::in, module_baggage::out, aug_compilation_unit::out,
+:- pred grab_qual_imported_modules_augment(io.text_output_stream::in,
+    globals::in, file_name::in, module_name::in, maybe(timestamp)::in,
+    maybe_top_module::in, parse_tree_module_src::in,
+    module_baggage::out, aug_compilation_unit::out,
     have_read_module_maps::in, have_read_module_maps::out,
     io::di, io::uo) is det.
 
-    % grab_unqual_imported_modules_make_int(Globals,
+    % grab_unqual_imported_modules_make_int(ProgressStream, Globals,
     %   SourceFileName, SourceFileModuleName, ParseTreeModuleSrc,
     %   AugCompUnit, !HaveReadModuleMaps, !IO):
     %
@@ -100,31 +100,37 @@
     %
     % Used when generating .int0 files, and when generating .int/.int2 files.
     %
-:- pred grab_unqual_imported_modules_make_int(globals::in,
-    file_name::in, module_name::in,
+:- pred grab_unqual_imported_modules_make_int(io.text_output_stream::in,
+    globals::in, file_name::in, module_name::in,
     parse_tree_module_src::in, module_baggage::out, aug_make_int_unit::out,
     have_read_module_maps::in, have_read_module_maps::out,
     io::di, io::uo) is det.
 
-    % grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
+:- type maybe_opt_file_error
+    --->    no_opt_file_error
+    ;       opt_file_error.
+
+    % grab_plain_opt_and_int_for_opt_files(ProgressStream, Globals, FoundError,
     %   !Baggage, !AugCompUnit, !HaveReadModuleMaps, !IO):
     %
     % Add the contents of the .opt files of imported modules, as well as
     % the .int files needed to make sense of them, to !AugCompUnit.
     %
-:- pred grab_plain_opt_and_int_for_opt_files(globals::in, bool::out,
+:- pred grab_plain_opt_and_int_for_opt_files(io.text_output_stream::in,
+    io.text_output_stream::in, globals::in, maybe_opt_file_error::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     have_read_module_maps::in, have_read_module_maps::out,
     io::di, io::uo) is det.
 
-    % grab_trans_opt_files(Globals, Modules, FoundError,
+    % grab_trans_opt_files(ProgressStream, Globals, Modules, FoundError,
     %   !Baggage, !AugCompUnit, !HaveReadModuleMaps, !IO):
     %
     % Add the contents of the .trans_opt file of each module in Modules
     % to !AugCompUnit.
     %
-:- pred grab_trans_opt_files(globals::in, list(module_name)::in, bool::out,
+:- pred grab_trans_opt_files(io.text_output_stream::in, globals::in,
+    list(module_name)::in, maybe_opt_file_error::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     have_read_module_maps::in, have_read_module_maps::out,
@@ -138,7 +144,7 @@
 :- import_module libs.optimization_options.
 :- import_module libs.options.
 :- import_module mdbcomp.builtin_modules.
-:- import_module parse_tree.error_util.
+:- import_module parse_tree.error_spec.
 :- import_module parse_tree.file_kind.
 :- import_module parse_tree.file_names.
 :- import_module parse_tree.get_dependencies.
@@ -146,7 +152,9 @@
 :- import_module parse_tree.parse_error.
 :- import_module parse_tree.prog_data.
 :- import_module parse_tree.prog_data_foreign.
+:- import_module parse_tree.write_error_spec.
 
+:- import_module bool.
 :- import_module cord.
 :- import_module dir.
 :- import_module map.
@@ -154,12 +162,12 @@
 :- import_module require.
 :- import_module set.
 :- import_module string.
-:- import_module term.
+:- import_module term_context.
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
 
-grab_qual_imported_modules_augment(Globals, SourceFileName,
+grab_qual_imported_modules_augment(ProgressStream, Globals, SourceFileName,
         SourceFileModuleName, MaybeTimestamp, MaybeTopModule,
         ParseTreeModuleSrc0, !:Baggage, !:AugCompUnit,
         !HaveReadModuleMaps, !IO) :-
@@ -192,14 +200,13 @@ grab_qual_imported_modules_augment(Globals, SourceFileName,
             MaybeTimestampMap = no
         ),
 
-        Specs0 = [],
-        set.init(Errors0),
+        Errors0 = init_read_module_errors,
         init_aug_compilation_unit(ParseTreeModuleSrc, !:AugCompUnit),
         GrabbedFileMap0 =
             map.singleton(ModuleName, gf_src(ParseTreeModuleSrc)),
         !:Baggage = module_baggage(SourceFileName, dir.this_directory,
             SourceFileModuleName, MaybeTopModule, MaybeTimestampMap,
-            GrabbedFileMap0, Specs0, Errors0),
+            GrabbedFileMap0, Errors0),
 
         SrcMap0 = !.HaveReadModuleMaps ^ hrmm_module_src,
         % XXX Should be map.det_insert.
@@ -224,7 +231,7 @@ grab_qual_imported_modules_augment(Globals, SourceFileName,
         % XXX grab_unqual_imported_modules_make_int treats AncestorImported and
         % AncestorUsed slightly differently from !.IntImported and !.IntUsed.
         Ancestors = get_ancestors(ModuleName),
-        grab_module_int0_files_for_acu(Globals,
+        grab_module_int0_files_for_acu(ProgressStream, Globals,
             "ancestors", rwi0_section,
             Ancestors, IntImports0, IntImports, IntUses0, IntUses,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
@@ -234,24 +241,24 @@ grab_qual_imported_modules_augment(Globals, SourceFileName,
         set.init(!:ImpIndirectImported),
         set.init(!:IntImpIndirectImported),
         set.init(!:ImpImpIndirectImported),
-        grab_module_int1_files(Globals,
+        grab_module_int1_files(ProgressStream, Globals,
             "int_imported", rwi1_int_import,
             set.to_sorted_list(IntImports),
             !IntIndirectImported, !IntImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        grab_module_int1_files(Globals,
+        grab_module_int1_files(ProgressStream, Globals,
             "imp_imported", rwi1_imp_import,
             ImpImports,
             !ImpIndirectImported, !ImpImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
 
         % Get the .int files of the modules imported using `use_module'.
-        grab_module_int1_files(Globals,
+        grab_module_int1_files(ProgressStream, Globals,
             "int_used", rwi1_int_use,
             set.to_sorted_list(IntUses),
             !IntIndirectImported, !IntImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        grab_module_int1_files(Globals,
+        grab_module_int1_files(ProgressStream, Globals,
             "imp_used", rwi1_imp_use,
             ImpUses,
             !ImpIndirectImported, !ImpImpIndirectImported,
@@ -259,29 +266,29 @@ grab_qual_imported_modules_augment(Globals, SourceFileName,
 
         % Get the .int files of the modules imported using `use_module'
         % in the interface and `import_module' in the implementation.
-        grab_module_int1_files(Globals,
+        grab_module_int1_files(ProgressStream, Globals,
             "int_used_imp_imported", rwi1_int_use_imp_import,
             IntUseImpImports,
             !IntIndirectImported, !IntImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
 
         % Get the .int2 files of the modules imported in .int files.
-        grab_module_int2_files_transitively(Globals,
+        grab_module_int2_files_transitively(ProgressStream, Globals,
             "int_indirect_imported", rwi2_int_use,
             !.IntIndirectImported, !IntImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        grab_module_int2_files_transitively(Globals,
+        grab_module_int2_files_transitively(ProgressStream, Globals,
             "imp_indirect_imported", rwi2_imp_use,
             !.ImpIndirectImported, !ImpImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
 
         % Get the .int2 files of the modules indirectly imported
         % the implementation sections of .int/.int2 files.
-        grab_module_int2_files_and_impls_transitively(Globals,
+        grab_module_int2_files_and_impls_transitively(ProgressStream, Globals,
             "int_imp_indirect_imported", rwi2_abstract,
             !.IntImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        grab_module_int2_files_and_impls_transitively(Globals,
+        grab_module_int2_files_and_impls_transitively(ProgressStream, Globals,
             "imp_imp_indirect_imported", rwi2_abstract,
             !.ImpImpIndirectImported,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
@@ -298,11 +305,12 @@ grab_qual_imported_modules_augment(Globals, SourceFileName,
             % ancestors (if any). For representation information for these
             % types, it must read its *own* .int file, and the .int file(s)
             % of its ancestors.
-            process_module_int1(Globals, rwi1_type_repn,
-                ModuleName, _SelfParseTreeInt1,
+            process_module_int1(ProgressStream, Globals, rwi1_type_repn,
+                ModuleName, _IntUses, _ImpUses,
                 !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-            list.map_foldl4(process_module_int1(Globals, rwi1_type_repn),
-                get_ancestors(ModuleName), _AncestorParseTreeInt1s,
+            list.map2_foldl4(
+                process_module_int1(ProgressStream, Globals, rwi1_type_repn),
+                get_ancestors(ModuleName), _IntUsesList, _ImpUsesList,
                 !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO)
         ),
 
@@ -315,7 +323,7 @@ grab_qual_imported_modules_augment(Globals, SourceFileName,
 
 %---------------------------------------------------------------------------%
 
-grab_unqual_imported_modules_make_int(Globals, SourceFileName,
+grab_unqual_imported_modules_make_int(ProgressStream, Globals, SourceFileName,
         SourceFileModuleName, ParseTreeModuleSrc,
         !:Baggage, !:AugMakeIntUnit, !HaveReadModuleMaps, !IO) :-
     % The predicates grab_imported_modules_augment and
@@ -346,14 +354,13 @@ grab_unqual_imported_modules_make_int(Globals, SourceFileName,
         ),
         MaybeTimestampMap = no,
 
-        Specs0 = [],
-        set.init(Errors0),
+        Errors0 = init_read_module_errors,
         init_aug_make_int_unit(ParseTreeModuleSrc, !:AugMakeIntUnit),
         GrabbedFileMap0 =
             map.singleton(ModuleName, gf_src(ParseTreeModuleSrc)),
         !:Baggage = module_baggage(SourceFileName, dir.this_directory,
             SourceFileModuleName, MaybeTopModule, MaybeTimestampMap,
-            GrabbedFileMap0, Specs0, Errors0),
+            GrabbedFileMap0, Errors0),
 
         ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
         SrcMap0 = !.HaveReadModuleMaps ^ hrmm_module_src,
@@ -362,7 +369,7 @@ grab_unqual_imported_modules_make_int(Globals, SourceFileName,
 
         % Get the .int0 files of the ancestor modules.
         Ancestors = get_ancestors(ModuleName),
-        grab_module_int0_files_for_amiu(Globals,
+        grab_module_int0_files_for_amiu(ProgressStream, Globals,
             "unqual_ancestors",
             Ancestors, set.init, AncestorImports, set.init, AncestorUses,
             !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO),
@@ -370,34 +377,34 @@ grab_unqual_imported_modules_make_int(Globals, SourceFileName,
         % Get the .int3 files of the modules imported using `import_module'.
         set.init(!:IntIndirectImported),
         set.init(!:ImpIndirectImported),
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_parent_imported", rwi3_direct_ancestor_import,
             set.to_sorted_list(AncestorImports),
             !IntIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_int_imported", rwi3_direct_int_import,
             set.to_sorted_list(IntImports),
             !IntIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_imp_imported", rwi3_direct_imp_import,
             set.to_sorted_list(ImpImports),
             !ImpIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
 
         % Get the .int3 files of the modules imported using `use_module'.
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_parent_used", rwi3_direct_ancestor_use,
             set.to_sorted_list(AncestorUses),
             !IntIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_int_used", rwi3_direct_int_use,
             set.to_sorted_list(IntUses),
             !IntIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_imp_used", rwi3_direct_imp_use,
             set.to_sorted_list(ImpUses),
             !ImpIndirectImported, !HaveReadModuleMaps,
@@ -405,18 +412,18 @@ grab_unqual_imported_modules_make_int(Globals, SourceFileName,
 
         % Get the .int3 files of the modules imported using `use_module'
         % in the interface and `import_module' in the implementation.
-        grab_module_int3_files(Globals,
+        grab_module_int3_files(ProgressStream, Globals,
             "unqual_int_used_imp_imported", rwi3_direct_int_use_imp_import,
             set.to_sorted_list(IntUsesImpImports),
             !IntIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
 
         % Get the .int3 files of the modules imported in .int3 files.
-        grab_module_int3_files_transitively(Globals,
+        grab_module_int3_files_transitively(ProgressStream, Globals,
             "unqual_int_indirect_imported", rwi3_indirect_int_use,
             !.IntIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
-        grab_module_int3_files_transitively(Globals,
+        grab_module_int3_files_transitively(ProgressStream, Globals,
             "unqual_imp_indirect_imported", rwi3_indirect_imp_use,
             !.ImpIndirectImported, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO),
@@ -439,8 +446,8 @@ dump_modules(Stream, ModuleNames, !IO) :-
 
 %---------------------------------------------------------------------------%
 
-grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
-        !Baggage, !AugCompUnit, !HaveReadModuleMaps, !IO) :-
+grab_plain_opt_and_int_for_opt_files(ProgressStream, ErrorStream, Globals,
+        FoundError, !Baggage, !AugCompUnit, !HaveReadModuleMaps, !IO) :-
     % Read in the .opt files for imported and ancestor modules.
     ParseTreeModuleSrc = !.AugCompUnit ^ acu_module_src,
     ModuleName = ParseTreeModuleSrc ^ ptms_module_name,
@@ -457,10 +464,12 @@ grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
     % Do not add to the queue either the modules in the initial queue,
     % or the module being compiled.
     set.insert(ModuleName, OptModules, DontQueueOptModules),
-    read_plain_opt_files(Globals, VeryVerbose, ReadOptFilesTransitively,
+    read_plain_opt_files(ProgressStream, Globals, VeryVerbose,
+        ReadOptFilesTransitively,
         set.to_sorted_list(OptModules), DontQueueOptModules,
         cord.empty, ParseTreePlainOptsCord0, set.init, ExplicitDeps,
-        cord.empty, ImplicitNeedsCord, [], OptSpecs0, no, OptError0, !IO),
+        cord.empty, ImplicitNeedsCord, [], OptSpecs0,
+        no_opt_file_error, OptError0, !IO),
     ParseTreePlainOpts0 = cord.list(ParseTreePlainOptsCord0),
 
     % Get the :- pragma unused_args(...) declarations created when writing
@@ -479,19 +488,27 @@ grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
     globals.lookup_bool_option(Globals, structure_reuse_analysis,
         StructureReuse),
     ( if (UnusedArgs = opt_unused_args_intermod ; StructureReuse = yes) then
-        read_module_plain_opt(Globals, ModuleName, OwnFileName,
-            OwnParseTreePlainOpt0, OwnSpecs, OwnError, !IO),
-        % XXX We should store the whole parse_tree, with a note next to it
-        % saying "keep only these two kinds of pragmas".
-        keep_only_unused_and_reuse_pragmas_in_parse_tree_plain_opt(
-            UnusedArgs, StructureReuse,
-            OwnParseTreePlainOpt0, OwnParseTreePlainOpt),
-        ParseTreePlainOpts = [OwnParseTreePlainOpt | ParseTreePlainOpts0],
-        OptSpecs1 = OwnSpecs ++ OptSpecs0,
-        update_opt_error_status(Globals, warn_missing_opt_files, OwnFileName,
-            OwnSpecs, OwnError, OptSpecs1, OptSpecs2, OptError0, OptError),
-        pre_hlds_maybe_write_out_errors(VeryVerbose, Globals,
-            OptSpecs2, OptSpecs, !IO)
+        read_module_plain_opt(ProgressStream, Globals, ModuleName,
+            HaveReadOwnPlainOpt0, !IO),
+        (
+            HaveReadOwnPlainOpt0 = have_read_module(_, _,
+                OwnParseTreePlainOpt0, OwnOptModuleErrors),
+            % XXX We should store the whole parse_tree, with a note next to it
+            % saying "keep only these two kinds of pragmas".
+            keep_only_unused_and_reuse_pragmas_in_parse_tree_plain_opt(
+                UnusedArgs, StructureReuse,
+                OwnParseTreePlainOpt0, OwnParseTreePlainOpt),
+            ParseTreePlainOpts = [OwnParseTreePlainOpt | ParseTreePlainOpts0],
+            update_opt_error_status_on_success(OwnOptModuleErrors,
+                OptSpecs0, OptSpecs1, OptError0, OptError)
+        ;
+            HaveReadOwnPlainOpt0 = have_not_read_module(OwnOptFileName, _),
+            ParseTreePlainOpts = ParseTreePlainOpts0,
+            update_opt_error_status_on_failure(Globals, warn_missing_opt_files,
+                OwnOptFileName, OptSpecs0, OptSpecs1, OptError0, OptError)
+        ),
+        pre_hlds_maybe_write_out_errors(ErrorStream, VeryVerbose, Globals,
+            OptSpecs1, OptSpecs, !IO)
     else
         ParseTreePlainOpts = ParseTreePlainOpts0,
         OptSpecs = OptSpecs0,
@@ -515,7 +532,7 @@ grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
     OptOnlyModuleAncestors =
         set.difference(OptModuleAncestors, OldModuleAndAncestors),
 
-    grab_module_int0_files_for_acu(Globals,
+    grab_module_int0_files_for_acu(ProgressStream, Globals,
         "opt_int0s", rwi0_opt,
         set.to_sorted_list(OptOnlyModuleAncestors),
         set.init, OptAncestorImports, set.init, OptAncestorUses,
@@ -528,12 +545,12 @@ grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
         OptAncestorImports, OptAncestorUses]),
 
     % Read in the .int, and .int2 files needed by the .opt files.
-    grab_module_int1_files(Globals,
+    grab_module_int1_files(ProgressStream, Globals,
         "opt_new_deps", rwi1_opt,
         set.to_sorted_list(NewDeps),
         set.init, NewIndirectDeps, set.init, NewImplIndirectDeps,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-    grab_module_int2_files_and_impls_transitively(Globals,
+    grab_module_int2_files_and_impls_transitively(ProgressStream, Globals,
         "opt_new_indirect_deps", rwi2_opt,
         set.union(NewIndirectDeps, NewImplIndirectDeps),
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
@@ -543,34 +560,36 @@ grab_plain_opt_and_int_for_opt_files(Globals, FoundError,
     % !AugCompUnit, and let our caller figure out what to do with them.
     ModuleErrors = !.Baggage ^ mb_errors,
     ( if
-        ( set.is_non_empty(ModuleErrors)
-        ; OptError = yes
+        ( set.is_non_empty(ModuleErrors ^ rm_fatal_errors)
+        ; set.is_non_empty(ModuleErrors ^ rm_nonfatal_errors)
+        ; OptError = opt_file_error
         )
     then
-        FoundError = yes
+        FoundError = opt_file_error
     else
-        FoundError = no
+        FoundError = no_opt_file_error
     ).
 
 %---------------------------------------------------------------------------%
 
-grab_trans_opt_files(Globals, TransOptModuleNames, FoundError,
+grab_trans_opt_files(ProgressStream, Globals, TransOptModuleNames, FoundError,
         !Baggage, !AugCompUnit, !HaveReadModuleMaps, !IO) :-
     globals.lookup_bool_option(Globals, verbose, Verbose),
-    maybe_write_string(Verbose, "% Reading .trans_opt files..\n", !IO),
-    maybe_flush_output(Verbose, !IO),
+    maybe_write_string(ProgressStream, Verbose,
+        "% Reading .trans_opt files..\n", !IO),
+    maybe_flush_output(ProgressStream, Verbose, !IO),
 
     globals.lookup_bool_option(Globals, very_verbose, VeryVerbose),
-    read_trans_opt_files(Globals, VeryVerbose, TransOptModuleNames,
-        cord.init, ParseTreeTransOptsCord,
-        [], TransOptSpecs, no, FoundError, !IO),
+    read_trans_opt_files(ProgressStream, Globals, VeryVerbose,
+        TransOptModuleNames, cord.init, ParseTreeTransOptsCord,
+        [], TransOptSpecs, no_opt_file_error, FoundError, !IO),
     list.foldl(aug_compilation_unit_add_trans_opt,
         cord.list(ParseTreeTransOptsCord), !AugCompUnit),
     module_baggage_add_specs(TransOptSpecs, !Baggage),
     % XXX why ignore any existing errors?
-    !Baggage ^ mb_errors := set.init,
+    !Baggage ^ mb_errors := init_read_module_errors,
 
-    maybe_write_string(Verbose, "% Done.\n", !IO).
+    maybe_write_string(ProgressStream, Verbose, "% Done.\n", !IO).
 
 %---------------------------------------------------------------------------%
 %---------------------------------------------------------------------------%
@@ -582,68 +601,71 @@ grab_trans_opt_files(Globals, TransOptModuleNames, FoundError,
 
 %---------------------------------------------------------------------------%
 
-:- pred grab_module_int2_files_and_impls_transitively(globals::in,
+:- pred grab_module_int2_files_and_impls_transitively(
+    io.text_output_stream::in, globals::in,
     string::in, read_why_int2::in, set(module_name)::in,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-grab_module_int2_files_and_impls_transitively(Globals, Why, ReadWhy2,
-        Modules, !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
-    grab_module_int2_files_transitively(Globals, Why, ReadWhy2,
-        Modules, set.init, ImpIndirectImports,
+grab_module_int2_files_and_impls_transitively(ProgressStream, Globals,
+        Why, ReadWhy2, Modules, !HaveReadModuleMaps,
+        !Baggage, !AugCompUnit, !IO) :-
+    grab_module_int2_files_transitively(ProgressStream, Globals,
+        Why, ReadWhy2, Modules, set.init, ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
     ( if set.is_empty(ImpIndirectImports) then
         true
     else
-        grab_module_int2_files_and_impls_transitively(Globals, Why, ReadWhy2,
-            ImpIndirectImports, !HaveReadModuleMaps,
+        grab_module_int2_files_and_impls_transitively(ProgressStream, Globals,
+            Why, ReadWhy2, ImpIndirectImports, !HaveReadModuleMaps,
             !Baggage, !AugCompUnit, !IO)
     ).
 
-:- pred grab_module_int2_files_transitively(globals::in, string::in,
-    read_why_int2::in, set(module_name)::in,
+:- pred grab_module_int2_files_transitively(io.text_output_stream::in,
+    globals::in, string::in, read_why_int2::in, set(module_name)::in,
     set(module_name)::in, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-grab_module_int2_files_transitively(Globals, Why, ReadWhy2,
-        Modules, !ImpIndirectImports,
-        !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
-    grab_module_int2_files(Globals, Why, ReadWhy2, set.to_sorted_list(Modules),
+grab_module_int2_files_transitively(ProgressStream, Globals, Why, ReadWhy2,
+        Modules, !ImpIndirectImports, !HaveReadModuleMaps,
+        !Baggage, !AugCompUnit, !IO) :-
+    grab_module_int2_files(ProgressStream, Globals, Why, ReadWhy2,
+        set.to_sorted_list(Modules),
         set.init, IndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
     ( if set.is_empty(IndirectImports) then
         true
     else
-        grab_module_int2_files_transitively(Globals, Why, ReadWhy2,
-            IndirectImports, !ImpIndirectImports,
+        grab_module_int2_files_transitively(ProgressStream, Globals,
+            Why, ReadWhy2, IndirectImports, !ImpIndirectImports,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO)
     ).
 
-:- pred grab_module_int3_files_transitively(globals::in, string::in,
-    read_why_int3::in, set(module_name)::in,
+:- pred grab_module_int3_files_transitively(io.text_output_stream::in,
+    globals::in, string::in, read_why_int3::in, set(module_name)::in,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_make_int_unit::in, aug_make_int_unit::out, io::di, io::uo) is det.
 
-grab_module_int3_files_transitively(Globals, Why, ReadWhy3,
+grab_module_int3_files_transitively(ProgressStream, Globals, Why, ReadWhy3,
         Modules, !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO) :-
-    grab_module_int3_files(Globals, Why, ReadWhy3, set.to_sorted_list(Modules),
-        set.init, IndirectImports,
+    grab_module_int3_files(ProgressStream, Globals, Why, ReadWhy3,
+        set.to_sorted_list(Modules), set.init, IndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO),
     ( if set.is_empty(IndirectImports) then
         true
     else
-        grab_module_int3_files_transitively(Globals, Why, ReadWhy3,
-            IndirectImports, !HaveReadModuleMaps,
+        grab_module_int3_files_transitively(ProgressStream, Globals,
+            Why, ReadWhy3, IndirectImports, !HaveReadModuleMaps,
             !Baggage, !AugMakeIntUnit, !IO)
     ).
 
-:- pred grab_module_int0_files_for_acu(globals::in,
+:- pred grab_module_int0_files_for_acu(io.text_output_stream::in, globals::in,
     string::in, read_why_int0::in, list(module_name)::in,
     set(module_name)::in, set(module_name)::out,
     set(module_name)::in, set(module_name)::out,
@@ -652,22 +674,18 @@ grab_module_int3_files_transitively(Globals, Why, ReadWhy3,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-grab_module_int0_files_for_acu(_Globals, _Why, _ReadWhy0, [],
+grab_module_int0_files_for_acu(_ProgressStream, _Globals, _Why, _ReadWhy0, [],
         !DirectImports, !DirectUses,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO).
-grab_module_int0_files_for_acu(Globals, Why, ReadWhy0,
+grab_module_int0_files_for_acu(ProgressStream, Globals, Why, ReadWhy0,
         [ModuleName | ModuleNames], !DirectImports, !DirectUses,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
     ( if should_read_interface(!.Baggage, ModuleName, ifk_int0) then
         maybe_log_augment_decision(Why, ifk_int0, ReadWhy0, ModuleName,
             decided_to_read, !IO),
-        process_module_int0_for_acu(Globals, ReadWhy0,
-            ModuleName, ParseTreeInt0,
+        process_module_int0_for_acu(ProgressStream, Globals, ReadWhy0,
+            ModuleName, IntImports, ImpImports, IntUses, ImpUses,
             !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_int_imports, IntImports),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_imp_imports, ImpImports),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_int_uses, IntUses),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_imp_uses, ImpUses),
         set.union(IntImports, !DirectImports),
         set.union(ImpImports, !DirectImports),
         set.union(IntUses, !DirectUses),
@@ -676,11 +694,11 @@ grab_module_int0_files_for_acu(Globals, Why, ReadWhy0,
         maybe_log_augment_decision(Why, ifk_int0, ReadWhy0, ModuleName,
             decided_not_to_read, !IO)
     ),
-    grab_module_int0_files_for_acu(Globals, Why, ReadWhy0, ModuleNames,
-        !DirectImports, !DirectUses,
+    grab_module_int0_files_for_acu(ProgressStream, Globals, Why, ReadWhy0,
+        ModuleNames, !DirectImports, !DirectUses,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO).
 
-:- pred grab_module_int0_files_for_amiu(globals::in,
+:- pred grab_module_int0_files_for_amiu(io.text_output_stream::in, globals::in,
     string::in, list(module_name)::in,
     set(module_name)::in, set(module_name)::out,
     set(module_name)::in, set(module_name)::out,
@@ -689,22 +707,19 @@ grab_module_int0_files_for_acu(Globals, Why, ReadWhy0,
     aug_make_int_unit::in, aug_make_int_unit::out,
     io::di, io::uo) is det.
 
-grab_module_int0_files_for_amiu(_Globals, _Why, [],
+grab_module_int0_files_for_amiu(_ProgressStream, _Globals, _Why, [],
         !DirectImports, !DirectUses,
         !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO).
-grab_module_int0_files_for_amiu(Globals, Why,
+grab_module_int0_files_for_amiu(ProgressStream, Globals, Why,
         [ModuleName | ModuleNames], !DirectImports, !DirectUses,
         !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO) :-
     ReadWhy0 = rwi0_section,
     ( if should_read_interface(!.Baggage, ModuleName, ifk_int0) then
         maybe_log_augment_decision(Why, ifk_int0, ReadWhy0, ModuleName,
             decided_to_read, !IO),
-        process_module_int0_for_amiu(Globals, ModuleName, ParseTreeInt0,
+        process_module_int0_for_amiu(ProgressStream, Globals, ModuleName,
+            IntImports, ImpImports, IntUses, ImpUses,
             !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_int_imports, IntImports),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_imp_imports, ImpImports),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_int_uses, IntUses),
-        map.keys_as_set(ParseTreeInt0 ^ pti0_imp_uses, ImpUses),
         set.union(IntImports, !DirectImports),
         set.union(ImpImports, !DirectImports),
         set.union(IntUses, !DirectUses),
@@ -713,12 +728,12 @@ grab_module_int0_files_for_amiu(Globals, Why,
         maybe_log_augment_decision(Why, ifk_int0, ReadWhy0, ModuleName,
             decided_not_to_read, !IO)
     ),
-    grab_module_int0_files_for_amiu(Globals, Why, ModuleNames,
+    grab_module_int0_files_for_amiu(ProgressStream, Globals, Why, ModuleNames,
         !DirectImports, !DirectUses,
         !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO).
 
-:- pred grab_module_int1_files(globals::in, string::in, read_why_int1::in,
-    list(module_name)::in,
+:- pred grab_module_int1_files(io.text_output_stream::in, globals::in,
+    string::in, read_why_int1::in, list(module_name)::in,
     set(module_name)::in, set(module_name)::out,
     set(module_name)::in, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
@@ -726,31 +741,30 @@ grab_module_int0_files_for_amiu(Globals, Why,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-grab_module_int1_files(_Globals, _Why, _ReadWhy1, [],
-        !IntIndirectImports, !ImpIndirectImports,
+grab_module_int1_files(_ProgressStream, _Globals, _Why, _ReadWhy1,
+        [], !IntIndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO).
-grab_module_int1_files(Globals, Why, ReadWhy1, [ModuleName | ModuleNames],
-        !IntIndirectImports, !ImpIndirectImports,
+grab_module_int1_files(ProgressStream, Globals, Why, ReadWhy1,
+        [ModuleName | ModuleNames], !IntIndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
     ( if should_read_interface(!.Baggage, ModuleName, ifk_int1) then
         maybe_log_augment_decision(Why, ifk_int1, ReadWhy1, ModuleName,
             decided_to_read, !IO),
-        process_module_int1(Globals, ReadWhy1, ModuleName, ParseTreeInt1,
-            !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        map.keys_as_set(ParseTreeInt1 ^ pti1_int_uses, IntUses),
-        map.keys_as_set(ParseTreeInt1 ^ pti1_imp_uses, ImpUses),
+        process_module_int1(ProgressStream, Globals, ReadWhy1, ModuleName,
+            IntUses, ImpUses, !HaveReadModuleMaps,
+            !Baggage, !AugCompUnit, !IO),
         set.union(IntUses, !IntIndirectImports),
         set.union(ImpUses, !ImpIndirectImports)
     else
         maybe_log_augment_decision(Why, ifk_int1, ReadWhy1, ModuleName,
             decided_not_to_read, !IO)
     ),
-    grab_module_int1_files(Globals, Why, ReadWhy1, ModuleNames,
-        !IntIndirectImports, !ImpIndirectImports,
+    grab_module_int1_files(ProgressStream, Globals, Why, ReadWhy1,
+        ModuleNames, !IntIndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO).
 
-:- pred grab_module_int2_files(globals::in, string::in, read_why_int2::in,
-    list(module_name)::in,
+:- pred grab_module_int2_files(io.text_output_stream::in, globals::in,
+    string::in, read_why_int2::in, list(module_name)::in,
     set(module_name)::in, set(module_name)::out,
     set(module_name)::in, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
@@ -758,53 +772,51 @@ grab_module_int1_files(Globals, Why, ReadWhy1, [ModuleName | ModuleNames],
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-grab_module_int2_files(_Globals, _Why, _ReadWhy2, [],
-        !IntIndirectImports, !ImpIndirectImports,
+grab_module_int2_files(_ProgressStream, _Globals, _Why, _ReadWhy2,
+        [], !IntIndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO).
-grab_module_int2_files(Globals, Why, ReadWhy2, [ModuleName | ModuleNames],
-        !IntIndirectImports, !ImpIndirectImports,
+grab_module_int2_files(ProgressStream, Globals, Why, ReadWhy2,
+        [ModuleName | ModuleNames], !IntIndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
     ( if should_read_interface(!.Baggage, ModuleName, ifk_int2) then
         maybe_log_augment_decision(Why, ifk_int2, ReadWhy2, ModuleName,
             decided_to_read, !IO),
-        process_module_int2(Globals, ReadWhy2, ModuleName, ParseTreeInt2,
-            !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
-        map.keys_as_set(ParseTreeInt2 ^ pti2_int_uses, IntUses),
+        process_module_int2(ProgressStream, Globals, ReadWhy2, ModuleName,
+            IntUses, !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO),
         set.union(IntUses, !IntIndirectImports)
     else
         maybe_log_augment_decision(Why, ifk_int2, ReadWhy2, ModuleName,
             decided_not_to_read, !IO)
     ),
-    grab_module_int2_files(Globals, Why, ReadWhy2, ModuleNames,
-        !IntIndirectImports, !ImpIndirectImports,
+    grab_module_int2_files(ProgressStream, Globals, Why, ReadWhy2,
+        ModuleNames, !IntIndirectImports, !ImpIndirectImports,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO).
 
-:- pred grab_module_int3_files(globals::in, string::in, read_why_int3::in,
-    list(module_name)::in,
+:- pred grab_module_int3_files(io.text_output_stream::in, globals::in,
+    string::in, read_why_int3::in, list(module_name)::in,
     set(module_name)::in, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_make_int_unit::in, aug_make_int_unit::out, io::di, io::uo) is det.
 
-grab_module_int3_files(_Globals, _Why, _ReadWhy3, [],
-        !IntIndirectImports, !HaveReadModuleMaps,
+grab_module_int3_files(_ProgressStream, _Globals, _Why, _ReadWhy3,
+        [], !IntIndirectImports, !HaveReadModuleMaps,
         !Baggage, !AugMakeIntUnit, !IO).
-grab_module_int3_files(Globals, Why, ReadWhy3, [ModuleName | ModuleNames],
-        !IntIndirectImports, !HaveReadModuleMaps,
+grab_module_int3_files(ProgressStream, Globals, Why, ReadWhy3,
+        [ModuleName | ModuleNames], !IntIndirectImports, !HaveReadModuleMaps,
         !Baggage, !AugMakeIntUnit, !IO) :-
     ( if should_read_interface(!.Baggage, ModuleName, ifk_int3) then
         maybe_log_augment_decision(Why, ifk_int3, ReadWhy3, ModuleName,
             decided_to_read, !IO),
-        process_module_int3(Globals, ReadWhy3, ModuleName, ParseTreeInt3,
-            !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO),
-        map.keys_as_set(ParseTreeInt3 ^ pti3_int_imports, Imports),
-        set.union(Imports, !IntIndirectImports)
+        process_module_int3(ProgressStream, Globals, ReadWhy3, ModuleName,
+            IntImports, !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO),
+        set.union(IntImports, !IntIndirectImports)
     else
         maybe_log_augment_decision(Why, ifk_int3, ReadWhy3, ModuleName,
             decided_not_to_read, !IO)
     ),
-    grab_module_int3_files(Globals, Why, ReadWhy3, ModuleNames,
-        !IntIndirectImports, !HaveReadModuleMaps,
+    grab_module_int3_files(ProgressStream, Globals, Why, ReadWhy3,
+        ModuleNames, !IntIndirectImports, !HaveReadModuleMaps,
         !Baggage, !AugMakeIntUnit, !IO).
 
 :- pred should_read_interface(module_baggage::in, module_name::in,
@@ -835,203 +847,265 @@ grabbed_file_to_file_kind(GrabbedWhy) = FileKind :-
 
 %---------------------------------------------------------------------------%
 
-:- pred process_module_int0_for_acu(globals::in, read_why_int0::in,
-    module_name::in, parse_tree_int0::out,
+:- pred process_module_int0_for_acu(io.text_output_stream::in, globals::in,
+    read_why_int0::in, module_name::in,
+    set(module_name)::out, set(module_name)::out,
+    set(module_name)::out, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-process_module_int0_for_acu(Globals, ReadWhy0, ModuleName, ParseTreeInt0,
+process_module_int0_for_acu(ProgressStream, Globals, ReadWhy0, ModuleName,
+        IntImports, ImpImports, IntUses, ImpUses,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
     do_we_need_timestamps(!.Baggage, ReturnTimestamp),
-    maybe_read_module_int0(Globals, do_search, ModuleName, _FileName,
-        ReturnTimestamp, MaybeTimestamp, ParseTreeInt0, Specs, Errors,
-        !HaveReadModuleMaps, !IO),
-    GrabbedFile = gf_int0(ParseTreeInt0, ReadWhy0),
-    module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+    maybe_read_module_int0(ProgressStream, Globals, do_search, ModuleName,
+        ReturnTimestamp, HaveReadInt0, !HaveReadModuleMaps, !IO),
     (
-        ReadWhy0 = rwi0_section,
-        AncestorIntSpec = ancestor_int0(ParseTreeInt0, ReadWhy0),
-        aug_compilation_unit_add_ancestor_int_spec(AncestorIntSpec,
-            !AugCompUnit)
+        HaveReadInt0 = have_read_module(_FileName, MaybeTimestamp,
+            ParseTreeInt0, Errors),
+        GrabbedFile = gf_int0(ParseTreeInt0, ReadWhy0),
+        module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+        (
+            ReadWhy0 = rwi0_section,
+            AncestorIntSpec = ancestor_int0(ParseTreeInt0, ReadWhy0),
+            aug_compilation_unit_add_ancestor_int_spec(AncestorIntSpec,
+                !AugCompUnit)
+        ;
+            ReadWhy0 = rwi0_opt,
+            IntForOptSpec = for_opt_int0(ParseTreeInt0, ReadWhy0),
+            aug_compilation_unit_add_int_for_opt_spec(IntForOptSpec,
+                !AugCompUnit)
+        ),
+        maybe_record_interface_timestamp(ModuleName, ifk_int0,
+            recomp_avail_int_import, MaybeTimestamp, !Baggage),
+        map.foldl4(get_imports_uses, ParseTreeInt0 ^ pti0_import_use_map,
+            set.init, IntImports, set.init, ImpImports,
+            set.init, IntUses, set.init, ImpUses),
+        aug_compilation_unit_maybe_add_module_version_numbers(ModuleName,
+            ParseTreeInt0 ^ pti0_maybe_version_numbers, !AugCompUnit)
     ;
-        ReadWhy0 = rwi0_opt,
-        IntForOptSpec = for_opt_int0(ParseTreeInt0, ReadWhy0),
-        aug_compilation_unit_add_int_for_opt_spec(IntForOptSpec, !AugCompUnit)
+        HaveReadInt0 = have_not_read_module(_FileName, Errors),
+        set.init(IntImports),
+        set.init(ImpImports),
+        set.init(IntUses),
+        set.init(ImpUses)
     ),
-    maybe_record_interface_timestamp(ModuleName, ifk_int0,
-        recomp_avail_int_import, MaybeTimestamp, !Baggage),
-    module_baggage_add_specs_errors(Specs, Errors, !Baggage),
-    aug_compilation_unit_maybe_add_module_version_numbers(ModuleName,
-        ParseTreeInt0 ^ pti0_maybe_version_numbers, !AugCompUnit).
+    module_baggage_add_errors(Errors, !Baggage).
 
-:- pred process_module_int0_for_amiu(globals::in,
-    module_name::in, parse_tree_int0::out,
+:- pred process_module_int0_for_amiu(io.text_output_stream::in,
+    globals::in, module_name::in,
+    set(module_name)::out, set(module_name)::out,
+    set(module_name)::out, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_make_int_unit::in, aug_make_int_unit::out,
     io::di, io::uo) is det.
 
-process_module_int0_for_amiu(Globals, ModuleName, ParseTreeInt0,
+process_module_int0_for_amiu(ProgressStream, Globals, ModuleName,
+        IntImports, ImpImports, IntUses, ImpUses,
         !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO) :-
     do_we_need_timestamps(!.Baggage, ReturnTimestamp),
-    maybe_read_module_int0(Globals, do_search, ModuleName, _FileName,
-        ReturnTimestamp, MaybeTimestamp, ParseTreeInt0, Specs, Errors,
-        !HaveReadModuleMaps, !IO),
-    GrabbedFile = gf_int0(ParseTreeInt0, rwi0_section),
-    module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
-    aug_make_int_unit_add_ancestor_int(ParseTreeInt0, !AugMakeIntUnit),
-    maybe_record_interface_timestamp(ModuleName, ifk_int0,
-        recomp_avail_int_import, MaybeTimestamp, !Baggage),
-    module_baggage_add_specs_errors(Specs, Errors, !Baggage),
-    aug_make_int_unit_maybe_add_module_version_numbers(ModuleName,
-        ParseTreeInt0 ^ pti0_maybe_version_numbers, !AugMakeIntUnit).
+    maybe_read_module_int0(ProgressStream, Globals, do_search, ModuleName,
+        ReturnTimestamp, HaveReadInt0, !HaveReadModuleMaps, !IO),
+    (
+        HaveReadInt0 = have_read_module(_FileName, MaybeTimestamp,
+            ParseTreeInt0, Errors),
+        GrabbedFile = gf_int0(ParseTreeInt0, rwi0_section),
+        module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+        aug_make_int_unit_add_ancestor_int(ParseTreeInt0, !AugMakeIntUnit),
+        maybe_record_interface_timestamp(ModuleName, ifk_int0,
+            recomp_avail_int_import, MaybeTimestamp, !Baggage),
+        map.foldl4(get_imports_uses, ParseTreeInt0 ^ pti0_import_use_map,
+            set.init, IntImports, set.init, ImpImports,
+            set.init, IntUses, set.init, ImpUses),
+        aug_make_int_unit_maybe_add_module_version_numbers(ModuleName,
+            ParseTreeInt0 ^ pti0_maybe_version_numbers, !AugMakeIntUnit)
+    ;
+        HaveReadInt0 = have_not_read_module(_FileName, Errors),
+        set.init(IntImports),
+        set.init(ImpImports),
+        set.init(IntUses),
+        set.init(ImpUses)
+    ),
+    module_baggage_add_errors(Errors, !Baggage).
 
-:- pred process_module_int1(globals::in, read_why_int1::in, module_name::in,
-    parse_tree_int1::out,
+:- pred process_module_int1(io.text_output_stream::in, globals::in,
+    read_why_int1::in, module_name::in,
+    set(module_name)::out, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-process_module_int1(Globals, ReadWhy1, ModuleName, ParseTreeInt1,
-        !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
+process_module_int1(ProgressStream, Globals, ReadWhy1, ModuleName,
+        IntUses, ImpUses, !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
     do_we_need_timestamps(!.Baggage, ReturnTimestamp),
-    maybe_read_module_int1(Globals, do_search, ModuleName, _FileName,
-        ReturnTimestamp, MaybeTimestamp, ParseTreeInt1, Specs, Errors,
-        !HaveReadModuleMaps, !IO),
-    GrabbedFile = gf_int1(ParseTreeInt1, ReadWhy1),
-    module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+    maybe_read_module_int1(ProgressStream, Globals, do_search, ModuleName,
+        ReturnTimestamp, HaveReadInt1, !HaveReadModuleMaps, !IO),
     (
+        HaveReadInt1 = have_read_module(_FileName, MaybeTimestamp,
+            ParseTreeInt1, Errors),
+        GrabbedFile = gf_int1(ParseTreeInt1, ReadWhy1),
+        module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
         (
-            ReadWhy1 = rwi1_int_import,
-            RecompAvail = recomp_avail_int_import
+            (
+                ReadWhy1 = rwi1_int_import,
+                RecompAvail = recomp_avail_int_import
+            ;
+                ReadWhy1 = rwi1_int_use,
+                RecompAvail = recomp_avail_int_use
+            ;
+                ReadWhy1 = rwi1_imp_import,
+                RecompAvail = recomp_avail_imp_import
+            ;
+                ReadWhy1 = rwi1_imp_use,
+                RecompAvail = recomp_avail_imp_use
+            ;
+                ReadWhy1 = rwi1_int_use_imp_import,
+                RecompAvail = recomp_avail_int_use_imp_import
+            ),
+            DirectIntSpec = direct_int1(ParseTreeInt1, ReadWhy1),
+            aug_compilation_unit_add_direct_int1_spec(DirectIntSpec,
+                !AugCompUnit),
+            module_baggage_add_errors(Errors, !Baggage)
         ;
-            ReadWhy1 = rwi1_int_use,
-            RecompAvail = recomp_avail_int_use
+            ReadWhy1 = rwi1_opt,
+            RecompAvail = recomp_avail_imp_use,
+            IntForOptSpec = for_opt_int1(ParseTreeInt1, ReadWhy1),
+            aug_compilation_unit_add_int_for_opt_spec(IntForOptSpec,
+                !AugCompUnit),
+            module_baggage_add_errors(Errors, !Baggage)
         ;
-            ReadWhy1 = rwi1_imp_import,
-            RecompAvail = recomp_avail_imp_import
-        ;
-            ReadWhy1 = rwi1_imp_use,
-            RecompAvail = recomp_avail_imp_use
-        ;
-            ReadWhy1 = rwi1_int_use_imp_import,
-            RecompAvail = recomp_avail_int_use_imp_import
+            ReadWhy1 = rwi1_type_repn,
+            RecompAvail = recomp_avail_int_import,
+            TypeRepnSpec = type_repn_spec_int1(ParseTreeInt1),
+            aug_compilation_unit_add_type_repn_spec(TypeRepnSpec, !AugCompUnit)
+            % Do not add Errors to !AugCompUnit. Any error messages in there
+            % will be reported when the source file of the affected module
+            % is compiled to target code.
         ),
-        DirectIntSpec = direct_int1(ParseTreeInt1, ReadWhy1),
-        aug_compilation_unit_add_direct_int1_spec(DirectIntSpec, !AugCompUnit),
-        module_baggage_add_specs_errors(Specs, Errors, !Baggage)
+        map.foldl2(get_uses, ParseTreeInt1 ^ pti1_use_map,
+            set.init, IntUses, set.init, ImpUses),
+        maybe_record_interface_timestamp(ModuleName, ifk_int1, RecompAvail,
+            MaybeTimestamp, !Baggage),
+        aug_compilation_unit_maybe_add_module_version_numbers(ModuleName,
+            ParseTreeInt1 ^ pti1_maybe_version_numbers, !AugCompUnit)
     ;
-        ReadWhy1 = rwi1_opt,
-        RecompAvail = recomp_avail_imp_use,
-        IntForOptSpec = for_opt_int1(ParseTreeInt1, ReadWhy1),
-        aug_compilation_unit_add_int_for_opt_spec(IntForOptSpec, !AugCompUnit),
-        module_baggage_add_specs_errors(Specs, Errors, !Baggage)
-    ;
-        ReadWhy1 = rwi1_type_repn,
-        RecompAvail = recomp_avail_int_import,
-        TypeRepnSpec = type_repn_spec_int1(ParseTreeInt1),
-        aug_compilation_unit_add_type_repn_spec(TypeRepnSpec, !AugCompUnit)
-        % Do not add Specs to !AugCompUnit. Any error messages in there
-        % will be reported when the source file of the affected module
-        % is compiled to target code.
-    ),
-    maybe_record_interface_timestamp(ModuleName, ifk_int1, RecompAvail,
-        MaybeTimestamp, !Baggage),
-    aug_compilation_unit_maybe_add_module_version_numbers(ModuleName,
-        ParseTreeInt1 ^ pti1_maybe_version_numbers, !AugCompUnit).
+        HaveReadInt1 = have_not_read_module(_FileName, Errors),
+        set.init(IntUses),
+        set.init(ImpUses),
+        module_baggage_add_errors(Errors, !Baggage)
+    ).
 
-:- pred process_module_int2(globals::in, read_why_int2::in, module_name::in,
-    parse_tree_int2::out,
+:- pred process_module_int2(io.text_output_stream::in, globals::in,
+    read_why_int2::in, module_name::in, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
     aug_compilation_unit::in, aug_compilation_unit::out,
     io::di, io::uo) is det.
 
-process_module_int2(Globals, ReadWhy2, ModuleName, ParseTreeInt2,
+process_module_int2(ProgressStream, Globals, ReadWhy2, ModuleName, IntUses,
         !HaveReadModuleMaps, !Baggage, !AugCompUnit, !IO) :-
     do_we_need_timestamps(!.Baggage, ReturnTimestamp),
-    maybe_read_module_int2(Globals, do_search, ModuleName, _FileName,
-        ReturnTimestamp, MaybeTimestamp, ParseTreeInt2, Specs, Errors,
-        !HaveReadModuleMaps, !IO),
-    GrabbedFile = gf_int2(ParseTreeInt2, ReadWhy2),
-    module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+    maybe_read_module_int2(ProgressStream, Globals, do_search, ModuleName,
+        ReturnTimestamp, HaveReadInt2, !HaveReadModuleMaps, !IO),
     (
-        ( ReadWhy2 = rwi2_int_use
-        ; ReadWhy2 = rwi2_imp_use
-        ; ReadWhy2 = rwi2_abstract
+        HaveReadInt2 = have_read_module(_FileName, MaybeTimestamp,
+            ParseTreeInt2, Errors),
+        GrabbedFile = gf_int2(ParseTreeInt2, ReadWhy2),
+        module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+        (
+            ( ReadWhy2 = rwi2_int_use
+            ; ReadWhy2 = rwi2_imp_use
+            ; ReadWhy2 = rwi2_abstract
+            ),
+            IndirectIntSpec = indirect_int2(ParseTreeInt2, ReadWhy2),
+            aug_compilation_unit_add_indirect_int2_spec(IndirectIntSpec,
+                !AugCompUnit)
+        ;
+            ReadWhy2 = rwi2_opt,
+            IntForOptSpec = for_opt_int2(ParseTreeInt2, ReadWhy2),
+            aug_compilation_unit_add_int_for_opt_spec(IntForOptSpec,
+                !AugCompUnit)
         ),
-        IndirectIntSpec = indirect_int2(ParseTreeInt2, ReadWhy2),
-        aug_compilation_unit_add_indirect_int2_spec(IndirectIntSpec,
-            !AugCompUnit)
+        map.foldl2(get_uses, ParseTreeInt2 ^ pti2_use_map,
+            set.init, IntUses, set.init, _ImpUses),
+        maybe_record_interface_timestamp(ModuleName, ifk_int2,
+            recomp_avail_imp_use, MaybeTimestamp, !Baggage),
+        aug_compilation_unit_maybe_add_module_version_numbers(ModuleName,
+            ParseTreeInt2 ^ pti2_maybe_version_numbers, !AugCompUnit)
     ;
-        ReadWhy2 = rwi2_opt,
-        IntForOptSpec = for_opt_int2(ParseTreeInt2, ReadWhy2),
-        aug_compilation_unit_add_int_for_opt_spec(IntForOptSpec, !AugCompUnit)
+        HaveReadInt2 = have_not_read_module(_FileName, Errors),
+        set.init(IntUses)
     ),
-    maybe_record_interface_timestamp(ModuleName, ifk_int2,
-        recomp_avail_imp_use, MaybeTimestamp, !Baggage),
-    module_baggage_add_specs_errors(Specs, Errors, !Baggage),
-    aug_compilation_unit_maybe_add_module_version_numbers(ModuleName,
-        ParseTreeInt2 ^ pti2_maybe_version_numbers, !AugCompUnit).
+    module_baggage_add_errors(Errors, !Baggage).
 
-:- pred process_module_int3(globals::in, read_why_int3::in, module_name::in,
-    parse_tree_int3::out,
+:- pred process_module_int3(io.text_output_stream::in, globals::in,
+    read_why_int3::in, module_name::in, set(module_name)::out,
     have_read_module_maps::in, have_read_module_maps::out,
     module_baggage::in, module_baggage::out,
-    aug_make_int_unit::in, aug_make_int_unit::out,
-    io::di, io::uo) is det.
+    aug_make_int_unit::in, aug_make_int_unit::out, io::di, io::uo) is det.
 
-process_module_int3(Globals, ReadWhy3, ModuleName, ParseTreeInt3,
+process_module_int3(ProgressStream, Globals, ReadWhy3, ModuleName, IntImports,
         !HaveReadModuleMaps, !Baggage, !AugMakeIntUnit, !IO) :-
     do_we_need_timestamps(!.Baggage, ReturnTimestamp),
-    maybe_read_module_int3(Globals, do_search, ModuleName, _FileName,
-        ReturnTimestamp, MaybeTimestamp, ParseTreeInt3, Specs, Errors,
-        !HaveReadModuleMaps, !IO),
-    GrabbedFile = gf_int3(ParseTreeInt3, ReadWhy3),
-    module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
+    maybe_read_module_int3(ProgressStream, Globals, do_search, ModuleName,
+        ReturnTimestamp, HaveReadInt3, !HaveReadModuleMaps, !IO),
     (
+        HaveReadInt3 = have_read_module(_FileName, MaybeTimestamp,
+            ParseTreeInt3, Errors),
+        GrabbedFile = gf_int3(ParseTreeInt3, ReadWhy3),
+        module_baggage_add_grabbed_file(ModuleName, GrabbedFile, !Baggage),
         (
-            ReadWhy3 = rwi3_direct_ancestor_import,
-            RecompAvail = recomp_avail_int_import
+            (
+                ReadWhy3 = rwi3_direct_ancestor_import,
+                RecompAvail = recomp_avail_int_import
+            ;
+                ReadWhy3 = rwi3_direct_int_import,
+                RecompAvail = recomp_avail_int_import
+            ;
+                ReadWhy3 = rwi3_direct_imp_import,
+                RecompAvail = recomp_avail_imp_import
+            ;
+                ReadWhy3 = rwi3_direct_ancestor_use,
+                RecompAvail = recomp_avail_int_use
+            ;
+                ReadWhy3 = rwi3_direct_int_use,
+                RecompAvail = recomp_avail_int_use
+            ;
+                ReadWhy3 = rwi3_direct_imp_use,
+                RecompAvail = recomp_avail_imp_use
+            ;
+                ReadWhy3 = rwi3_direct_int_use_imp_import,
+                RecompAvail = recomp_avail_int_use_imp_import
+            ),
+            DirectIntSpec = direct_int3(ParseTreeInt3, ReadWhy3),
+            aug_make_int_unit_add_direct_int3_spec(DirectIntSpec,
+                !AugMakeIntUnit)
         ;
-            ReadWhy3 = rwi3_direct_int_import,
-            RecompAvail = recomp_avail_int_import
-        ;
-            ReadWhy3 = rwi3_direct_imp_import,
-            RecompAvail = recomp_avail_imp_import
-        ;
-            ReadWhy3 = rwi3_direct_ancestor_use,
-            RecompAvail = recomp_avail_int_use
-        ;
-            ReadWhy3 = rwi3_direct_int_use,
-            RecompAvail = recomp_avail_int_use
-        ;
-            ReadWhy3 = rwi3_direct_imp_use,
-            RecompAvail = recomp_avail_imp_use
-        ;
-            ReadWhy3 = rwi3_direct_int_use_imp_import,
-            RecompAvail = recomp_avail_int_use_imp_import
+            (
+                ReadWhy3 = rwi3_indirect_int_use,
+                RecompAvail = recomp_avail_int_use
+            ;
+                ReadWhy3 = rwi3_indirect_imp_use,
+                RecompAvail = recomp_avail_imp_use
+            ),
+            IndirectIntSpec = indirect_int3(ParseTreeInt3, ReadWhy3),
+            aug_make_int_unit_add_indirect_int3_spec(IndirectIntSpec,
+                !AugMakeIntUnit)
         ),
-        DirectIntSpec = direct_int3(ParseTreeInt3, ReadWhy3),
-        aug_make_int_unit_add_direct_int3_spec(DirectIntSpec, !AugMakeIntUnit)
+        IntImportMap = ParseTreeInt3 ^ pti3_int_imports,
+        IntImportMap = int_import_context_map(IntImportMap0),
+        map.keys_as_set(IntImportMap0, IntImports),
+        maybe_record_interface_timestamp(ModuleName, ifk_int3, RecompAvail,
+            MaybeTimestamp, !Baggage)
     ;
-        (
-            ReadWhy3 = rwi3_indirect_int_use,
-            RecompAvail = recomp_avail_int_use
-        ;
-            ReadWhy3 = rwi3_indirect_imp_use,
-            RecompAvail = recomp_avail_imp_use
-        ),
-        IndirectIntSpec = indirect_int3(ParseTreeInt3, ReadWhy3),
-        aug_make_int_unit_add_indirect_int3_spec(IndirectIntSpec,
-            !AugMakeIntUnit)
+        HaveReadInt3 = have_not_read_module(_FileName, Errors),
+        set.init(IntImports)
     ),
-    maybe_record_interface_timestamp(ModuleName, ifk_int3, RecompAvail,
-        MaybeTimestamp, !Baggage),
-    module_baggage_add_specs_errors(Specs, Errors, !Baggage).
+    module_baggage_add_errors(Errors, !Baggage).
 
 %---------------------------------------------------------------------------%
 
@@ -1110,20 +1184,28 @@ module_baggage_add_grabbed_file(ModuleName, FileWhy, !Baggage) :-
     module_baggage::in, module_baggage::out) is det.
 
 module_baggage_add_specs(NewSpecs, !Baggage) :-
-    Specs0 = !.Baggage ^ mb_specs,
-    Specs = NewSpecs ++ Specs0,
-    !Baggage ^ mb_specs := Specs.
+    Errors0 = !.Baggage ^ mb_errors,
+    NonFatalErrorSpecs0 = Errors0 ^ rm_nonfatal_error_specs,
+    NonFatalErrorSpecs = NewSpecs ++ NonFatalErrorSpecs0,
+    Errors = Errors0 ^ rm_nonfatal_error_specs := NonFatalErrorSpecs,
+    !Baggage ^ mb_errors := Errors.
 
-:- pred module_baggage_add_specs_errors(
-    list(error_spec)::in, read_module_errors::in,
+:- pred module_baggage_add_errors(read_module_errors::in,
     module_baggage::in, module_baggage::out) is det.
 
-module_baggage_add_specs_errors(NewSpecs, NewErrors, !Baggage) :-
-    Specs0 = !.Baggage ^ mb_specs,
+module_baggage_add_errors(Errors1, !Baggage) :-
     Errors0 = !.Baggage ^ mb_errors,
-    Specs = NewSpecs ++ Specs0,
-    set.union(Errors0, NewErrors, Errors),
-    !Baggage ^ mb_specs := Specs,
+    Errors0 = read_module_errors(FatalErrors0, FatalErrorSpecs0,
+        NonFatalErrors0, NonFatalErrorSpecs0, WarningSpecs0),
+    Errors1 = read_module_errors(FatalErrors1, FatalErrorSpecs1,
+        NonFatalErrors1, NonFatalErrorSpecs1, WarningSpecs1),
+    FatalErrors = set.union(FatalErrors0, FatalErrors1),
+    FatalErrorSpecs = FatalErrorSpecs0 ++ FatalErrorSpecs1,
+    NonFatalErrors = set.union(NonFatalErrors0, NonFatalErrors1),
+    NonFatalErrorSpecs = NonFatalErrorSpecs0 ++ NonFatalErrorSpecs1,
+    WarningSpecs = WarningSpecs0 ++ WarningSpecs1,
+    Errors = read_module_errors(FatalErrors, FatalErrorSpecs,
+        NonFatalErrors, NonFatalErrorSpecs, WarningSpecs),
     !Baggage ^ mb_errors := Errors.
 
 %---------------------------------------------------------------------------%
@@ -1300,13 +1382,13 @@ append_one_or_more(A, B, AB) :-
     ;       abstract_section.
 
 :- type include_context
-    --->    include_context(maybe_abstract_section, term.context).
+    --->    include_context(maybe_abstract_section, term_context).
 
 :- type module_inclusion_map ==
     map(module_name, one_or_more(include_context)).
 
 :- type import_or_use_context
-    --->    import_or_use_context(import_or_use, term.context).
+    --->    import_or_use_context(import_or_use, term_context).
 
 :- type module_import_or_use_map ==
     map(module_name, one_or_more(import_or_use_context)).
@@ -1557,9 +1639,7 @@ record_includes_imports_uses_in_int_for_opt_spec(Ancestors,
 record_includes_imports_uses_in_parse_tree_int0(Ancestors,
         ParseTreeInt0, !ReadModules, !MaybeAbstractInclMap,
         !SrcIntImportUseMap, !SrcImpImportUseMap, !AncestorImportUseMap) :-
-    ParseTreeInt0 = parse_tree_int0(ModuleName, _, _,
-        _IntInclMap, _ImpInclMap, InclMap,
-        _IntImportMap, _IntUseMap, _ImpImportMap, _ImpUseMap, ImportUseMap,
+    ParseTreeInt0 = parse_tree_int0(ModuleName, _, _, InclMap, ImportUseMap,
         _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _),
     set.insert(ModuleName, !ReadModules),
     include_map_to_item_includes(InclMap, IntIncls, ImpIncls),
@@ -1570,8 +1650,8 @@ record_includes_imports_uses_in_parse_tree_int0(Ancestors,
     ( if set.contains(Ancestors, ModuleName) then
         % XXX CLEANUP This work could be done on ImportUseMap,
         % *without* constructing AllAvails.
-        import_and_or_use_map_to_item_avails(do_not_include_implicit,
-            ImportUseMap, IntAvails, ImpAvails),
+        section_import_and_or_use_map_to_item_avails(ImportUseMap,
+            IntAvails, ImpAvails),
         AllAvails = IntAvails ++ ImpAvails,
         recomp_avails_acc(AllAvails, !AncestorImportUseMap)
     else
@@ -1589,12 +1669,10 @@ record_includes_imports_uses_in_parse_tree_int0(Ancestors,
 record_includes_imports_uses_in_parse_tree_int1(Ancestors,
         ParseTreeInt1, ReadWhyInt1, !ReadModules, !InclMap,
         !SrcIntImportUseMap, !SrcImpImportUseMap, !AncestorImportUseMap) :-
-    ParseTreeInt1 = parse_tree_int1(ModuleName, _, _,
-        IntInclMap, ImpInclMap, _InclMap, _, _, _,
+    ParseTreeInt1 = parse_tree_int1(ModuleName, _, _, InclMap, _,
         _, _, _, _, _, _, _, _, _, _, _, _, _),
     set.insert(ModuleName, !ReadModules),
-    IntIncls = module_names_contexts_to_item_includes(IntInclMap),
-    ImpIncls = module_names_contexts_to_item_includes(ImpInclMap),
+    include_map_to_item_includes(InclMap, IntIncls, ImpIncls),
     (
         ( ReadWhyInt1 = rwi1_int_import
         ; ReadWhyInt1 = rwi1_imp_import
@@ -1629,9 +1707,10 @@ record_includes_imports_uses_in_parse_tree_int2(Ancestors,
         ParseTreeInt2, ReadWhyInt2, !ReadModules, !InclMap,
         !SrcIntImportUseMap, !SrcImpImportUseMap, !AncestorImportUseMap) :-
     ParseTreeInt2 = parse_tree_int2(ModuleName, _, _,
-        IntInclMap, _ParseTreeInclMap, _, _, _, _, _, _, _, _, _, _),
+        IntInclMap, _, _, _, _, _, _, _, _, _),
     set.insert(ModuleName, !ReadModules),
-    IntIncls = module_names_contexts_to_item_includes(IntInclMap),
+    InclMap = coerce(IntInclMap),
+    include_map_to_item_includes(InclMap, IntIncls, _ImpIncls),
     (
         ( ReadWhyInt2 = rwi2_int_use
         ; ReadWhyInt2 = rwi2_imp_use
@@ -1656,10 +1735,11 @@ record_includes_imports_uses_in_parse_tree_int2(Ancestors,
 record_includes_imports_uses_in_parse_tree_int3(Ancestors,
         ParseTreeInt3, MaybeAbstractSection, !ReadModules, !InclMap,
         !SrcIntImportUseMap, !SrcImpImportUseMap, !AncestorImportUseMap) :-
-    ParseTreeInt3 = parse_tree_int3(ModuleName, _,
-        IntInclMap, _ParseTreeInclMap, _, _, _, _, _, _, _, _),
+    ParseTreeInt3 = parse_tree_int3(ModuleName, _, IntInclMap,
+        _, _, _, _, _, _, _),
     set.insert(ModuleName, !ReadModules),
-    IntIncls = module_names_contexts_to_item_includes(IntInclMap),
+    IntInclMap = int_incl_context_map(IntInclMap0),
+    IntIncls = module_name_context_to_item_includes(IntInclMap0),
     record_includes_acc(MaybeAbstractSection, IntIncls, !InclMap),
     expect_not(set.contains(Ancestors, ModuleName), $pred,
         "processing the .int3 file of an ancestor").
@@ -1742,7 +1822,7 @@ recomp_avails_acc([Avail | Avails], !ImportUseMap) :-
                 mai_modules         :: set(module_name),
                 mai_max_depth       :: parent_or_ancestor,
                 mai_import_use      :: import_and_or_use,
-                mai_least_context   :: term.context
+                mai_least_context   :: term_context
             ).
 
 :- type missing_ancestor_map == map(module_name, missing_ancestor_info).
@@ -1839,7 +1919,7 @@ find_any_missing_ancestor_imports(CurrentModule, ParentOrAncestor,
 
 :- pred update_iu_and_least_context(import_or_use_context::in,
     import_and_or_use::in, import_and_or_use::out,
-    term.context::in, term.context::out) is det.
+    term_context::in, term_context::out) is det.
 
 update_iu_and_least_context(IoUC, !ImportAndOrUse, !LeastContext) :-
     IoUC = import_or_use_context(ImportOrUse, Context),
@@ -1945,7 +2025,7 @@ report_missing_ancestor(ModuleName, MissingWhere,
     Spec = error_spec($pred, severity_error, phase_parse_tree_to_hlds, Msgs),
     !:Specs = [Spec | !.Specs].
 
-:- func wrap_module_name(sym_name) = format_component.
+:- func wrap_module_name(sym_name) = format_piece.
 
 wrap_module_name(Module) = qual_sym_name(Module).
 
@@ -1974,7 +2054,7 @@ report_any_missing_includes_for_imports(ReadModules, SeenIncludes, InclMap,
     %
 :- pred report_any_missing_includes(set(module_name)::in,
     seen_includes::in, module_inclusion_map::in,
-    module_name::in, list(term.context)::in,
+    module_name::in, list(term_context)::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 report_any_missing_includes(ReadModules, SeenIncludes, InclMap,
@@ -2025,7 +2105,7 @@ report_any_missing_includes(ReadModules, SeenIncludes, InclMap,
         % For modules without parent modules, accessibility is moot.
     ).
 
-:- pred report_abstract_include(module_name::in, string::in, term.context::in,
+:- pred report_abstract_include(module_name::in, string::in, term_context::in,
     list(error_spec)::in, list(error_spec)::out) is det.
 
 report_abstract_include(ParentModule, SubModule, Context, !Specs) :-
@@ -2038,7 +2118,7 @@ report_abstract_include(ParentModule, SubModule, Context, !Specs) :-
     !:Specs = [Spec | !.Specs].
 
 :- pred report_missing_include(seen_includes::in, module_name::in, string::in,
-    term.context::in, list(error_spec)::in, list(error_spec)::out) is det.
+    term_context::in, list(error_spec)::in, list(error_spec)::out) is det.
 
 report_missing_include(SeenIncludes, ParentModule, SubModule, Context,
         !Specs) :-
@@ -2062,7 +2142,7 @@ is_non_abstract_include(IncludeContext) :-
     IncludeContext = include_context(MaybeAbstractInclude, _Context),
     MaybeAbstractInclude = non_abstract_section.
 
-:- func project_out_import_or_use(import_or_use_context) = term.context.
+:- func project_out_import_or_use(import_or_use_context) = term_context.
 
 project_out_import_or_use(import_or_use_context(_, Context)) = Context.
 
@@ -2098,141 +2178,178 @@ keep_only_unused_and_reuse_pragmas_in_parse_tree_plain_opt(
         map.init, set.init, [], [], [], [], [], [], [], [], [], [], [],
         [], [], UnusedArgs, [], [], [], [], [], [], Reuses).
 
-:- pred read_plain_opt_files(globals::in, bool::in, bool::in,
-    list(module_name)::in, set(module_name)::in,
+:- pred read_plain_opt_files(io.text_output_stream::in, globals::in,
+    bool::in, bool::in, list(module_name)::in, set(module_name)::in,
     cord(parse_tree_plain_opt)::in, cord(parse_tree_plain_opt)::out,
     set(module_name)::in, set(module_name)::out,
     cord(implicit_avail_needs)::in, cord(implicit_avail_needs)::out,
     list(error_spec)::in, list(error_spec)::out,
-    bool::in, bool::out, io::di, io::uo) is det.
+    maybe_opt_file_error::in, maybe_opt_file_error::out,
+    io::di, io::uo) is det.
 
-read_plain_opt_files(_, _, _, [], _,
-        !ParseTreePlainOptsCord, !ExplicitDeps, !ImplicitNeeds,
-        !Specs, !Error, !IO).
-read_plain_opt_files(Globals, VeryVerbose, ReadOptFilesTransitively,
-        [ModuleName | ModuleNames0], DontQueueOptModules0,
-        !ParseTreePlainOptsCord, !ExplicitDeps, !ImplicitNeeds,
-        !Specs, !Error, !IO) :-
-    read_module_plain_opt(Globals, ModuleName, FileName,
-        ParseTreePlainOpt, OptSpecs, OptError, !IO),
-    cord.snoc(ParseTreePlainOpt, !ParseTreePlainOptsCord),
-    get_explicit_and_implicit_avail_needs_in_parse_tree_plain_opt(
-        ParseTreePlainOpt, ParseTreeExplicitDeps, ParseTreeImplicitNeeds),
-    set.union(ParseTreeExplicitDeps, !ExplicitDeps),
-    cord.snoc(ParseTreeImplicitNeeds, !ImplicitNeeds),
-    % We could add OptSpecs to !Specs, but with the option combination
-    % --intermodule-analysis --no-intermodule-optimization, not finding
-    % a .opt file for ModuleName is not an error, and update_opt_error_status
-    % knows that (it treats it as a warning). However, the error_spec
-    % reporting the failure to open the .opt file *will* have severity error,
-    % put there by read_error_msg in parse_module.m. Until read_error_msg
-    % is made configurable in severity, we must not add OptSpecs to !Specs.
-    % If we do, the hard_coded/intermod_unused_args test case will fail.
-    update_opt_error_status(Globals, warn_missing_opt_files, FileName,
-        OptSpecs, OptError, !Specs, !Error),
-    pre_hlds_maybe_write_out_errors(VeryVerbose, Globals, !Specs, !IO),
+read_plain_opt_files(_, _, _, _, [], _, !ParseTreePlainOptsCord,
+        !ExplicitDeps, !ImplicitNeeds, !Specs, !OptError, !IO).
+read_plain_opt_files(ProgressStream, Globals, VeryVerbose,
+        ReadOptFilesTransitively, [ModuleName | ModuleNames0],
+        DontQueueOptModules0, !ParseTreePlainOptsCord,
+        !ExplicitDeps, !ImplicitNeeds, !Specs, !OptError, !IO) :-
+    read_module_plain_opt(ProgressStream, Globals, ModuleName,
+        HaveReadPlainOpt, !IO),
     (
-        ReadOptFilesTransitively = yes,
-        compute_implicit_avail_needs(Globals, ParseTreeImplicitNeeds,
-            ParseTreeImplicitDeps),
-        set.union(ParseTreeExplicitDeps, ParseTreeImplicitDeps, ParseTreeDeps),
-        set.difference(ParseTreeDeps, DontQueueOptModules0, NewDeps),
-        ModuleNames1 = set.to_sorted_list(NewDeps) ++ ModuleNames0,
-        set.union(NewDeps, DontQueueOptModules0, DontQueueOptModules1)
+        HaveReadPlainOpt = have_read_module(_FileName, _MaybeTimestamp,
+            ParseTreePlainOpt, ModuleErrors),
+        cord.snoc(ParseTreePlainOpt, !ParseTreePlainOptsCord),
+        update_opt_error_status_on_success(ModuleErrors, !Specs, !OptError),
+
+        get_explicit_and_implicit_avail_needs_in_parse_tree_plain_opt(
+            ParseTreePlainOpt, ParseTreeExplicitDeps, ParseTreeImplicitNeeds),
+        set.union(ParseTreeExplicitDeps, !ExplicitDeps),
+        cord.snoc(ParseTreeImplicitNeeds, !ImplicitNeeds),
+        (
+            ReadOptFilesTransitively = yes,
+            compute_implicit_avail_needs(Globals, ParseTreeImplicitNeeds,
+                ParseTreeImplicitDeps),
+            set.union(ParseTreeExplicitDeps, ParseTreeImplicitDeps,
+                ParseTreeDeps),
+            set.difference(ParseTreeDeps, DontQueueOptModules0, NewDeps),
+            ModuleNames1 = set.to_sorted_list(NewDeps) ++ ModuleNames0,
+            set.union(NewDeps, DontQueueOptModules0, DontQueueOptModules1)
+        ;
+            ReadOptFilesTransitively = no,
+            ModuleNames1 = ModuleNames0,
+            DontQueueOptModules1 = DontQueueOptModules0
+        )
     ;
-        ReadOptFilesTransitively = no,
+        HaveReadPlainOpt = have_not_read_module(FileName, _ModuleErrors),
+        update_opt_error_status_on_failure(Globals, warn_missing_opt_files,
+            FileName, !Specs, !OptError),
         ModuleNames1 = ModuleNames0,
         DontQueueOptModules1 = DontQueueOptModules0
     ),
-    read_plain_opt_files(Globals, VeryVerbose, ReadOptFilesTransitively,
-        ModuleNames1, DontQueueOptModules1,
+
+    pre_hlds_maybe_write_out_errors(ProgressStream, VeryVerbose, Globals,
+        !Specs, !IO),
+    read_plain_opt_files(ProgressStream, Globals, VeryVerbose,
+        ReadOptFilesTransitively, ModuleNames1, DontQueueOptModules1,
         !ParseTreePlainOptsCord, !ExplicitDeps, !ImplicitNeeds,
-        !Specs, !Error, !IO).
+        !Specs, !OptError, !IO).
 
 %---------------------------------------------------------------------------%
 
-:- pred read_trans_opt_files(globals::in, bool::in, list(module_name)::in,
+:- pred read_trans_opt_files(io.text_output_stream::in, globals::in,
+    bool::in, list(module_name)::in,
     cord(parse_tree_trans_opt)::in, cord(parse_tree_trans_opt)::out,
-    list(error_spec)::in, list(error_spec)::out, bool::in, bool::out,
+    list(error_spec)::in, list(error_spec)::out,
+    maybe_opt_file_error::in, maybe_opt_file_error::out,
     io::di, io::uo) is det.
 
-read_trans_opt_files(_, _, [], !ParseTreeTransOpts, !Specs, !Error, !IO).
-read_trans_opt_files(Globals, VeryVerbose, [ModuleName | ModuleNames],
-        !ParseTreeTransOptsCord, !Specs, !Error, !IO) :-
-    read_module_trans_opt(Globals, ModuleName, FileName,
-        ParseTreeTransOpt, TransOptSpecs, TransOptError, !IO),
+read_trans_opt_files(_, _, _, [], !ParseTreeTransOpts, !Specs, !Error, !IO).
+read_trans_opt_files(ProgressStream, Globals, VeryVerbose,
+        [ModuleName | ModuleNames], !ParseTreeTransOptsCord,
+        !Specs, !OptError, !IO) :-
+    read_module_trans_opt(ProgressStream, Globals, ModuleName,
+        HaveReadTransOpt, !IO),
+    (
+        HaveReadTransOpt = have_read_module(_FileName, _MaybeTimestamp,
+            ParseTreeTransOpt, ModuleErrors),
+        cord.snoc(ParseTreeTransOpt, !ParseTreeTransOptsCord),
+        update_opt_error_status_on_success(ModuleErrors, !Specs, !OptError)
+    ;
+        HaveReadTransOpt = have_not_read_module(FileName, _Errors),
+        update_opt_error_status_on_failure(Globals,
+            warn_missing_trans_opt_files, FileName, !Specs, !OptError)
+    ),
+    pre_hlds_maybe_write_out_errors(ProgressStream, VeryVerbose, Globals,
+        !Specs, !IO),
 
-    cord.snoc(ParseTreeTransOpt, !ParseTreeTransOptsCord),
-    !:Specs = TransOptSpecs ++ !.Specs,
-    update_opt_error_status(Globals, warn_missing_trans_opt_files, FileName,
-        TransOptSpecs, TransOptError, !Specs, !Error),
-    pre_hlds_maybe_write_out_errors(VeryVerbose, Globals, !Specs, !IO),
-
-    read_trans_opt_files(Globals, VeryVerbose, ModuleNames,
-        !ParseTreeTransOptsCord, !Specs, !Error, !IO).
+    read_trans_opt_files(ProgressStream, Globals, VeryVerbose,
+        ModuleNames, !ParseTreeTransOptsCord, !Specs, !OptError, !IO).
 
 %---------------------------------------------------------------------------%
 
-:- type opt_file_type
-    --->    opt_file
-    ;       trans_opt_file.
-
-    % update_opt_error_status(Globals, WarnOption, FileName,
-    %   ModuleSpecs, ModuleErrors, !Specs, !Error):
+    % update_opt_error_status_on_failure(Globals, WarnOption, FileName,
+    %   !Specs, !Error):
     %
-    % Work out whether any fatal errors have occurred while reading
-    % `.opt' or `.trans_opt' files, updating !Errors if there were
-    % fatal errors.
+    % Process the failure of opening a .opt or .trans_opt file.
+    %
+    % Our caller does not pass us the error message for that failure,
+    % since we always construct our own error message.
+    % XXX This may not be the best course of action.
     %
     % A missing `.opt' or `.trans_opt' file is only a fatal error if
     % `--halt-at-warn' was passed the compiler together with
     % `--warn-missing-opt-files' or `--warn-missing-trans-opt-files'
     % respectively.
     %
-    % On the other hand, we consider syntax and other errors in these files
-    % to be always fatal.
-    %
-:- pred update_opt_error_status(globals::in, option::in, string::in,
-    list(error_spec)::in, read_module_errors::in,
-    list(error_spec)::in, list(error_spec)::out, bool::in, bool::out) is det.
+:- pred update_opt_error_status_on_failure(globals::in, option::in,
+    file_name::in, list(error_spec)::in, list(error_spec)::out,
+    maybe_opt_file_error::in, maybe_opt_file_error::out) is det.
 
-update_opt_error_status(Globals, WarnOption, FileName,
-        ModuleSpecs, ModuleErrors, !Specs, !Error) :-
-    ( if set.is_empty(ModuleErrors) then
-        % ModuleSpecs contains no errors. I (zs) don't know whether it could
-        % contain any warnings or informational messages, but if it could,
-        % we should add those error_specs to !Specs. Not doing so preserves
-        % old behavior.
-        true
-    else if set.contains(ModuleErrors, rme_could_not_open_file) then
-        % We get here if we couldn't find and/or open the file.
-        % ModuleSpecs will already contain an error_severity error_spec
-        % about that, with more details than the message we generate below,
-        % but the test case hard_coded/intermod_unused_args insists on
-        % there being no error, only a warning, and on the text below.
-        % That is why we do not add ModuleSpecs to !Specs here.
+update_opt_error_status_on_failure(Globals, WarnOption, FileName,
+        !Specs, !Error) :-
+    % We get here if we couldn't find and/or open the file.
+    % ModuleErrors ^ rm_fatal_error_specs will already contain
+    % an error_severity error_spec about that, with more details
+    % than the message we generate below, but the test case
+    % hard_coded/intermod_unused_args insists on there being no error,
+    % only a warning with the text below. That is why we do not add
+    % any error_specs from ModuleErrors to !Specs here.
+    %
+    % I (zs) don't know whether we should add a version of ModuleSpecs
+    % with downgraded severity to !Specs instead of the Spec we generate
+    % below.
+    globals.lookup_bool_option(Globals, WarnOption, WarnOptionValue),
+    (
+        WarnOptionValue = no
+    ;
+        WarnOptionValue = yes,
+        Pieces = [words("Warning: cannot open"), quote(FileName),
+            suffix("."), nl],
+        Spec = simplest_no_context_spec($pred, severity_warning,
+            phase_read_files, Pieces),
+        !:Specs = [Spec | !.Specs]
+    ).
+    % NOTE: We do NOT update !Error, since a missing optimization
+    % interface file is not necessarily an error.
+
+    % update_opt_error_status_on_success(ModuleErrors, !Specs, !Error):
+    %
+    % Work out whether any errors have occurred while reading
+    % a .opt or .trans_opt file, and update !Error accordingly.
+    % Note that we can ignore *not finding* a .opt or .trans_opt file,
+    % a situation handled by update_opt_error_status_on_failure,
+    % finding any error, whether syntax or semantic, inside one of these files
+    % that does exist is always fatal. This is because it indicates either
+    % that the Mercury compiler invocation that created it had a bug,
+    % or that the files been tampered with later.
+    %
+:- pred update_opt_error_status_on_success(read_module_errors::in,
+    list(error_spec)::in, list(error_spec)::out,
+    maybe_opt_file_error::in, maybe_opt_file_error::out) is det.
+
+update_opt_error_status_on_success(ModuleErrors, !Specs, !Error) :-
+    FatalErrors = ModuleErrors ^ rm_fatal_errors,
+    NonFatalErrors0 = ModuleErrors ^ rm_nonfatal_errors,
+    set.delete(rme_nec, NonFatalErrors0, NonFatalErrors),
+    ( if
+        set.is_empty(FatalErrors),
+        set.is_empty(NonFatalErrors)
+    then
+        % ModuleSpecs contains no errors we have traditionally recorded
+        % as a separately classified error. It could contain
         %
-        % I (zs) don't know whether we should add a version of ModuleSpecs
-        % with downgraded severity to !Specs instead of the Spec we generate
-        % below.
-        globals.lookup_bool_option(Globals, WarnOption, WarnOptionValue),
-        (
-            WarnOptionValue = no
-        ;
-            WarnOptionValue = yes,
-            Pieces = [words("Warning: cannot open"), quote(FileName),
-                suffix("."), nl],
-            Spec = simplest_no_context_spec($pred, severity_warning,
-                phase_read_files, Pieces),
-            !:Specs = [Spec | !.Specs]
-        )
-        % NOTE: We do NOT update !Error, since a missing optimization
-        % interface file is not necessarily an error.
+        % - errors we have generated error messages for but for which
+        %   we have not recorded an error category (these are the errors
+        %   whose category we now record as Not Elsewhere Classified,
+        %   or rme_nec), and
+        %
+        % - warnings.
+        %
+        % Not adding either of those to !Specs preserves old behavior.
+        true
     else
-        % ModuleErrors may or may not contain fatal errors other than
-        % rme_could_not_open_file, but we do not care.
-        !:Specs = ModuleSpecs ++ !.Specs,
-        !:Error = yes
+        !:Specs = get_read_module_specs(ModuleErrors) ++ !.Specs,
+        !:Error = opt_file_error
     ).
 
 %---------------------------------------------------------------------------%
